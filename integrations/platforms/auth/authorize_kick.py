@@ -11,7 +11,7 @@ async def authorize():
         client_id=os.getenv("KICK_CLIENT_ID", ""),
         client_secret=os.getenv("KICK_CLIENT_SECRET", ""),
         redirect_uri=os.getenv("KICK_REDIRECT_URI", "http://localhost:8080/callback"),
-        db_path="kick_tokens.db"
+        db_path="../../../kick_tokens.db"
     )
 
     """

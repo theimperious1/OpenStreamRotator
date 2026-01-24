@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import os
 from datetime import datetime
 from typing import List, Dict, Optional
 import logging
@@ -8,7 +9,12 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
-    def __init__(self, db_path: str = "stream_data.db"):
+    def __init__(self, db_path: str = None):
+        # Use core directory if not provided
+        if db_path is None:
+            core_dir = os.path.dirname(os.path.abspath(__file__))
+            db_path = os.path.join(core_dir, "stream_data.db")
+        
         self.db_path = db_path
         self.conn = None
         self.init_database()

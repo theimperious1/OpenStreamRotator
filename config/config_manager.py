@@ -6,19 +6,21 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 class ConfigManager:
-    def __init__(self, config_path: str = "playlists.json",
-                 override_path: str = "manual_override.json"):
-        self.config_path = config_path
-        self.override_path = override_path
+    def __init__(self, config_path: str = None,
+                 override_path: str = None):
+        # Use config directory relative paths if not provided
+        config_dir = os.path.dirname(os.path.abspath(__file__))
+        self.config_path = config_path or os.path.join(config_dir, "playlists.json")
+        self.override_path = override_path or os.path.join(config_dir, "manual_override.json")
         self.last_config_mtime = 0
         self.last_override_mtime = 0
 
         # Create default config if doesn't exist
-        if not os.path.exists(config_path):
+        if not os.path.exists(self.config_path):
             self.create_default_config()
 
         # Create default override if doesn't exist
-        if not os.path.exists(override_path):
+        if not os.path.exists(self.override_path):
             self.create_default_override()
 
     def create_default_config(self):
