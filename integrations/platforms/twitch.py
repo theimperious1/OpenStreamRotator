@@ -75,7 +75,7 @@ class TwitchUpdater(StreamPlatform):
             self.log_error("Update category", e)
             return False
 
-    def _get_game_id(self, game_name: str) -> Optional[str]:
+    async def _get_game_id(self, game_name: str) -> Optional[str]:
         """Get Twitch game ID from game name."""
         url = f"{self.base_url}/games"
         params = {"name": game_name}
@@ -97,7 +97,7 @@ class TwitchUpdater(StreamPlatform):
             self.log_error("Get game ID", e)
             return None
 
-    def update_stream_info(self, title: str, category: Optional[str] = None) -> bool:
+    async def update_stream_info(self, title: str, category: Optional[str] = None) -> bool:
         """
         Update both title and category in one API call (more efficient).
         """
@@ -107,7 +107,7 @@ class TwitchUpdater(StreamPlatform):
 
         # Add game_id if category specified
         if category:
-            game_id = self._get_game_id(category)
+            game_id = await self._get_game_id(category)
             if game_id:
                 data["game_id"] = game_id
 

@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseManager:
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: Optional[str] = None):
         # Use core directory if not provided
         if db_path is None:
             core_dir = os.path.dirname(os.path.abspath(__file__))
@@ -99,7 +99,7 @@ class DatabaseManager:
         self.close()
         logger.info("Database initialized successfully")
 
-    def add_playlist(self, name: str, youtube_url: str, enabled: bool = True, priority: int = 1) -> int:
+    def add_playlist(self, name: str, youtube_url: str, enabled: bool = True, priority: int = 1) -> Optional[int]:
         """Add a new playlist to the database."""
         conn = self.connect()
         cursor = conn.cursor()
@@ -151,8 +151,8 @@ class DatabaseManager:
         conn.commit()
         self.close()
 
-    def add_video(self, playlist_id: int, filename: str, title: str = None,
-                  file_size_mb: int = None) -> int:
+    def add_video(self, playlist_id: int, filename: str, title: Optional[str] = None,
+                  file_size_mb: Optional[int] = None) -> Optional[int]:
         """Add a video to the database."""
         conn = self.connect()
         cursor = conn.cursor()
@@ -176,7 +176,7 @@ class DatabaseManager:
             self.close()
 
     def create_rotation_session(self, playlists_selected: List[int],
-                                stream_title: str) -> int:
+                                stream_title: str) -> Optional[int]:
         """Create a new rotation session."""
         conn = self.connect()
         cursor = conn.cursor()

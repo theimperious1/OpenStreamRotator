@@ -15,8 +15,8 @@ class KickUpdater(StreamPlatform):
 
     def __init__(self, client_id: str, client_secret: str, channel_id: str,
                  redirect_uri: str = "http://localhost:8080/callback",
-                 scopes: list[str] = None,
-                 db_path: str = None):
+                 scopes: Optional[list[str]] = None,
+                 db_path: Optional[str] = None):
         super().__init__("Kick")
 
         self.client_id = client_id
@@ -129,7 +129,7 @@ class KickUpdater(StreamPlatform):
                 logger.warning(f"[{self.platform_name}] Using fallback category ID: {category_id}")
 
         # Always include category_id
-        await self.api.update_channel(
+        await self.api.update_channel(  # type: ignore
             channel_id=self.channel_id,
             category_id=category_id,
             **kwargs
@@ -173,7 +173,7 @@ class KickUpdater(StreamPlatform):
         await self._ensure_initialized()
         try:
             # get_users() returns user/channel info including current category
-            user_data = await self.api.get_users(channel_id=self.channel_id)
+            user_data = await self.api.get_users(channel_id=self.channel_id)  # type: ignore
             # Depending on library response structure — adjust key as needed
             current_category = user_data.get("category_id") or user_data.get("channel", {}).get("category_id")
             if current_category:
@@ -197,16 +197,16 @@ class KickUpdater(StreamPlatform):
             self.log_error("Update category", e)
             return False
 
-    def update_stream_info(self, title: str, category: Optional[str] = None) -> bool:
+    async def update_stream_info(self, title: str, category: Optional[str] = None) -> bool:
         try:
             params = {"stream_title": title}
 
             if category:
-                category_id = self._run_async(self._get_category_id(category))
+                category_id = await self._get_category_id(category)
                 if category_id:
                     params["category_id"] = category_id  # This will override the current one
 
-            self._run_async(self._update_channel(**params))
+            await self._update_channel(**params)
             self.log_success(
                 "Updated stream info",
                 f"Title: {title}, Category: {category or 'N/A'}"

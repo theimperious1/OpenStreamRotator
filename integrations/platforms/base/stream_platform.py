@@ -25,12 +25,12 @@ class StreamPlatform(ABC):
         """Update access token when refreshed. Override in subclasses if needed."""
         pass
 
-    def update_stream_info(self, title: str, category: Optional[str] = None) -> bool:
+    async def update_stream_info(self, title: str, category: Optional[str] = None) -> bool:
         """
         Update both title and category in one call.
         Platforms can override this for more efficient API usage.
         """
-        success = self.update_title(title)
+        success = await self.update_title(title)
 
         if category:
             category_success = self.update_category(category)

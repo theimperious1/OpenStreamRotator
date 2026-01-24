@@ -25,7 +25,7 @@ class OBSController:
         """Get the current active scene."""
         try:
             response = self.obs_client.get_current_program_scene()
-            return response.current_program_scene_name
+            return response.current_program_scene_name  # type: ignore
         except Exception as e:
             logger.error(f"Failed to get current scene: {e}")
             return None
@@ -88,7 +88,7 @@ class OBSController:
         """Verify that required scenes exist in OBS."""
         try:
             scenes = self.obs_client.get_scene_list()
-            scene_names = [s['sceneName'] for s in scenes.scenes]
+            scene_names = [s['sceneName'] for s in scenes.scenes]  # type: ignore
 
             missing = [scene for scene in required_scenes if scene not in scene_names]
 

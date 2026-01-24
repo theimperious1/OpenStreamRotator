@@ -277,6 +277,10 @@ class AutomationController:
 
     async def execute_content_switch(self):
         """Execute the content switch operation."""
+        if not self.obs_controller:
+            logger.error("OBS controller not initialized")
+            return False
+        
         logger.info("Executing content switch...")
         self.is_rotating = True
 
@@ -310,6 +314,7 @@ class AutomationController:
 
         # Get new stream title from current session
         session = self.db.get_current_session()
+        stream_title = "Unknown"
         if session:
             stream_title = session['stream_title']
             await self.update_stream_titles(stream_title)
@@ -327,7 +332,7 @@ class AutomationController:
 
         self.send_discord_notification(
             "Content Rotated",
-            f"New content is now playing\nTitle: {stream_title if session else 'Unknown'}",
+            f"New content is now playing\nTitle: {stream_title}",
             color=0x00FF00
         )
 
@@ -335,7 +340,7 @@ class AutomationController:
         logger.info("Content switch completed successfully")
         return True
 
-    def check_for_rotation(self):
+    async def check_for_rotation(self):
         """Check if it's time to rotate content."""
         if self.is_rotating:
             return
@@ -350,7 +355,7 @@ class AutomationController:
 
             # Start new rotation
             if self.start_rotation_session():
-                self.execute_content_switch()
+                await self.execute_content_switch()
 
     async def check_manual_override(self):
         """Check for manual override requests."""
@@ -398,6 +403,10 @@ class AutomationController:
             return
 
         # Verify required scenes
+        if not self.obs_controller:
+            logger.error("OBS controller not initialized")
+            return
+        
         required_scenes = [SCENE_LIVE, SCENE_OFFLINE, SCENE_CONTENT_SWITCH]
         if not self.obs_controller.verify_scenes(required_scenes):
             logger.error("Missing required OBS scenes")
@@ -437,13 +446,14 @@ class AutomationController:
 
                 # Check Asmongold stream status (only if Twitch enabled)
                 is_live = False
-                if ENABLE_TWITCH:
+                if ENABLE_TWITCH and self.twitch_token:
                     is_live = self.is_stream_live(self.twitch_token, "zackrawrr")
 
                 if is_live and self.last_stream_status != "live":
                     logger.info("Asmongold is LIVE — pausing 24/7 stream")
                     self.update_playback_time()
-                    self.obs_controller.switch_scene(SCENE_LIVE)
+                    if self.obs_controller:
+                        self.obs_controller.switch_scene(SCENE_LIVE)
                     self.last_stream_status = "live"
                     self.playback_start_time = None
 
@@ -455,7 +465,8 @@ class AutomationController:
 
                 elif not is_live and self.last_stream_status != "offline":
                     logger.info("Asmongold is OFFLINE — resuming 24/7 stream")
-                    self.obs_controller.switch_scene(SCENE_OFFLINE)
+                    if self.obs_controller:
+                        self.obs_controller.switch_scene(SCENE_OFFLINE)
                     self.last_stream_status = "offline"
                     self.playback_start_time = time.time()
 
@@ -470,7 +481,7 @@ class AutomationController:
                     self.update_playback_time()
 
                 # Check for rotation
-                self.check_for_rotation()
+                await self.check_for_rotation()
 
                 # Check for manual override
                 await self.check_manual_override()

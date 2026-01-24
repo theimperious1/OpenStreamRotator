@@ -6,8 +6,8 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 class ConfigManager:
-    def __init__(self, config_path: str = None,
-                 override_path: str = None):
+    def __init__(self, config_path: Optional[str] = None,
+                 override_path: Optional[str] = None):
         # Use config directory relative paths if not provided
         config_dir = os.path.dirname(os.path.abspath(__file__))
         self.config_path = config_path or os.path.join(config_dir, "playlists.json")

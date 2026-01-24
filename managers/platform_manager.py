@@ -82,6 +82,6 @@ class PlatformManager:
         for platform in self.platforms:
             if hasattr(platform, 'close'):
                 try:
-                    platform.close()
+                    platform.close()  # type: ignore
                 except Exception as e:
                     logger.error(f"Error closing {platform.platform_name}: {e}")
