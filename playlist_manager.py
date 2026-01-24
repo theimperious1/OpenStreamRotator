@@ -118,7 +118,6 @@ class PlaylistManager:
             "--fragment-retries", "10",
             "--ignore-errors",
             "--geo-bypass",
-            "--youtube-skip-dash-manifest",
             "-o", f"{output_folder}/%(playlist)s_%(playlist_index)s_%(title)s.%(ext)s",
             playlist_url
         ]

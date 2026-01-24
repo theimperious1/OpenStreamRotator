@@ -50,7 +50,7 @@ TWITCH_BROADCASTER_ID = os.getenv("TWITCH_BROADCASTER_ID", "")
 KICK_CLIENT_ID = os.getenv("KICK_CLIENT_ID", "")
 KICK_CLIENT_SECRET = os.getenv("KICK_CLIENT_SECRET", "")
 KICK_CHANNEL_ID = os.getenv("KICK_CHANNEL_ID", "")
-KICK_REDIRECT_URI = os.getenv("KICK_REDIRECT_URI", "https://localhost")
+KICK_REDIRECT_URI = os.getenv("KICK_REDIRECT_URI", "http://localhost:8080/callback")
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
@@ -78,17 +78,15 @@ class AutomationController:
 
         self.last_stream_status = None
         self.is_rotating = False
+        self.shutdown_event = False
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
 
     def signal_handler(self, sig, frame):
         """Handle shutdown signals gracefully."""
-        logger.info("Shutdown signal received. Cleaning up...")
-        if self.current_session_id:
-            self.db.end_session(self.current_session_id)
-        self.platform_manager.cleanup()
-        sys.exit(0)
+        logger.info("Shutdown signal received. Setting shutdown flag...")
+        self.shutdown_event = True
 
     def connect_obs(self) -> bool:
         """Connect to OBS WebSocket."""
@@ -372,6 +370,10 @@ class AutomationController:
             if override and override.get('trigger_now', False):
                 logger.info("Manual override triggered")
 
+                # Sync config to ensure new playlists are in database
+                config_playlists = self.config_manager.get_playlists()
+                self.db.sync_playlists_from_config(config_playlists)
+
                 selected = override.get('selected_playlists', [])
 
                 # End current session
@@ -428,7 +430,11 @@ class AutomationController:
         else:
             self.current_session_id = session['id']
             self.total_playback_seconds = session.get('playback_seconds', 0)
+            stream_title = session.get('stream_title')
             logger.info(f"Resuming session {self.current_session_id}, playback: {self.total_playback_seconds}s")
+            # Update stream title to match what was previously playing
+            if stream_title:
+                await self.update_stream_titles(stream_title)
 
         # Main loop
         while True:
@@ -485,6 +491,19 @@ class AutomationController:
                     logger.info("Config file changed, syncing...")
                     config_playlists = self.config_manager.get_playlists()
                     self.db.sync_playlists_from_config(config_playlists)
+
+                # Check for shutdown signal
+                if self.shutdown_event:
+                    logger.info("Shutdown event detected, performing cleanup...")
+                    if self.current_session_id:
+                        self.db.update_session_playback(self.current_session_id, self.total_playback_seconds)
+                        self.db.end_session(self.current_session_id)
+                    self.platform_manager.cleanup()
+                    if self.obs_client:
+                        self.obs_client.disconnect()
+                    self.db.close()
+                    logger.info("Cleanup complete, exiting...")
+                    break
 
             except Exception as e:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
