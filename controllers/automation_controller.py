@@ -456,7 +456,7 @@ class AutomationController:
                 # Check Asmongold stream status (if we have Twitch credentials)
                 is_live = False
                 if self.twitch_token:
-                    is_live = self.is_stream_live(self.twitch_token, "zackrawrr")
+                    is_live = self.is_stream_live(self.twitch_token, os.getenv("TARGET_TWITCH_STREAMER", "zackrawrr"))
 
                 if is_live and self.last_stream_status != "live":
                     logger.info("Asmongold is LIVE — pausing 24/7 stream")
