@@ -1,8 +1,9 @@
 import asyncio
-import json
 import logging
 import os
+import re
 from typing import Optional
+import aiohttp
 from integrations.platforms.base.stream_platform import StreamPlatform
 
 logger = logging.getLogger(__name__)
@@ -70,8 +71,6 @@ class KickUpdater(StreamPlatform):
             asyncio.create_task(self.api.start_token_refresh())
 
             # Test authentication with a call that REQUIRES auth
-            # (get_categories is public → won't trigger auth error properly)
-            # Instead, use get_channel (requires channel:read scope)
             try:
                 await self.api.get_users(channel_id=self.channel_id)
                 logger.info(f"[{self.platform_name}] Already authenticated (tokens valid) - channel info loaded")
@@ -149,9 +148,49 @@ class KickUpdater(StreamPlatform):
             return False
 
     async def _get_category_id(self, category_name: str) -> Optional[str]:
-        """Get category ID from Kick API (placeholder for future implementation)."""
-        # TODO: Implement category lookup via Kick API
-        return None
+        """Get subcategory ID from Kick API."""
+        try:
+            logger.info(f"[{self.platform_name}] Searching for subcategory: {category_name}")
+            
+            # Use Kick private API endpoint to search for subcategory
+            url = f"https://api.kick.com/private/v1/categories/{category_name.lower()}"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status != 200:
+                        logger.error(f"[{self.platform_name}] Failed to fetch categories: HTTP {response.status}")
+                        return None
+                    
+                    data = await response.json()
+                    
+                    # Response structure: {"data": {"category": {...}}}
+                    category_data = data.get("data", {}).get("category", {})
+                    
+                    if not isinstance(category_data, dict):
+                        logger.warning(f"[{self.platform_name}] No category found for: {category_name}")
+                        return None
+                    
+                    # Extract the numeric subcategory ID from the image_url
+                    # Format: https://files.kick.com/images/subcategories/11997/banner/...
+                    image_url = category_data.get("image_url", "")
+                    if image_url:
+                        # Parse out the numeric ID
+                        match = re.search(r'/subcategories/(\d+)/', image_url)
+                        if match:
+                            subcategory_id = match.group(1)
+                            cat_name = category_data.get("name", "")
+                            logger.info(f"[{self.platform_name}] Found subcategory: {cat_name} -> {subcategory_id}")
+                            return subcategory_id
+                    
+                    logger.warning(f"[{self.platform_name}] Could not extract subcategory ID from image_url: {image_url}")
+                    return None
+                    
+        except asyncio.TimeoutError:
+            logger.error(f"[{self.platform_name}] Timeout fetching categories from Kick API")
+            return None
+        except Exception as e:
+            self.log_error("Get category ID", e)
+            return None
 
     async def _get_current_category_id(self) -> Optional[str]:
         """Fetch the current category ID for the channel (requires auth)."""

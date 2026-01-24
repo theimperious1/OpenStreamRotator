@@ -135,6 +135,19 @@ class DatabaseManager:
         self.close()
         return playlists
 
+    def get_playlist(self, playlist_id: int) -> Optional[Dict]:
+        """Get a specific playlist by ID."""
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM playlists WHERE id = ?", (playlist_id,))
+        row = cursor.fetchone()
+        self.close()
+
+        if row:
+            return dict(row)
+        return None
+        
     def update_playlist_played(self, playlist_id: int):
         """Update playlist's last_played timestamp and increment play_count."""
         conn = self.connect()

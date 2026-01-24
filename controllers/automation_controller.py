@@ -4,6 +4,8 @@ import obsws_python as obs
 import logging
 import os
 import signal
+import json
+from typing import Optional
 from dotenv import load_dotenv
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
@@ -224,6 +226,18 @@ class AutomationController:
                     color=0xFF0000
                 )
 
+    async def update_stream_info(self, title: str, category: Optional[str] = None):
+        """Update stream info (title and category) on all enabled platforms."""
+        results = await self.platform_manager.update_stream_info_all(title, category)
+
+        for platform, success in results.items():
+            if not success:
+                self.send_discord_notification(
+                    f"{platform} Stream Update Failed",
+                    f"Failed to update stream info on {platform}",
+                    color=0xFF0000
+                )
+
     def start_rotation_session(self, manual_playlists=None):
         """Start a new rotation session."""
         logger.info("Starting new rotation session...")
@@ -318,13 +332,29 @@ class AutomationController:
         # Update VLC source in OBS
         self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, current_folder)
 
-        # Get new stream title from current session
+        # Get new stream title and category from current session
         session = self.db.get_current_session()
         stream_title = "Unknown"
+        category = None
+        
         if session:
             stream_title = session['stream_title']
-            await self.update_stream_titles(stream_title)
-            logger.info(f"Updated stream title: {stream_title}")
+            
+            # Get the current playlists to find the category
+            playlists_selected = session.get('playlists_selected', '')
+            if playlists_selected:
+                try:
+                    playlist_ids = json.loads(playlists_selected)
+                    playlists = self.playlist_manager.get_playlists_by_ids(playlist_ids)
+                    if playlists and len(playlists) > 0:
+                        # Use the first playlist's category (could be extended to merge categories later)
+                        category = playlists[0].get('category')
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.warning(f"Could not parse playlists_selected: {e}")
+            
+            # Update stream info with title and category
+            await self.update_stream_info(stream_title, category)
+            logger.info(f"Updated stream: title='{stream_title}', category='{category}'")
 
         # Switch back to appropriate scene
         if self.last_stream_status == "live":

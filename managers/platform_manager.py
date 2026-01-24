@@ -62,12 +62,12 @@ class PlatformManager:
             results[platform.platform_name] = platform.update_category(category)
         return results
 
-    async def update_stream_info_all(self, title: str) -> dict[str, bool]:
-            """Update stream title on all enabled platforms."""
-            results = {}
-            for platform in self.platforms:
-                results[platform.platform_name] = await platform.update_stream_info(title)
-            return results
+    async def update_stream_info_all(self, title: str, category: Optional[str] = None) -> dict[str, bool]:
+         """Update stream title and category on all enabled platforms."""
+         results = {}
+         for platform in self.platforms:
+             results[platform.platform_name] = await platform.update_stream_info(title, category)
+         return results
 
     def is_platform_enabled(self, platform_name: str) -> bool:
         """Check if a platform is enabled."""

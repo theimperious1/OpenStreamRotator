@@ -16,6 +16,31 @@ class PlaylistManager:
         self.db = db
         self.config = config
 
+    def get_playlists_by_ids(self, playlist_ids: List[int]) -> List[Dict]:
+        """Get full playlist data from config by their database IDs.
+        
+        Note: This retrieves the config metadata (including category) for playlists
+        by looking up their names from the database.
+        """
+        config_playlists = self.config.get_playlists()
+        
+        # Get playlist names from database by their IDs
+        playlist_names = []
+        for pid in playlist_ids:
+            playlist = self.db.get_playlist(pid)
+            if playlist:
+                playlist_names.append(playlist.get('name'))
+        
+        # Find matching playlists in config
+        result = []
+        for name in playlist_names:
+            for p in config_playlists:
+                if p.get('name') == name:
+                    result.append(p)
+                    break
+        
+        return result
+    
     def select_playlists_for_rotation(self, manual_selection: Optional[List[str]] = None) -> List[Dict]:
         """
         Select playlists for the next rotation.

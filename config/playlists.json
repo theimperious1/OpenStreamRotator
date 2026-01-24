@@ -4,7 +4,8 @@
       "name": "Cat videos",
       "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyEKFKMuMWtiCWJGjwYsblck",
       "enabled": true,
-      "priority": 1
+      "priority": 1,
+      "category": "Hytale"
     }
   ],
   "settings": {
