@@ -21,6 +21,10 @@ class StreamPlatform(ABC):
         """Update stream category/game on the platform."""
         pass
 
+    def update_token(self, new_token: str) -> None:
+        """Update access token when refreshed. Override in subclasses if needed."""
+        pass
+
     def update_stream_info(self, title: str, category: Optional[str] = None) -> bool:
         """
         Update both title and category in one call.

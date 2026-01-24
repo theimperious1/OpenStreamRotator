@@ -518,5 +518,4 @@ class AutomationController:
 
 if __name__ == "__main__":
     controller = AutomationController()
-    #controller.run()
     asyncio.run(controller.run())
