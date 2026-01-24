@@ -1,7 +1,7 @@
 import requests
 import logging
 from typing import Optional
-from stream_managers.base.stream_platform import StreamPlatform
+from integrations.platforms.base.stream_platform import StreamPlatform
 
 logger = logging.getLogger(__name__)
 

@@ -1,8 +1,9 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Optional
-from stream_managers.base.stream_platform import StreamPlatform
+from integrations.platforms.base.stream_platform import StreamPlatform
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ class KickUpdater(StreamPlatform):
     def __init__(self, client_id: str, client_secret: str, channel_id: str,
                  redirect_uri: str = "http://localhost:8080/callback",
                  scopes: list[str] = None,
-                 db_path: str = "kick_tokens.db"):
+                 db_path: str = None):
         super().__init__("Kick")
 
         self.client_id = client_id
@@ -23,6 +24,12 @@ class KickUpdater(StreamPlatform):
         self.channel_id = channel_id
         self.redirect_uri = redirect_uri
         self.scopes = scopes or ["channel:read", "channel:write"]
+        
+        # Use core directory for token storage if not provided
+        if db_path is None:
+            core_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "core")
+            db_path = os.path.join(core_dir, "kick_tokens.db")
+        
         self.db_path = db_path
 
         self.api: Optional[KickAPI] = None          # Authenticated client

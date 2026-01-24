@@ -5,8 +5,8 @@ import logging
 import shutil
 from typing import List, Dict, Optional
 import sys
-from database import DatabaseManager
-from config_manager import ConfigManager
+from core.database import DatabaseManager
+from config.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 

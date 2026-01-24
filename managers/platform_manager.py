@@ -1,8 +1,8 @@
 import logging
 from typing import Optional, List
-from stream_managers.base.stream_platform import StreamPlatform
-from stream_managers.twitch_updater import TwitchUpdater
-from stream_managers.kick_updater import KickUpdater
+from integrations.platforms.base.stream_platform import StreamPlatform
+from integrations.platforms.twitch_updater import TwitchUpdater
+from integrations.platforms.kick_updater import KickUpdater
 
 logger = logging.getLogger(__name__)
 
