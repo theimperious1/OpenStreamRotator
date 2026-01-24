@@ -347,8 +347,8 @@ class AutomationController:
                     playlist_ids = json.loads(playlists_selected)
                     playlists = self.playlist_manager.get_playlists_by_ids(playlist_ids)
                     if playlists and len(playlists) > 0:
-                        # Use the first playlist's category (could be extended to merge categories later)
-                        category = playlists[0].get('category')
+                        # Use the first playlist's name as the Kick category search term
+                        category = playlists[0].get('name')
                 except (json.JSONDecodeError, ValueError) as e:
                     logger.warning(f"Could not parse playlists_selected: {e}")
             
