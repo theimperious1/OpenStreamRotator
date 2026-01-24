@@ -1,14 +1,18 @@
 import asyncio
 import logging
 import sys
+import os
 from controllers.automation_controller import AutomationController
 
-# Setup logging
+# Setup logging with absolute path
+log_dir = os.path.dirname(os.path.abspath(__file__))
+log_file = os.path.join(log_dir, 'automation.log')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('automation.log'),
+        logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )

@@ -432,13 +432,28 @@ class AutomationController:
             if self.start_rotation_session():
                 await self.execute_content_switch()
         else:
-            self.current_session_id = session['id']
-            self.total_playback_seconds = session.get('playback_seconds', 0)
-            stream_title = session.get('stream_title')
-            logger.info(f"Resuming session {self.current_session_id}, playback: {self.total_playback_seconds}s")
-            # Update stream title to match what was previously playing
-            if stream_title:
-                await self.update_stream_titles(stream_title)
+            # Check if video files still exist
+            settings = self.config_manager.get_settings()
+            video_folder = settings.get('video_folder', 'C:/stream_videos/')
+            
+            if not os.path.exists(video_folder) or len(os.listdir(video_folder)) == 0:
+                logger.warning(f"Video folder is empty or missing: {video_folder}")
+                logger.info("Starting new rotation since videos are missing")
+                # End the current session since videos are gone
+                if session['id']:
+                    self.db.update_session_playback(session['id'], self.total_playback_seconds)
+                    self.db.end_session(session['id'])
+                # Start new rotation
+                if self.start_rotation_session():
+                    await self.execute_content_switch()
+            else:
+                self.current_session_id = session['id']
+                self.total_playback_seconds = session.get('playback_seconds', 0)
+                stream_title = session.get('stream_title')
+                logger.info(f"Resuming session {self.current_session_id}, playback: {self.total_playback_seconds}s")
+                # Update stream title to match what was previously playing
+                if stream_title:
+                    await self.update_stream_titles(stream_title)
 
         # Main loop
         while True:
@@ -457,6 +472,7 @@ class AutomationController:
                 is_live = False
                 if self.twitch_token:
                     is_live = self.is_stream_live(self.twitch_token, os.getenv("TARGET_TWITCH_STREAMER", "zackrawrr"))
+                    is_live = False  # TEMP DISABLE FOR TESTING
 
                 if is_live and self.last_stream_status != "live":
                     logger.info("Asmongold is LIVE — pausing 24/7 stream")
