@@ -1,0 +1,32 @@
+{
+  "playlists": [
+    {
+      "name": "Coffin of Andy and Leyley",
+      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjlpCYGlnJRpr6aVY3OduR--",
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "name": "Hytale",
+      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjnzKfefPZN11m15xTotRsjD",
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "name": "Once Human",
+      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjlRqPG1evKa7NIUMkw9aldU",
+      "enabled": true,
+      "priority": 1
+    }
+  ],
+  "settings": {
+    "rotation_hours": 12,
+    "video_folder": "C:/Projects/Asmon247Reborn/videos/live",
+    "next_rotation_folder": "C:/Projects/Asmon247Reborn/videos/pending",
+    "check_config_interval": 60,
+    "min_playlists_per_rotation": 1,
+    "max_playlists_per_rotation": 1,
+    "download_retry_attempts": 3,
+    "stream_title_template": "24/7 @zackrawrr / @asmongold | {GAMES} | !playlist !streamtime !new"
+  }
+}
