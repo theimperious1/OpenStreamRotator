@@ -90,11 +90,17 @@ class AutomationController:
 
     def setup_platforms(self):
         """Initialize enabled streaming platforms."""
-        # Setup Twitch
-        if ENABLE_TWITCH and TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET:
-            # Get token
-            self.twitch_token, self.twitch_token_expiry = self.get_twitch_token()
-
+        # Initialize Twitch token for live status checking (independent of ENABLE_TWITCH)
+        # This allows checking if Asmongold is live even if we're not updating titles on Twitch
+        if TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET:
+            try:
+                self.twitch_token, self.twitch_token_expiry = self.get_twitch_token()
+                logger.info("Twitch credentials available for live status checking")
+            except Exception as e:
+                logger.warning(f"Could not get Twitch token for live checking: {e}")
+        
+        # Setup Twitch platform (for title updates)
+        if ENABLE_TWITCH and TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET and self.twitch_token:
             # Get broadcaster ID if not set
             broadcaster_id = TWITCH_BROADCASTER_ID
             if not broadcaster_id and TWITCH_USER_LOGIN:
@@ -109,7 +115,7 @@ class AutomationController:
                 if twitch:
                     logger.info(f"Twitch enabled for channel: {TWITCH_USER_LOGIN}")
             else:
-                logger.warning("Twitch broadcaster ID not found, Twitch disabled")
+                logger.warning("Twitch broadcaster ID not found, Twitch title updates disabled")
 
         # Setup Kick
         if ENABLE_KICK and KICK_CLIENT_ID and KICK_CLIENT_SECRET and KICK_CHANNEL_ID:
@@ -437,16 +443,19 @@ class AutomationController:
         # Main loop
         while True:
             try:
-                # Refresh Twitch token if needed and enabled
-                if ENABLE_TWITCH and time.time() >= self.twitch_token_expiry:
-                    self.twitch_token, self.twitch_token_expiry = self.get_twitch_token()
-                    twitch = self.platform_manager.get_platform("Twitch")
-                    if twitch:
-                        twitch.update_token(self.twitch_token)
+                # Refresh Twitch token if needed (for live status checking)
+                if self.twitch_token and time.time() >= self.twitch_token_expiry:
+                    try:
+                        self.twitch_token, self.twitch_token_expiry = self.get_twitch_token()
+                        twitch = self.platform_manager.get_platform("Twitch")
+                        if twitch:
+                            twitch.update_token(self.twitch_token)
+                    except Exception as e:
+                        logger.warning(f"Failed to refresh Twitch token: {e}")
 
-                # Check Asmongold stream status (only if Twitch enabled)
+                # Check Asmongold stream status (if we have Twitch credentials)
                 is_live = False
-                if ENABLE_TWITCH and self.twitch_token:
+                if self.twitch_token:
                     is_live = self.is_stream_live(self.twitch_token, "zackrawrr")
 
                 if is_live and self.last_stream_status != "live":
