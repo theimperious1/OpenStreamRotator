@@ -70,6 +70,7 @@ class AutomationController:
         self.current_session_id = None
         self.playback_start_time = None
         self.total_playback_seconds = 0
+        self.last_known_playback_position_ms = 0
 
         self.last_stream_status = None
         self.is_rotating = False
@@ -398,6 +399,7 @@ class AutomationController:
         # Reset playback tracking
         self.total_playback_seconds = 0
         self.playback_start_time = time.time() if self.last_stream_status != "live" else None
+        self.last_known_playback_position_ms = 0
 
         self.send_discord_notification(
             "Content Rotated",
@@ -449,6 +451,77 @@ class AutomationController:
         finally:
             self.download_in_progress = False
 
+    def _check_and_handle_playback_skip(self) -> bool:
+        """Detect if user has skipped ahead in video playback and recalculate rotation times.
+        
+        Returns True if skip was detected and times were recalculated.
+        """
+        # Get current VLC playback position
+        if not self.obs_controller:
+            return False
+        
+        media_status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
+        if not media_status:
+            return False
+        
+        current_position_ms = media_status['media_cursor']
+        total_duration_ms = media_status['media_duration']
+        
+        if current_position_ms is None or total_duration_ms is None:
+            return False
+        
+        # Check if playback position jumped significantly ahead of expected
+        # Expected advance = CHECK_INTERVAL (15s) + margin (10s) = 25s tolerance
+        # Only flag as skip if position jumped MORE than 25 seconds
+        EXPECTED_ADVANCE_MS = CHECK_INTERVAL * 1000  # 15,000 ms
+        SKIP_MARGIN_MS = 10000  # 10 second margin
+        SKIP_THRESHOLD_MS = EXPECTED_ADVANCE_MS + SKIP_MARGIN_MS  # 25,000 ms total
+        
+        position_delta_ms = current_position_ms - self.last_known_playback_position_ms
+        
+        # If position jumped significantly more than expected (skip detected)
+        if position_delta_ms > SKIP_THRESHOLD_MS:
+            time_skipped_seconds = position_delta_ms / 1000
+            logger.info(
+                f"Playback skip detected: jumped {position_delta_ms}ms ahead "
+                f"(from {self.last_known_playback_position_ms}ms to {current_position_ms}ms). "
+                f"Time skipped: {time_skipped_seconds:.1f}s"
+            )
+            
+            # Calculate remaining playback time based on current position in video
+            remaining_ms = total_duration_ms - current_position_ms
+            remaining_seconds = remaining_ms / 1000
+            
+            # New finish time = now + remaining video seconds
+            new_finish_time = datetime.now() + timedelta(seconds=remaining_seconds)
+            
+            # Update session with new times (if session_id is available)
+            if self.current_session_id:
+                self.db.update_session_times(
+                    self.current_session_id,
+                    new_finish_time.isoformat(),
+                    (new_finish_time - timedelta(minutes=30)).isoformat()  # download_trigger_time
+                )
+            
+            logger.info(
+                f"Rotation times recalculated after skip: "
+                f"new finish time = {new_finish_time.isoformat()}"
+            )
+            
+            self.send_discord_notification(
+                "Playback Skip Detected",
+                f"Video position jumped {time_skipped_seconds:.1f}s ahead. "
+                f"Rotation finish time recalculated to: {new_finish_time.strftime('%H:%M:%S')}",
+                color=0x0099FF
+            )
+            
+            self.last_known_playback_position_ms = current_position_ms
+            return True
+        
+        # Update last known position for next check
+        self.last_known_playback_position_ms = current_position_ms
+        return False
+
     async def check_for_rotation(self):
         """Check if it's time to rotate content based on duration and download trigger."""
         if self.is_rotating:
@@ -458,6 +531,9 @@ class AutomationController:
         session = self.db.get_current_session()
         if not session:
             return
+
+        # Check for playback skip and recalculate times if needed
+        self._check_and_handle_playback_skip()
 
         # Check if we need to trigger download of next rotation
         if session.get('download_trigger_time'):

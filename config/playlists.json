@@ -1,14 +1,20 @@
 {
   "playlists": [
     {
-      "name": "Cat videos",
-      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyEKFKMuMWtiCWJGjwYsblck",
+      "name": "Small test 1",
+      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyF6XOwb53qTmbyLa2xsSHR-",
+      "enabled": true,
+      "priority": 3
+    },
+    {
+      "name": "Small test 2",
+      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyFkfqt3Oga1pab8ePbKFscB",
       "enabled": true,
       "priority": 2
     },
     {
-      "name": "Hytale",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjnzKfefPZN11m15xTotRsjD",
+      "name": "Cat videos",
+      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyEKFKMuMWtiCWJGjwYsblck",
       "enabled": true,
       "priority": 1
     }

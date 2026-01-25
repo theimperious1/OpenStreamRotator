@@ -245,6 +245,20 @@ class DatabaseManager:
         conn.commit()
         self.close()
 
+    def update_session_times(self, session_id: int, estimated_finish_time: str, download_trigger_time: str):
+        """Update estimated_finish_time and download_trigger_time for a session (for skip detection recalculation)."""
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE rotation_sessions 
+            SET estimated_finish_time = ?, download_trigger_time = ?
+            WHERE id = ?
+        """, (estimated_finish_time, download_trigger_time, session_id))
+
+        conn.commit()
+        self.close()
+
     def end_session(self, session_id: int):
         """Mark a rotation session as ended."""
         conn = self.connect()
