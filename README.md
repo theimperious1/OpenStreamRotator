@@ -74,7 +74,7 @@ DISCORD_WEBHOOK_URL=your_webhook_url
 
 **Finding Your KICK_CHANNEL_ID:**
 - Try your username first
-- If it doesn't work, check the logs when running main.py
+- If it doesn't work, check the logs after finishing Step 5's authorization steps down below.
 - Or use DB Browser (SQLite) to open `core/kick_tokens.db` and find your account ID
 
 ### 3. OBS Setup
