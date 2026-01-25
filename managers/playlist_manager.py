@@ -3,9 +3,9 @@ import re
 import subprocess
 import logging
 import shutil
-import json
 from typing import List, Dict, Optional
 import sys
+import json as json_module
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 
@@ -194,9 +194,8 @@ class PlaylistManager:
                 # Extract title from filename
                 title = self._extract_title_from_filename(filename)
                 
-                # For now, use 0 as duration - we'll calculate from file later if needed
-                # TODO: Use ffprobe to extract actual duration from video files
-                duration_seconds = 0
+                # Extract actual duration from video file using ffprobe
+                duration_seconds = self._get_video_duration(file_path)
                 total_duration += duration_seconds
 
                 try:
@@ -208,12 +207,52 @@ class PlaylistManager:
                         duration_seconds=duration_seconds
                     )
                     registered_count += 1
-                    logger.debug(f"Registered video: {filename} ({file_size_mb:.1f} MB)")
+                    logger.debug(f"Registered video: {filename} ({file_size_mb:.1f} MB, {duration_seconds}s)")
                 except Exception as e:
                     logger.debug(f"Video already registered or error: {filename} - {e}")
         
         logger.info(f"Registered {registered_count} videos for {playlist_name}")
         return total_duration
+
+    def _get_video_duration(self, file_path: str) -> int:
+        """
+        Extract video duration in seconds using ffprobe.
+        
+        Returns duration in seconds (integer), or 0 if extraction fails.
+        """
+        try:
+            # Run ffprobe to get duration
+            cmd = [
+                'ffprobe',
+                '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'json',
+                file_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            
+            if result.returncode == 0:
+                data = json_module.loads(result.stdout)
+                duration_str = data.get('format', {}).get('duration', '0')
+                duration_seconds = int(float(duration_str))
+                return duration_seconds
+            else:
+                logger.warning(f"ffprobe failed for {file_path}: {result.stderr}")
+                return 0
+                
+        except subprocess.TimeoutExpired:
+            logger.warning(f"ffprobe timeout for {file_path}")
+            return 0
+        except FileNotFoundError:
+            logger.error("ffprobe not found. Please install FFmpeg: https://ffmpeg.org/download.html")
+            return 0
+        except (json_module.JSONDecodeError, KeyError, ValueError) as e:
+            logger.warning(f"Failed to parse ffprobe output for {file_path}: {e}")
+            return 0
+        except Exception as e:
+            logger.warning(f"Error extracting video duration for {file_path}: {type(e).__name__}: {e}")
+            return 0
 
     def _extract_title_from_filename(self, filename: str) -> str:
         """Extract video title from filename."""
