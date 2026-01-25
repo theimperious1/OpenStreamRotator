@@ -5,6 +5,9 @@ import logging
 import os
 import signal
 import json
+import asyncio
+import time
+from datetime import datetime, timedelta
 from typing import Optional
 from dotenv import load_dotenv
 from core.database import DatabaseManager
@@ -12,6 +15,7 @@ from config.config_manager import ConfigManager
 from managers.playlist_manager import PlaylistManager
 from controllers.obs_controller import OBSController
 from managers.platform_manager import PlatformManager
+
 
 # Load environment variables
 load_dotenv()
@@ -69,6 +73,7 @@ class AutomationController:
 
         self.last_stream_status = None
         self.is_rotating = False
+        self.download_in_progress = False
         self.shutdown_event = False
 
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -244,6 +249,7 @@ class AutomationController:
 
         settings = self.config_manager.get_settings()
         next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+        buffer_minutes = settings.get('download_buffer_minutes', 30)
 
         # Select playlists
         playlists = self.playlist_manager.select_playlists_for_rotation(manual_playlists)
@@ -264,9 +270,10 @@ class AutomationController:
             color=0xFFA500
         )
 
-        success = self.playlist_manager.download_playlists(playlists, next_folder)
+        download_result = self.playlist_manager.download_playlists(playlists, next_folder)
+        total_duration_seconds = download_result.get('total_duration_seconds', 0)
 
-        if not success:
+        if not download_result.get('success'):
             logger.error("Failed to download all playlists")
             self.send_discord_notification(
                 "Download Warning",
@@ -288,9 +295,35 @@ class AutomationController:
         playlist_names = [p['name'] for p in playlists]
         stream_title = self.playlist_manager.generate_stream_title(playlist_names)
 
-        # Create database session
+        # Calculate timing for predictive downloads
+        
+        current_time = datetime.now()
+        # If we don't have duration info yet, use config rotation_hours as fallback
+        if total_duration_seconds == 0:
+            rotation_hours = settings.get('rotation_hours', 12)
+            total_duration_seconds = rotation_hours * 3600
+            logger.info(f"No duration info available, using config rotation_hours: {rotation_hours}h")
+        
+        estimated_finish_time = current_time + timedelta(seconds=total_duration_seconds)
+        download_trigger_time = estimated_finish_time - timedelta(minutes=buffer_minutes)
+        
+        logger.info(f"Total rotation duration: {total_duration_seconds}s (~{total_duration_seconds // 60} minutes)")
+        logger.info(f"Estimated finish: {estimated_finish_time}")
+        logger.info(f"Next download will trigger at: {download_trigger_time}")
+
+        # Create database session with timing info
         playlist_ids = [p['id'] for p in playlists]
-        self.current_session_id = self.db.create_rotation_session(playlist_ids, stream_title)
+        self.current_session_id = self.db.create_rotation_session(
+            playlist_ids, 
+            stream_title,
+            total_duration_seconds=total_duration_seconds,
+            estimated_finish_time=estimated_finish_time,
+            download_trigger_time=download_trigger_time
+        )
+        
+        # Reset playback tracking for new rotation
+        self.playback_start_time = time.time()
+        self.total_playback_seconds = 0
 
         logger.info("Rotation session prepared, ready to switch")
         return True
@@ -376,22 +409,79 @@ class AutomationController:
         logger.info("Content switch completed successfully")
         return True
 
+    async def _background_download_next_rotation(self):
+        """Download next rotation in background without interrupting stream."""
+        try:
+            logger.info("Starting background download of next rotation...")
+            settings = self.config_manager.get_settings()
+            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            
+            # Select next playlists
+            playlists = self.playlist_manager.select_playlists_for_rotation()
+            if not playlists:
+                logger.warning("No playlists available for background download")
+                return
+            
+            # Download in background
+            download_result = self.playlist_manager.download_playlists(playlists, next_folder)
+            
+            if download_result.get('success'):
+                logger.info("Background download completed successfully")
+                self.send_discord_notification(
+                    "Next Rotation Ready",
+                    f"Downloaded: {', '.join([p['name'] for p in playlists])}",
+                    color=0x00FF00
+                )
+            else:
+                logger.warning("Background download had some failures")
+                self.send_discord_notification(
+                    "Background Download Warning",
+                    "Some playlists failed to download in background",
+                    color=0xFF9900
+                )
+        except Exception as e:
+            logger.error(f"Error during background download: {e}")
+            self.send_discord_notification(
+                "Background Download Error",
+                f"Failed to download next rotation: {str(e)}",
+                color=0xFF0000
+            )
+        finally:
+            self.download_in_progress = False
+
     async def check_for_rotation(self):
-        """Check if it's time to rotate content."""
+        """Check if it's time to rotate content based on duration and download trigger."""
         if self.is_rotating:
             return
 
-        if self.total_playback_seconds >= ROTATION_SECONDS:
-            logger.info(f"Rotation threshold reached: {self.total_playback_seconds}s / {ROTATION_SECONDS}s")
+        # Get current session info
+        session = self.db.get_current_session()
+        if not session:
+            return
 
-            # End current session
-            if self.current_session_id:
-                self.db.update_session_playback(self.current_session_id, self.total_playback_seconds)
-                self.db.end_session(self.current_session_id)
+        # Check if we need to trigger download of next rotation
+        if session.get('download_trigger_time'):
+            download_trigger = datetime.fromisoformat(session['download_trigger_time'])
+            if datetime.now() >= download_trigger and not self.download_in_progress:
+                logger.info("Download trigger time reached, starting background download of next rotation")
+                self.download_in_progress = True
+                # Start download in background (non-blocking)
+                asyncio.create_task(self._background_download_next_rotation())
 
-            # Start new rotation
-            if self.start_rotation_session():
-                await self.execute_content_switch()
+        # Check if rotation duration has been reached
+        if session.get('estimated_finish_time'):
+            finish_time = datetime.fromisoformat(session['estimated_finish_time'])
+            if datetime.now() >= finish_time:
+                logger.info(f"Rotation duration reached: {self.total_playback_seconds}s")
+                
+                # End current session
+                if self.current_session_id:
+                    self.db.update_session_playback(self.current_session_id, self.total_playback_seconds)
+                    self.db.end_session(self.current_session_id)
+                
+                # Start new rotation
+                if self.start_rotation_session():
+                    await self.execute_content_switch()
 
     async def check_manual_override(self):
         """Check for manual override requests."""

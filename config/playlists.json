@@ -4,11 +4,18 @@
       "name": "Cat videos",
       "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyEKFKMuMWtiCWJGjwYsblck",
       "enabled": true,
+      "priority": 2
+    },
+    {
+      "name": "Hytale",
+      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjnzKfefPZN11m15xTotRsjD",
+      "enabled": true,
       "priority": 1
     }
   ],
   "settings": {
     "rotation_hours": 12,
+    "download_buffer_minutes": 30,
     "video_folder": "C:/Projects/Asmon247Reborn/videos/live",
     "next_rotation_folder": "C:/Projects/Asmon247Reborn/videos/pending",
     "check_config_interval": 60,

@@ -78,6 +78,9 @@ class DatabaseManager:
                 playlists_selected TEXT,
                 total_videos INTEGER,
                 total_size_mb INTEGER,
+                total_duration_seconds INTEGER DEFAULT 0,
+                estimated_finish_time TIMESTAMP,
+                download_trigger_time TIMESTAMP,
                 stream_title TEXT,
                 playback_seconds INTEGER DEFAULT 0
             )
@@ -165,16 +168,16 @@ class DatabaseManager:
         self.close()
 
     def add_video(self, playlist_id: int, filename: str, title: Optional[str] = None,
-                  file_size_mb: Optional[int] = None) -> Optional[int]:
+                  file_size_mb: Optional[int] = None, duration_seconds: Optional[int] = None) -> Optional[int]:
         """Add a video to the database."""
         conn = self.connect()
         cursor = conn.cursor()
 
         try:
             cursor.execute("""
-                INSERT INTO videos (playlist_id, filename, title, file_size_mb)
-                VALUES (?, ?, ?, ?)
-            """, (playlist_id, filename, title, file_size_mb))
+                INSERT INTO videos (playlist_id, filename, title, file_size_mb, duration_seconds)
+                VALUES (?, ?, ?, ?, ?)
+            """, (playlist_id, filename, title, file_size_mb, duration_seconds))
             conn.commit()
             video_id = cursor.lastrowid
             return video_id
@@ -189,15 +192,20 @@ class DatabaseManager:
             self.close()
 
     def create_rotation_session(self, playlists_selected: List[int],
-                                stream_title: str) -> Optional[int]:
+                                stream_title: str,
+                                total_duration_seconds: int = 0,
+                                estimated_finish_time: Optional[datetime] = None,
+                                download_trigger_time: Optional[datetime] = None) -> Optional[int]:
         """Create a new rotation session."""
         conn = self.connect()
         cursor = conn.cursor()
 
         cursor.execute("""
-            INSERT INTO rotation_sessions (playlists_selected, stream_title)
-            VALUES (?, ?)
-        """, (json.dumps(playlists_selected), stream_title))
+            INSERT INTO rotation_sessions (playlists_selected, stream_title, total_duration_seconds, 
+                                          estimated_finish_time, download_trigger_time)
+            VALUES (?, ?, ?, ?, ?)
+        """, (json.dumps(playlists_selected), stream_title, total_duration_seconds,
+              estimated_finish_time, download_trigger_time))
 
         conn.commit()
         session_id = cursor.lastrowid

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import sqlite3
 from typing import Optional
 import aiohttp
 from integrations.platforms.base.stream_platform import StreamPlatform
@@ -67,33 +68,40 @@ class KickUpdater(StreamPlatform):
                 db_path=self.db_path,
             )
 
-            # Start token refresh for authenticated client
-            asyncio.create_task(self.api.start_token_refresh())
-
-            # Test authentication with a call that REQUIRES auth
+            # Check if tokens exist without calling asyncio.run()
+            # This avoids the "asyncio.run() cannot be called from a running event loop" error
+            db_path = self.db_path
+            tokens_exist = False
+            
             try:
-                await self.api.get_users(channel_id=self.channel_id)
-                logger.info(f"[{self.platform_name}] Already authenticated (tokens valid) - channel info loaded")
-            except Exception as auth_exc:
-                error_str = str(auth_exc).lower()
-                if "unauthorized" in error_str or "token" in error_str or "auth" in error_str:
-                    logger.info(
-                        f"[{self.platform_name}] No valid tokens found. "
-                        "You need to complete the OAuth flow once."
-                    )
-                    auth_data = self.api.get_auth_url(self.scopes)
-                    auth_url = auth_data["auth_url"]
-                    code_verifier = auth_data["code_verifier"]
+                if os.path.exists(db_path):
+                    conn = sqlite3.connect(db_path)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM tokens WHERE channel_id = ?", (self.channel_id,))
+                    count = cursor.fetchone()[0]
+                    tokens_exist = count > 0
+                    conn.close()
+            except Exception as db_err:
+                logger.debug(f"[{self.platform_name}] Error checking tokens DB: {db_err}")
 
-                    logger.info(f"[{self.platform_name}] Please visit:\n{auth_url}")
-                    logger.info(f"[{self.platform_name}] After authorizing → copy 'code' from redirect URL.")
-                    logger.info(f"[{self.platform_name}] Edit authorize_kick.py and set \'code\' to the code you copied.")
-                    logger.info(f"[{self.platform_name}] Then set code_verifier to ${code_verifier}")
-                    logger.info(f"[{self.platform_name}] Finally: Run \'python authorize_kick.py\'. Once done, restart main.py.")
+            if not tokens_exist:
+                logger.info(
+                    f"[{self.platform_name}] No valid tokens found. "
+                    "You need to complete the OAuth flow once."
+                )
+                auth_data = self.api.get_auth_url(self.scopes)
+                auth_url = auth_data["auth_url"]
+                code_verifier = auth_data["code_verifier"]
 
-                    raise RuntimeError("OAuth authorization required.")
-                else:
-                    raise
+                logger.info(f"[{self.platform_name}] Please visit:\n{auth_url}")
+                logger.info(f"[{self.platform_name}] After authorizing → copy 'code' from redirect URL.")
+                logger.info(f"[{self.platform_name}] Edit authorize_kick.py and set \'code\' to the code you copied.")
+                logger.info(f"[{self.platform_name}] Then set code_verifier to ${code_verifier}")
+                logger.info(f"[{self.platform_name}] Finally: Run \'python authorize_kick.py\'. Once done, restart main.py.")
+
+                raise RuntimeError("OAuth authorization required.")
+            else:
+                logger.info(f"[{self.platform_name}] Found cached tokens, using stored credentials")
 
             logger.info(f"[{self.platform_name}] API initialized successfully")
             self._initialized = True
@@ -109,11 +117,10 @@ class KickUpdater(StreamPlatform):
         # category_id is required by KickAPI.update_channel()
         category_id = kwargs.pop("category_id", None)
         if category_id is None:
-            category_id = await self._get_current_category_id()
-            if category_id is None:
-                # Fallback: use Just Chatting category (common default)
-                category_id = 15 # Just Chatting
-                logger.warning(f"[{self.platform_name}] Using fallback category ID: {category_id}")
+            # Skip trying to fetch current category to avoid kickpython's asyncio.run() issue
+            # Always use the provided category or fallback
+            category_id = 15 # Just Chatting - fallback
+            logger.warning(f"[{self.platform_name}] Using fallback category ID: {category_id}")
 
         # Ensure category_id is an integer
         try:
@@ -163,8 +170,21 @@ class KickUpdater(StreamPlatform):
                     
                     data = await response.json()
                     
-                    # Response structure: {"data": {"category": {...}}}
-                    category_data = data.get("data", {}).get("category", {})
+                    # Response structure can vary - could be {"data": {...}} or {"data": [{...}]}
+                    data_obj = data.get("data")
+                    
+                    # Handle if data is a list (take first item)
+                    if isinstance(data_obj, list):
+                        if len(data_obj) > 0:
+                            category_data = data_obj[0]
+                        else:
+                            logger.warning(f"[{self.platform_name}] No category found for: {category_name}")
+                            return None
+                    elif isinstance(data_obj, dict):
+                        category_data = data_obj.get("category", {})
+                    else:
+                        logger.warning(f"[{self.platform_name}] Unexpected response format for: {category_name}")
+                        return None
                     
                     if not isinstance(category_data, dict):
                         logger.warning(f"[{self.platform_name}] No category found for: {category_name}")
