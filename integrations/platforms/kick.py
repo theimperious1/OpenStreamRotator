@@ -5,11 +5,14 @@ import re
 import sqlite3
 from typing import Optional
 import aiohttp
+import sys
+from pathlib import Path
 from integrations.platforms.base.stream_platform import StreamPlatform
 
 logger = logging.getLogger(__name__)
 
-from kickpython import KickAPI
+# Import from local embedded kickpython library
+from lib.kickpython.kickpython.api import KickAPI
 KICK_AVAILABLE = True
 
 class KickUpdater(StreamPlatform):
@@ -178,16 +181,16 @@ class KickUpdater(StreamPlatform):
                         if len(data_obj) > 0:
                             category_data = data_obj[0]
                         else:
-                            logger.warning(f"[{self.platform_name}] No category found for: {category_name}")
+                            logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}'")
                             return None
                     elif isinstance(data_obj, dict):
                         category_data = data_obj.get("category", {})
                     else:
-                        logger.warning(f"[{self.platform_name}] Unexpected response format for: {category_name}")
+                        logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}' (unexpected response format)")
                         return None
                     
                     if not isinstance(category_data, dict):
-                        logger.warning(f"[{self.platform_name}] No category found for: {category_name}")
+                        logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}'")
                         return None
                     
                     # Extract the numeric subcategory ID from the image_url
@@ -202,14 +205,14 @@ class KickUpdater(StreamPlatform):
                             logger.info(f"[{self.platform_name}] Found subcategory: {cat_name} -> {subcategory_id}")
                             return subcategory_id
                     
-                    logger.warning(f"[{self.platform_name}] Could not extract subcategory ID from image_url: {image_url}")
+                    logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}'")
                     return None
                     
         except asyncio.TimeoutError:
             logger.error(f"[{self.platform_name}] Timeout fetching categories from Kick API")
             return None
         except Exception as e:
-            self.log_error("Get category ID", e)
+            logger.error(f"[{self.platform_name}] Category lookup error for '{category_name}': {type(e).__name__}: {e}")
             return None
 
     async def _get_current_category_id(self) -> Optional[str]:
