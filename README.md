@@ -1,258 +1,216 @@
-# 24/7 Stream Automation System
+# Asmongold247 - 24/7 Stream Automation
 
-Fully automated content rotation system for 24/7 Twitch streams with OBS integration.
+Fully automated content rotation system for 24/7 streaming with Kick and Twitch integration, OBS automation, and intelligent playlist management.
 
 ## Features
 
-- ✅ **Automatic Content Rotation**: Rotates playlists every 12 hours of playback
-- ✅ **Smart Playlist Selection**: Prioritizes content that hasn't been played recently
-- ✅ **Seamless Downloads**: Downloads next rotation in background using yt-dlp
-- ✅ **OBS Integration**: Automatically updates VLC sources and switches scenes
-- ✅ **Twitch Integration**: Updates stream title based on current playlists
-- ✅ **Manual Override**: Take control when needed (e.g., when Asmon raids)
-- ✅ **Discord Notifications**: Get notified of rotation events and errors
-- ✅ **Playback Time Tracking**: Only counts actual streaming time (excludes when Asmon is live)
+- ✅ **Automatic Content Rotation**: Rotates playlists on configurable schedule
+- ✅ **Multi-Platform Support**: Kick and Twitch integration with automatic title/category updates
+- ✅ **Smart Playlist Selection**: Prioritizes content based on play count and rotation settings
+- ✅ **Background Downloads**: Downloads next rotation using yt-dlp while streaming
+- ✅ **OBS Integration**: Automatic scene switching and VLC source management
+- ✅ **Kick Category Updates**: Automatically sets stream category based on current playlist name
+- ✅ **Session Resumption**: Resumes playback from where it left off
+- ✅ **Video Validation**: Detects and redownloads missing videos automatically
+- ✅ **Discord Notifications**: Optional notifications for events and errors
+- ✅ **Live Status Detection**: Pauses 24/7 stream when zackrawrr (configurable in .env) goes live on Twitch
 
 ## Prerequisites
 
 1. **Python 3.10+**
 2. **OBS Studio 28+** (with WebSocket enabled)
-3. **yt-dlp** installed and in PATH
-4. **VLC Media Player** installed
-5. **Firefox** (for cookies to bypass YouTube rate limits)
+3. **yt-dlp** (for YouTube downloads)
+4. **VLC Media Player** (for playback)
+5. **Kick Account** (optional, needs oAuth application registered. Scope should be both channel:read and channel:write)
+6. **Twitch Account** (ENABLE_TWITCH can be false, but client secret and ID must be filled in to detect if zackrawrr is live)
 
-## Installation
+## Quick Start
 
-### 1. Install Dependencies
-
-```bash
-pip install obsws-python python-dotenv requests
-```
-
-### 2. Install yt-dlp
+### 1. Clone & Install
 
 ```bash
-pip install yt-dlp
+git clone <repository_link>.git
+cd Asmongold247
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
-Or download from: https://github.com/yt-dlp/yt-dlp
+### 2. Environment Configuration
 
-### 3. Configure OBS
+```bash
+copy .env.example .env
+```
 
-1. Open OBS Studio
-2. Go to **Tools → WebSocket Server Settings**
-3. Enable WebSocket server
-4. Set a password
-5. Note the port (default: 4455)
+Edit `.env` with your settings:
 
-### 4. Create Required Scenes
-
-Create these scenes in OBS:
-- **"Stream"** - Main scene with VLC Video Source
-- **"Pause screen"** - Shown when Asmongold is live
-- **"content-switch"** - Shown during content rotation
-
-### 5. Add VLC Video Source
-
-1. In the "Stream" scene, add a **VLC Video Source**
-2. Name it "Playlist" (or customize `VLC_SOURCE_NAME` in `.env`)
-3. The script will manage the playlist automatically
-
-### 6. Set Up Configuration Files
-
-Create `.env` file:
 ```env
-OBS_HOST=127.0.0.1
+# Kick Configuration (Required)
+ENABLE_KICK=true
+KICK_CHANNEL_ID=your_channel_id
+KICK_CLIENT_ID=your_oauth_client_id
+KICK_CLIENT_SECRET=your_oauth_client_secret
+
+# Twitch Configuration (Optional - for live detection)
+ENABLE_TWITCH=false
+TARGET_TWITCH_STREAMER=your_twitch_username
+TWITCH_CLIENT_ID=your_client_id
+TWITCH_CLIENT_SECRET=your_client_secret
+
+# OBS Configuration
+OBS_HOST=192.168.x.x  # Your OBS IP or localhost
 OBS_PORT=4455
-OBS_PASSWORD=your_obs_password
-SCENE_LIVE=Pause screen
-SCENE_OFFLINE=Stream
+OBS_PASSWORD=your_obs_websocket_password
+
+# Scene & Source Names
+SCENE_LIVE=Stream
+SCENE_PAUSE=Pause screen
 SCENE_CONTENT_SWITCH=content-switch
 VLC_SOURCE_NAME=Playlist
 
-TWITCH_CLIENT_ID=your_client_id
-TWITCH_CLIENT_SECRET=your_client_secret
-TWITCH_USER_LOGIN=your_24_7_channel_username
-
-DISCORD_WEBHOOK_URL=your_discord_webhook_url
+# Discord (Optional)
+DISCORD_WEBHOOK_URL=your_webhook_url
 ```
 
-Create `playlists.json`:
+**Finding Your KICK_CHANNEL_ID:**
+- Try your username first
+- If it doesn't work, check the logs when running main.py
+- Or use DB Browser (SQLite) to open `core/kick_tokens.db` and find your account ID
+
+### 3. OBS Setup
+
+1. **Enable WebSocket**:
+   - Open OBS Studio
+   - Go to **Tools → WebSocket Server Settings**
+   - Enable WebSocket server and set a password
+   - Note the IP/port and add to `.env`
+
+2. **Create Scenes**:
+   - `Stream` - Main scene (add VLC source here)
+   - `Pause screen` - Shown when you go live on Twitch
+   - `content-switch` - Shown during rotation
+
+3. **Add VLC Source**:
+   - In the `Stream` scene, add **VLC Video Source**
+   - Name it exactly: `Playlist`
+   - Script manages playlist content automatically
+
+### 4. Configure Playlists (Do This BEFORE First Run)
+
+Edit `config/playlists.json`:
+
 ```json
 {
   "playlists": [
     {
-      "name": "Classic WoW",
-      "url": "https://www.youtube.com/playlist?list=YOUR_PLAYLIST_ID",
+      "name": "Hytale",
+      "url": "https://www.youtube.com/playlist?list=PLxxxxxx",
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "name": "Gaming",
+      "url": "https://www.youtube.com/playlist?list=PLyyyyyy",
       "enabled": true,
       "priority": 1
     }
   ],
   "settings": {
     "rotation_hours": 12,
-    "video_folder": "C:/stream_videos/",
-    "next_rotation_folder": "C:/stream_videos_next/",
-    "min_playlists_per_rotation": 2,
-    "max_playlists_per_rotation": 4
+    "video_folder": "C:/YOUR/PATH/videos/live",
+    "next_rotation_folder": "C:/YOUR/PATH/videos/pending",
+    "min_playlists_per_rotation": 1,
+    "max_playlists_per_rotation": 3,
+    "download_retry_attempts": 3,
+    "stream_title_template": "24/7 @zackrawrr / @Asmongold | {GAMES} | !playlist !streamtime !new"
   }
 }
 ```
 
-### 7. Create Video Folders
+**Important:**
+- Change `video_folder` and `next_rotation_folder` to your actual paths
+- The playlist **name** is used to search for Kick categories (e.g., "Hytale" → searches Hytale category)
+- Script automatically creates these folders if they don't exist
 
-```bash
-mkdir C:\stream_videos
-mkdir C:\stream_videos_next
-```
+### 5. Kick OAuth Setup
 
-## Usage
+1. Run: `python main.py`
+   - It will fail but output an authorization URL and `code_verifier` to the logs
+2. Copy both the URL and `code_verifier` from the logs
+3. Visit the authorization URL in your browser and approve
+4. Copy the `code` from the redirect URL
+5. Edit `authorize_kick.py`:
+   ```python
+   code = "your_code_here"
+   code_verifier = "your_code_verifier_here"
+   ```
+6. Run: `python authorize_kick.py`
+7. Run: `python main.py` again - it's ready to go!
 
-### Starting the System
+## Run
 
 ```bash
 python main.py
 ```
 
-The system will:
-1. Connect to OBS
-2. Load playlists from `playlists.json`
-3. Download initial content
-4. Start streaming
-5. Monitor Asmongold's stream status
-6. Rotate content every 12 hours of playback
+## How It Works
 
-### Adding New Playlists
+1. **Startup**: Loads playlists from config and resumes previous session if available
+2. **Validation**: Checks if video files exist; redownloads if missing
+3. **Selection**: Automatically selects next playlist rotation
+4. **Download**: Downloads videos in background while streaming
+5. **Rotation**: At end of playlist, switches to next rotation
+6. **Updates**: Updates Kick title and category based on current playlist
+7. **Logging**: All events logged to `automation.log`
 
-1. Edit `playlists.json`
-2. Add new playlist entry
-3. The script automatically detects changes every 60 seconds
+## Playlist Names as Kick Categories
 
-```json
-{
-  "name": "New Game",
-  "url": "https://www.youtube.com/playlist?list=...",
-  "enabled": true,
-  "priority": 1
-}
-```
+The system uses your playlist name to automatically set the Kick category:
 
-### Manual Override (Taking Control)
+- Playlist named "Hytale" → Sets Kick category to "Hytale"
+- Playlist named "Gaming" → Sets Kick category to "Gaming"
+- Playlist named "Just Chatting" → Sets Kick category to "Just Chatting"
 
-When Asmongold raids the channel or you want specific content:
+If the category isn't found on Kick, it defaults to "Just Chatting" (category 15).
+
+## Manual Override
+
+Take manual control when needed (e.g., raid scenario, special events). **Plan ahead** - the override will download the selected playlists, which takes time. **NOTE**: The stream will **NOT** be interrupted during this period. This is safe to do at any time.
 
 1. Edit `manual_override.json`:
 ```json
 {
   "override_active": true,
-  "selected_playlists": ["Classic WoW", "Diablo 4"],
+  "selected_playlists": ["Hytale", "Gaming"],
   "trigger_now": true
 }
 ```
 
 2. The script will:
-   - Download selected playlists
-   - Switch to "content-switch" scene
-   - Replace current content
-   - Update stream title
+   - Download selected playlists while current content continues playing (this is why planning ahead matters)
+   - Once download completes, pause stream and switch to "content-switch" scene
+   - Wipe current content folder and load ONLY the manual override playlists
+   - Restart stream with new content
+   - Update stream title and category
    - Resume streaming
 
-3. After completion, it resets to automatic mode
+3. After completion, it automatically resets to automatic mode and resumes normal rotation
 
-### Disabling a Playlist Temporarily
+**Note:** Manual override replaces everything currently playing with **only** the playlists you specify. Nothing else will play.
 
-In `playlists.json`, set `"enabled": false`:
+### Temporarily Disabling Playlists
+
+You can also temporarily disable playlists by setting `"enabled": false` in `playlists.json` without needing manual override. This simply excludes them from automatic rotation but doesn't interrupt current playback:
 
 ```json
 {
-  "name": "Boring Game",
-  "url": "...",
-  "enabled": false,
-  "priority": 1
+  "name": "Playlist Name",
+  "youtube_url": "https://...",
+  "enabled": false
 }
 ```
 
-## How It Works
-
-### Automatic Mode
-
-1. **Selection**: Picks 2-4 playlists that haven't been played recently
-2. **Download**: Downloads to `next_rotation_folder` in background
-3. **Tracking**: Counts playback time (only when Asmon is offline)
-4. **Rotation**: After 12 hours of playback:
-   - Switches to "content-switch" scene
-   - Deletes old videos
-   - Moves new videos to main folder
-   - Updates OBS VLC source
-   - Updates Twitch title
-   - Switches back to "Stream" scene
-
-### Scene Switching
-
-- **Asmon goes live** → Switch to "Pause screen"
-- **Asmon goes offline** → Switch to "Stream" (resume videos)
-- **Content rotation** → Switch to "content-switch" → back to "Stream"
-
-### Playback Time Tracking
-
-Only counts time when:
-- Currently on "Stream" scene
-- Asmongold is NOT live
-- System is not rotating content
-
-This ensures exactly 12 hours of actual viewer-facing content per rotation.
-
-## Database
-
-The system uses SQLite (`stream_data.db`) to track:
-- Playlist play history
-- Video metadata
-- Rotation sessions
-- Playback time
-
-You can query this for analytics:
-```sql
-SELECT name, play_count, last_played 
-FROM playlists 
-ORDER BY play_count DESC;
-```
-
-## Troubleshooting
-
-### Downloads Failing
-
-**Problem**: yt-dlp rate limited by YouTube
-
-**Solution**: 
-- Ensure Firefox is installed (for cookies)
-- Download fewer playlists per rotation
-- Increase `download_retry_attempts` in config
-
-### OBS Connection Failed
-
-**Problem**: Cannot connect to OBS WebSocket
-
-**Solution**:
-- Check OBS is running
-- Verify WebSocket is enabled
-- Confirm port and password in `.env`
-
-### VLC Source Not Updating
-
-**Problem**: Videos not showing in OBS
-
-**Solution**:
-- Ensure VLC Media Player is installed
-- Check `VLC_SOURCE_NAME` matches your source name
-- Verify video files exist in `video_folder`
-
-### Content Not Rotating
-
-**Problem**: Still playing old content after 12 hours
-
-**Solution**:
-- Check logs: `automation.log`
-- Verify `rotation_hours` in config
-- Ensure playback time is being tracked (check Discord notifications)
+Disabled playlists won't be selected for new rotations. Re-enable them later by setting `"enabled": true`. No restart needed.
 
 ## Advanced Configuration
 
@@ -271,7 +229,7 @@ Higher priority = more likely to be selected:
 
 ```json
 {
-  "stream_title_template": "24/7 {GAMES} | !discord !youtube"
+  "stream_title_template": "24/7 @zackrawrr / @Asmongold | {GAMES} | !playlist !streamtime !new"
 }
 ```
 
@@ -281,47 +239,39 @@ Change rotation interval:
 
 ```json
 {
-  "rotation_hours": 8
+  "rotation_hours": 12
 }
 ```
 
-## Monitoring
+## Troubleshooting
 
-### Logs
+**Videos not downloading?**
+- Check yt-dlp is installed: `yt-dlp --version`
+- Verify YouTube playlist URLs are correct and public
 
-Check `automation.log` for detailed operation logs:
-```bash
-tail -f automation.log
-```
+**OBS not connecting?**
+- Verify OBS WebSocket is enabled and password is correct
+- Check IP/port in `.env`
+- Ensure OBS is running before starting script
 
-### Discord Notifications
+**Kick category not updating?**
+- Check playlist name matches a real Kick category
+- Look for search errors in logs
+- Script falls back to "Just Chatting" if no match
 
-Receive notifications for:
-- ✅ Content rotation started
-- ✅ Content rotation completed
-- ✅ Asmongold live/offline status
-- ❌ Download failures
-- ❌ OBS connection errors
-- ❌ Critical errors
+**Missing videos between restarts?**
+- Script automatically detects missing files and redownloads
+- Check video folder paths in `playlists.json`
 
-## File Structure
+## Logs
 
-```
-project/
-├── main.py                      # Main orchestrator
-├── database.py                  # Database operations
-├── config_manager.py            # Config file handling
-├── playlist_manager.py          # Download & selection logic
-├── stream_updater.py            # OBS & Twitch API
-├── playlists.json              # Playlist configuration
-├── manual_override.json        # Manual control
-├── .env                        # Credentials
-├── stream_data.db              # SQLite database
-├── automation.log              # Application logs
-└── C:/stream_videos/           # Current content
-    └── C:/stream_videos_next/  # Next rotation content
-```
+All activity logged to `automation.log` in project root. Check here for:
+- Authentication issues
+- Download errors
+- Stream update status
+- OBS connection status
+- Category lookup results
 
-## Credits
+## License
 
-Built for Kryptiiq's Asmongold 24/7 channel automation.
+MIT
