@@ -71,10 +71,12 @@ class AutomationController:
         self.playback_start_time = None
         self.total_playback_seconds = 0
         self.last_known_playback_position_ms = 0
+        self.next_prepared_playlists = None  # Store playlists downloaded in background
 
         self.last_stream_status = None
         self.is_rotating = False
         self.download_in_progress = False
+        self.download_triggered_for_session = False  # Prevent duplicate download triggers
         self.shutdown_event = False
 
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -252,8 +254,14 @@ class AutomationController:
         next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
         buffer_minutes = settings.get('download_buffer_minutes', 30)
 
-        # Select playlists
-        playlists = self.playlist_manager.select_playlists_for_rotation(manual_playlists)
+        # Use prepared playlists if available from background download, otherwise select new ones
+        if self.next_prepared_playlists:
+            playlists = self.next_prepared_playlists
+            self.next_prepared_playlists = None  # Clear it
+            logger.info(f"Using prepared playlists: {[p['name'] for p in playlists]}")
+        else:
+            playlists = self.playlist_manager.select_playlists_for_rotation(manual_playlists)
+        
         if not playlists:
             logger.error("No playlists selected for rotation")
             self.send_discord_notification(
@@ -330,6 +338,7 @@ class AutomationController:
         # Reset playback tracking for new rotation
         self.playback_start_time = time.time()
         self.total_playback_seconds = 0
+        self.download_triggered_for_session = False  # Reset for new session
 
         logger.info("Rotation session prepared, ready to switch")
         return True
@@ -371,6 +380,12 @@ class AutomationController:
         # Update VLC source in OBS
         self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, current_folder)
 
+        # Switch back to appropriate scene FIRST (critical for viewers)
+        if self.last_stream_status == "live":
+            self.obs_controller.switch_scene(SCENE_LIVE)
+        else:
+            self.obs_controller.switch_scene(SCENE_OFFLINE)
+
         # Get new stream title and category from current session
         session = self.db.get_current_session()
         stream_title = "Unknown"
@@ -391,20 +406,20 @@ class AutomationController:
                 except (json.JSONDecodeError, ValueError) as e:
                     logger.warning(f"Could not parse playlists_selected: {e}")
             
-            # Update stream info with title and category
-            await self.update_stream_info(stream_title, category)
-            logger.info(f"Updated stream: title='{stream_title}', category='{category}'")
-
-        # Switch back to appropriate scene
-        if self.last_stream_status == "live":
-            self.obs_controller.switch_scene(SCENE_LIVE)
-        else:
-            self.obs_controller.switch_scene(SCENE_OFFLINE)
+            # Update stream info with title and category (after scene switch, doesn't block)
+            try:
+                await self.update_stream_info(stream_title, category)
+                logger.info(f"Updated stream: title='{stream_title}', category='{category}'")
+            except Exception as e:
+                logger.warning(f"Failed to update stream info: {e}")
 
         # Reset playback tracking
         self.total_playback_seconds = 0
         self.playback_start_time = time.time() if self.last_stream_status != "live" else None
-        self.last_known_playback_position_ms = 0
+        
+        # Initialize last known position to current VLC position to avoid false skip detection
+        media_status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
+        self.last_known_playback_position_ms = media_status['media_cursor'] if media_status and media_status['media_cursor'] else 0
 
         self.send_discord_notification(
             "Content Rotated",
@@ -433,7 +448,9 @@ class AutomationController:
             download_result = self.playlist_manager.download_playlists(playlists, next_folder)
             
             if download_result.get('success'):
-                logger.info("Background download completed successfully")
+                # Store playlists for next rotation to use
+                self.next_prepared_playlists = playlists
+                logger.info(f"Background download completed successfully. Prepared: {[p['name'] for p in playlists]}")
                 self.send_discord_notification(
                     "Next Rotation Ready",
                     f"Downloaded: {', '.join([p['name'] for p in playlists])}",
@@ -541,10 +558,11 @@ class AutomationController:
         self._check_and_handle_playback_skip()
 
         # Check if we need to trigger download of next rotation
-        if session.get('download_trigger_time'):
+        if session.get('download_trigger_time') and not self.download_triggered_for_session:
             download_trigger = datetime.fromisoformat(session['download_trigger_time'])
             if datetime.now() >= download_trigger and not self.download_in_progress:
                 logger.info("Download trigger time reached, starting background download of next rotation")
+                self.download_triggered_for_session = True  # Mark as triggered
                 self.download_in_progress = True
                 # Start download in background (non-blocking)
                 asyncio.create_task(self._background_download_next_rotation())

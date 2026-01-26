@@ -3,6 +3,9 @@ import logging
 import sys
 import os
 
+# Force UTF-8 encoding for console output to handle Unicode characters
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+
 log_dir = os.path.dirname(os.path.abspath(__file__))
 log_file = os.path.join(log_dir, 'automation.log')
 

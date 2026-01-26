@@ -182,7 +182,9 @@ class DatabaseManager:
             video_id = cursor.lastrowid
             return video_id
         except sqlite3.IntegrityError:
-            logger.warning(f"Video already exists: {filename}")
+            # Sanitize filename for logging (remove Unicode characters that cause encoding errors)
+            safe_filename = filename.encode('ascii', 'ignore').decode('ascii')
+            logger.warning(f"Video already exists: {safe_filename}")
             cursor.execute("""
                 SELECT id FROM videos 
                 WHERE playlist_id = ? AND filename = ?
