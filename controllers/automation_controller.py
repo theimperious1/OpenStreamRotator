@@ -5,8 +5,6 @@ import logging
 import os
 import signal
 import json
-import asyncio
-import time
 from datetime import datetime, timedelta
 from typing import Optional
 from dotenv import load_dotenv
@@ -49,9 +47,7 @@ KICK_REDIRECT_URI = os.getenv("KICK_REDIRECT_URI", "http://localhost:8080/callba
 
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-CHECK_INTERVAL = 15
-ROTATION_HOURS = 12
-ROTATION_SECONDS = ROTATION_HOURS * 3600
+CHECK_INTERVAL = 1
 
 
 class AutomationController:
@@ -252,7 +248,6 @@ class AutomationController:
 
         settings = self.config_manager.get_settings()
         next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
-        buffer_minutes = settings.get('download_buffer_minutes', 30)
 
         # Use prepared playlists if available from background download, otherwise select new ones
         if self.next_prepared_playlists:
@@ -691,7 +686,6 @@ class AutomationController:
                     is_live = False
                     if self.twitch_token:
                         is_live = self.is_stream_live(self.twitch_token, os.getenv("TARGET_TWITCH_STREAMER", "zackrawrr"))
-                        is_live = False  # TEMP DISABLE FOR TESTING
 
                     if is_live and self.last_stream_status != "live":
                         logger.info("Asmongold is LIVE — pausing 24/7 stream")
