@@ -1,6 +1,18 @@
 {
   "playlists": [
     {
+      "name": "Small test 1",
+      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyF6XOwb53qTmbyLa2xsSHR-",
+      "enabled": true,
+      "priority": 3
+    },
+    {
+      "name": "Small test 2",
+      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyFkfqt3Oga1pab8ePbKFscB",
+      "enabled": true,
+      "priority": 2
+    },
+    {
       "name": "Cat videos",
       "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyEKFKMuMWtiCWJGjwYsblck",
       "enabled": true,
@@ -9,6 +21,7 @@
   ],
   "settings": {
     "rotation_hours": 12,
+    "download_buffer_minutes": 30,
     "video_folder": "C:/Projects/Asmon247Reborn/videos/live",
     "next_rotation_folder": "C:/Projects/Asmon247Reborn/videos/pending",
     "check_config_interval": 60,

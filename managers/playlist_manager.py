@@ -5,6 +5,7 @@ import logging
 import shutil
 from typing import List, Dict, Optional
 import sys
+import json as json_module
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 
@@ -84,10 +85,10 @@ class PlaylistManager:
         logger.info(f"Auto-selected {len(selected)} playlists: {[p['name'] for p in selected]}")
         return selected
 
-    def download_playlists(self, playlists: List[Dict], output_folder: str) -> bool:
+    def download_playlists(self, playlists: List[Dict], output_folder: str) -> Dict:
         """
         Download selected playlists using yt-dlp.
-        Returns True if successful, False otherwise.
+        Returns dict with 'success' bool and 'total_duration_seconds' from all videos.
         """
         # Ensure output folder exists
         os.makedirs(output_folder, exist_ok=True)
@@ -96,6 +97,7 @@ class PlaylistManager:
         max_retries = settings.get('download_retry_attempts', 3)
 
         all_success = True
+        total_duration = 0
 
         for playlist in playlists:
             playlist_name = playlist['name']
@@ -106,15 +108,18 @@ class PlaylistManager:
             success = False
             for attempt in range(max_retries):
                 try:
-                    if self._download_single_playlist(playlist_url, output_folder):
+                    result = self._download_single_playlist(playlist_url, output_folder)
+                    if result['success']:
                         success = True
                         logger.info(f"Successfully downloaded: {playlist_name}")
 
                         # Update database
                         self.db.update_playlist_played(playlist['id'])
 
-                        # Register downloaded videos
-                        self._register_downloaded_videos(playlist['id'], output_folder, playlist_name)
+                        # Register downloaded videos with duration info
+                        playlist_duration = self._register_downloaded_videos(playlist['id'], output_folder, 
+                                                                            playlist_name, result['metadata'])
+                        total_duration += playlist_duration
                         break
                     else:
                         logger.warning(f"Download attempt {attempt + 1} failed for {playlist_name}")
@@ -128,10 +133,13 @@ class PlaylistManager:
                 logger.error(f"Failed to download {playlist_name} after {max_retries} attempts")
                 all_success = False
 
-        return all_success
+        return {'success': all_success, 'total_duration_seconds': total_duration}
 
-    def _download_single_playlist(self, playlist_url: str, output_folder: str) -> bool:
-        """Execute yt-dlp command to download a playlist."""
+    def _download_single_playlist(self, playlist_url: str, output_folder: str) -> Dict:
+        """Execute yt-dlp command to download a playlist.
+        
+        Returns dict with 'success' bool and 'metadata' containing video durations.
+        """
         cmd = [
             sys.executable,
             "-m", "yt_dlp",
@@ -156,38 +164,95 @@ class PlaylistManager:
             )
 
             if result.returncode == 0:
-                return True
+                return {'success': True, 'metadata': {}}
             else:
                 logger.error(f"yt-dlp error: {result.stderr}")
-                return False
+                return {'success': False, 'metadata': {}}
 
         except subprocess.TimeoutExpired:
             logger.error("Download timed out after 1 hour")
-            return False
+            return {'success': False, 'metadata': {}}
         except Exception as e:
             logger.error(f"Subprocess error: {e}")
-            return False
+            return {'success': False, 'metadata': {}}
 
-    def _register_downloaded_videos(self, playlist_id: int, folder: str, playlist_name: str):
-        """Register downloaded videos in the database."""
+    def _register_downloaded_videos(self, playlist_id: int, folder: str, playlist_name: str, 
+                                   metadata: Dict) -> int:
+        """Register downloaded videos in the database.
+        
+        Returns total duration in seconds for all videos in this playlist.
+        """
         video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
+        total_duration = 0
+        registered_count = 0
 
         for filename in os.listdir(folder):
             if filename.lower().endswith(video_extensions):
-                # Check if it belongs to this playlist
-                if filename.startswith(playlist_name.replace(' ', '')):
-                    file_path = os.path.join(folder, filename)
-                    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                file_path = os.path.join(folder, filename)
+                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
 
-                    # Extract title from filename
-                    title = self._extract_title_from_filename(filename)
+                # Extract title from filename
+                title = self._extract_title_from_filename(filename)
+                
+                # Extract actual duration from video file using ffprobe
+                duration_seconds = self._get_video_duration(file_path)
+                total_duration += duration_seconds
 
+                try:
                     self.db.add_video(
                         playlist_id=playlist_id,
                         filename=filename,
                         title=title,
-                        file_size_mb=int(file_size_mb)
+                        file_size_mb=int(file_size_mb),
+                        duration_seconds=duration_seconds
                     )
+                    registered_count += 1
+                    logger.debug(f"Registered video: {filename} ({file_size_mb:.1f} MB, {duration_seconds}s)")
+                except Exception as e:
+                    logger.debug(f"Video already registered or error: {filename} - {e}")
+        
+        logger.info(f"Registered {registered_count} videos for {playlist_name}")
+        return total_duration
+
+    def _get_video_duration(self, file_path: str) -> int:
+        """
+        Extract video duration in seconds using ffprobe.
+        
+        Returns duration in seconds (integer), or 0 if extraction fails.
+        """
+        try:
+            # Run ffprobe to get duration
+            cmd = [
+                'ffprobe',
+                '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'json',
+                file_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            
+            if result.returncode == 0:
+                data = json_module.loads(result.stdout)
+                duration_str = data.get('format', {}).get('duration', '0')
+                duration_seconds = int(float(duration_str))
+                return duration_seconds
+            else:
+                logger.warning(f"ffprobe failed for {file_path}: {result.stderr}")
+                return 0
+                
+        except subprocess.TimeoutExpired:
+            logger.warning(f"ffprobe timeout for {file_path}")
+            return 0
+        except FileNotFoundError:
+            logger.error("ffprobe not found. Please install FFmpeg: https://ffmpeg.org/download.html")
+            return 0
+        except (json_module.JSONDecodeError, KeyError, ValueError) as e:
+            logger.warning(f"Failed to parse ffprobe output for {file_path}: {e}")
+            return 0
+        except Exception as e:
+            logger.warning(f"Error extracting video duration for {file_path}: {type(e).__name__}: {e}")
+            return 0
 
     def _extract_title_from_filename(self, filename: str) -> str:
         """Extract video title from filename."""

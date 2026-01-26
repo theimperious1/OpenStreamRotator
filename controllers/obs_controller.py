@@ -101,3 +101,24 @@ class OBSController:
         except Exception as e:
             logger.error(f"Failed to verify scenes: {e}")
             return False
+
+    def get_media_input_status(self, source_name: str) -> Optional[dict]:
+        """Get playback status of a media input source (VLC).
+        
+        Returns dict with:
+        - media_state: Current state (PLAYING, PAUSED, STOPPED, ENDED, etc.)
+        - media_cursor: Current playback position in milliseconds
+        - media_duration: Total duration in milliseconds
+        
+        Returns None if source not found or error occurs.
+        """
+        try:
+            response = self.obs_client.get_media_input_status(name=source_name)
+            return {
+                'media_state': response.media_state,  # type: ignore
+                'media_cursor': response.media_cursor,  # type: ignore (milliseconds)
+                'media_duration': response.media_duration,  # type: ignore (milliseconds)
+            }
+        except Exception as e:
+            logger.debug(f"Failed to get media input status for {source_name}: {e}")
+            return None

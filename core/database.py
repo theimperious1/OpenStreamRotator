@@ -78,6 +78,9 @@ class DatabaseManager:
                 playlists_selected TEXT,
                 total_videos INTEGER,
                 total_size_mb INTEGER,
+                total_duration_seconds INTEGER DEFAULT 0,
+                estimated_finish_time TIMESTAMP,
+                download_trigger_time TIMESTAMP,
                 stream_title TEXT,
                 playback_seconds INTEGER DEFAULT 0
             )
@@ -165,21 +168,23 @@ class DatabaseManager:
         self.close()
 
     def add_video(self, playlist_id: int, filename: str, title: Optional[str] = None,
-                  file_size_mb: Optional[int] = None) -> Optional[int]:
+                  file_size_mb: Optional[int] = None, duration_seconds: Optional[int] = None) -> Optional[int]:
         """Add a video to the database."""
         conn = self.connect()
         cursor = conn.cursor()
 
         try:
             cursor.execute("""
-                INSERT INTO videos (playlist_id, filename, title, file_size_mb)
-                VALUES (?, ?, ?, ?)
-            """, (playlist_id, filename, title, file_size_mb))
+                INSERT INTO videos (playlist_id, filename, title, file_size_mb, duration_seconds)
+                VALUES (?, ?, ?, ?, ?)
+            """, (playlist_id, filename, title, file_size_mb, duration_seconds))
             conn.commit()
             video_id = cursor.lastrowid
             return video_id
         except sqlite3.IntegrityError:
-            logger.warning(f"Video already exists: {filename}")
+            # Sanitize filename for logging (remove Unicode characters that cause encoding errors)
+            safe_filename = filename.encode('ascii', 'ignore').decode('ascii')
+            logger.warning(f"Video already exists: {safe_filename}")
             cursor.execute("""
                 SELECT id FROM videos 
                 WHERE playlist_id = ? AND filename = ?
@@ -189,15 +194,20 @@ class DatabaseManager:
             self.close()
 
     def create_rotation_session(self, playlists_selected: List[int],
-                                stream_title: str) -> Optional[int]:
+                                stream_title: str,
+                                total_duration_seconds: int = 0,
+                                estimated_finish_time: Optional[datetime] = None,
+                                download_trigger_time: Optional[datetime] = None) -> Optional[int]:
         """Create a new rotation session."""
         conn = self.connect()
         cursor = conn.cursor()
 
         cursor.execute("""
-            INSERT INTO rotation_sessions (playlists_selected, stream_title)
-            VALUES (?, ?)
-        """, (json.dumps(playlists_selected), stream_title))
+            INSERT INTO rotation_sessions (playlists_selected, stream_title, total_duration_seconds, 
+                                          estimated_finish_time, download_trigger_time)
+            VALUES (?, ?, ?, ?, ?)
+        """, (json.dumps(playlists_selected), stream_title, total_duration_seconds,
+              estimated_finish_time, download_trigger_time))
 
         conn.commit()
         session_id = cursor.lastrowid
@@ -233,6 +243,20 @@ class DatabaseManager:
             SET playback_seconds = ?
             WHERE id = ?
         """, (playback_seconds, session_id))
+
+        conn.commit()
+        self.close()
+
+    def update_session_times(self, session_id: int, estimated_finish_time: str, download_trigger_time: str):
+        """Update estimated_finish_time and download_trigger_time for a session (for skip detection recalculation)."""
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE rotation_sessions 
+            SET estimated_finish_time = ?, download_trigger_time = ?
+            WHERE id = ?
+        """, (estimated_finish_time, download_trigger_time, session_id))
 
         conn.commit()
         self.close()
