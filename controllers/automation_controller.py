@@ -444,6 +444,9 @@ class AutomationController:
                     self.db.update_session_playback(self.current_session_id, total_seconds)
                     self.db.end_session(self.current_session_id)
 
+                # Clear prepared playlists to force fresh download of manually selected ones
+                self.next_prepared_playlists = None
+                
                 # Start manual rotation
                 if self.start_rotation_session(manual_playlists=selected):
                     await self.execute_content_switch()
