@@ -306,7 +306,12 @@ class AutomationController:
             logger.info(f"No duration info available, using config rotation_hours: {rotation_hours}h")
         
         estimated_finish_time = current_time + timedelta(seconds=total_duration_seconds)
-        download_trigger_time = estimated_finish_time - timedelta(minutes=buffer_minutes)
+        
+        # Calculate dynamic buffer: 10% of total duration, but never more than 50% of video
+        buffer_percentage = 0.10
+        max_buffer_percentage = 0.50
+        dynamic_buffer_seconds = int(total_duration_seconds * min(buffer_percentage, max_buffer_percentage))
+        download_trigger_time = estimated_finish_time - timedelta(seconds=dynamic_buffer_seconds)
         
         logger.info(f"Total rotation duration: {total_duration_seconds}s (~{total_duration_seconds // 60} minutes)")
         logger.info(f"Estimated finish: {estimated_finish_time}")
