@@ -5,9 +5,8 @@ import re
 import sqlite3
 from typing import Optional
 import aiohttp
-import sys
-from pathlib import Path
 from integrations.platforms.base.stream_platform import StreamPlatform
+from config.constants import KICK_FALLBACK_CATEGORY_ID
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +121,7 @@ class KickUpdater(StreamPlatform):
         if category_id is None:
             # Skip trying to fetch current category to avoid kickpython's asyncio.run() issue
             # Always use the provided category or fallback
-            category_id = 15 # Just Chatting - fallback
+            category_id = KICK_FALLBACK_CATEGORY_ID  # Just Chatting - fallback
             logger.warning(f"[{self.platform_name}] Using fallback category ID: {category_id}")
 
         # Ensure category_id is an integer
@@ -130,7 +129,7 @@ class KickUpdater(StreamPlatform):
             category_id = int(category_id)
         except (ValueError, TypeError):
             logger.error(f"[{self.platform_name}] Invalid category ID: {category_id}, using fallback")
-            category_id = 15 # Just Chatting
+            category_id = KICK_FALLBACK_CATEGORY_ID
 
         update_params = {
             "channel_id": self.channel_id,
@@ -239,41 +238,6 @@ class KickUpdater(StreamPlatform):
             return None
         except Exception as e:
             logger.error(f"[{self.platform_name}] Category lookup error for '{category_name}': {type(e).__name__}: {e}", exc_info=True)
-            return None
-
-    async def _get_current_category_id(self) -> Optional[str]:
-        """Fetch the current category ID for the channel (requires auth)."""
-        await self._ensure_initialized()
-        try:
-            # get_channels() returns full channel info including current category
-            response = await self.api.get_channels(channel_id=self.channel_id)  # type: ignore
-            
-            channel_data = None
-            # Response structure: {"data": [{...channel info...}]}
-            if isinstance(response, dict) and "data" in response:
-                data_list = response.get("data", [])
-                if isinstance(data_list, list) and len(data_list) > 0:
-                    channel_data = data_list[0]
-            elif isinstance(response, list) and len(response) > 0:
-                channel_data = response[0]
-            elif isinstance(response, dict):
-                channel_data = response
-            
-            if not channel_data:
-                logger.warning(f"[{self.platform_name}] No channel data returned")
-                return None
-            
-            # Extract category ID from the category object (based on Kick API response)
-            current_category = channel_data.get("category", {}).get("id")
-            
-            if current_category:
-                logger.debug(f"[{self.platform_name}] Current category ID: {current_category}")
-                return str(current_category)
-            
-            logger.warning(f"[{self.platform_name}] Could not determine current category ID")
-            return None
-        except Exception as e:
-            self.log_error("Get current category ID", e)
             return None
 
     def update_category(self, category_name: str) -> bool:

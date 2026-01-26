@@ -118,7 +118,7 @@ class PlaylistManager:
 
                         # Register downloaded videos with duration info
                         playlist_duration = self._register_downloaded_videos(playlist['id'], output_folder, 
-                                                                            playlist_name, result['metadata'])
+                                                                            playlist_name)
                         total_duration += playlist_duration
                         break
                     else:
@@ -176,8 +176,7 @@ class PlaylistManager:
             logger.error(f"Subprocess error: {e}")
             return {'success': False, 'metadata': {}}
 
-    def _register_downloaded_videos(self, playlist_id: int, folder: str, playlist_name: str, 
-                                   metadata: Dict) -> int:
+    def _register_downloaded_videos(self, playlist_id: int, folder: str, playlist_name: str) -> int:
         """Register downloaded videos in the database.
         
         Returns total duration in seconds for all videos in this playlist.
