@@ -1,5 +1,4 @@
 import time
-import requests
 import obsws_python as obs
 import logging
 import os
@@ -13,6 +12,10 @@ from config.config_manager import ConfigManager
 from managers.playlist_manager import PlaylistManager
 from controllers.obs_controller import OBSController
 from managers.platform_manager import PlatformManager
+from services.notification_service import NotificationService
+from services.playback_tracker import PlaybackTracker
+from services.playback_skip_detector import PlaybackSkipDetector
+from services.twitch_live_checker import TwitchLiveChecker
 
 
 # Load environment variables
@@ -45,8 +48,10 @@ KICK_CLIENT_SECRET = os.getenv("KICK_CLIENT_SECRET", "")
 KICK_CHANNEL_ID = os.getenv("KICK_CHANNEL_ID", "")
 KICK_REDIRECT_URI = os.getenv("KICK_REDIRECT_URI", "http://localhost:8080/callback")
 
+# Discord Configuration
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
+# Main loop check interval (seconds)
 CHECK_INTERVAL = 1
 
 
@@ -60,14 +65,18 @@ class AutomationController:
         self.obs_controller = None
         self.platform_manager = PlatformManager()
 
-        self.twitch_token = None
-        self.twitch_token_expiry = 0
+        # Initialize services
+        self.notification_service = NotificationService(os.getenv("DISCORD_WEBHOOK_URL", ""))
+        self.playback_tracker = PlaybackTracker(self.db)
+        self.playback_skip_detector: Optional[PlaybackSkipDetector] = None
+        
+        # Twitch live checker
+        if TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET:
+            self.twitch_live_checker = TwitchLiveChecker(TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET)
+        else:
+            self.twitch_live_checker = None
 
         self.current_session_id = None
-        self.playback_start_time = None
-        self.total_playback_seconds = 0
-        self.last_known_playback_position_ms = 0
-        self.last_playback_check_time = None  # Track time of last position check for skip detection
         self.next_prepared_playlists = None  # Store playlists downloaded in background
 
         self.last_stream_status = None
@@ -96,32 +105,34 @@ class AutomationController:
 
     def setup_platforms(self):
         """Initialize enabled streaming platforms."""
-        # Initialize Twitch token for live status checking (independent of ENABLE_TWITCH)
-        # This allows checking if Asmongold is live even if we're not updating titles on Twitch
-        if TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET:
+        # Initialize Twitch live checker
+        if self.twitch_live_checker:
             try:
-                self.twitch_token, self.twitch_token_expiry = self.get_twitch_token()
+                self.twitch_live_checker.refresh_token_if_needed()
                 logger.info("Twitch credentials available for live status checking")
             except Exception as e:
-                logger.warning(f"Could not get Twitch token for live checking: {e}")
+                logger.warning(f"Could not initialize Twitch live checker: {e}")
         
         # Setup Twitch platform (for title updates)
-        if ENABLE_TWITCH and TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET and self.twitch_token:
-            # Get broadcaster ID if not set
-            broadcaster_id = TWITCH_BROADCASTER_ID
-            if not broadcaster_id and TWITCH_USER_LOGIN:
-                broadcaster_id = self.get_broadcaster_id(self.twitch_token, TWITCH_USER_LOGIN)
+        if ENABLE_TWITCH and self.twitch_live_checker:
+            try:
+                # Get broadcaster ID if not set
+                broadcaster_id = TWITCH_BROADCASTER_ID
+                if not broadcaster_id and TWITCH_USER_LOGIN:
+                    broadcaster_id = self.twitch_live_checker.get_broadcaster_id(TWITCH_USER_LOGIN)
 
-            if broadcaster_id:
-                twitch = self.platform_manager.add_twitch(
-                    TWITCH_CLIENT_ID,
-                    self.twitch_token,
-                    broadcaster_id
-                )
-                if twitch:
-                    logger.info(f"Twitch enabled for channel: {TWITCH_USER_LOGIN}")
-            else:
-                logger.warning("Twitch broadcaster ID not found, Twitch title updates disabled")
+                if broadcaster_id and self.twitch_live_checker.token:
+                    twitch = self.platform_manager.add_twitch(
+                        TWITCH_CLIENT_ID,
+                        self.twitch_live_checker.token,
+                        broadcaster_id
+                    )
+                    if twitch:
+                        logger.info(f"Twitch enabled for channel: {TWITCH_USER_LOGIN}")
+                else:
+                    logger.warning("Twitch broadcaster ID not found, Twitch title updates disabled")
+            except Exception as e:
+                logger.error(f"Failed to setup Twitch platform: {e}")
 
         # Setup Kick
         if ENABLE_KICK and KICK_CLIENT_ID and KICK_CLIENT_SECRET and KICK_CHANNEL_ID:
@@ -141,94 +152,13 @@ class AutomationController:
         else:
             logger.warning("No streaming platforms enabled. Titles will not be updated.")
 
-    def get_twitch_token(self) -> tuple[str, float]:
-        """Get Twitch App Access Token."""
-        url = "https://id.twitch.tv/oauth2/token"
-        params = {
-            "client_id": TWITCH_CLIENT_ID,
-            "client_secret": TWITCH_CLIENT_SECRET,
-            "grant_type": "client_credentials"
-        }
-        try:
-            r = requests.post(url, params=params, timeout=10)
-            r.raise_for_status()
-            data = r.json()
-            token = data["access_token"]
-            expiry = time.time() + data.get("expires_in", 3600)
-            logger.info("Twitch token acquired")
-            return token, expiry
-        except requests.RequestException as e:
-            logger.error(f"Failed to get Twitch token: {e}")
-            raise
-
-    def get_broadcaster_id(self, token: str, username: str) -> str:
-        """Get broadcaster ID from username."""
-        headers = {
-            "Client-ID": TWITCH_CLIENT_ID,
-            "Authorization": f"Bearer {token}"
-        }
-        url = f"https://api.twitch.tv/helix/users?login={username}"
-        try:
-            r = requests.get(url, headers=headers, timeout=10)
-            r.raise_for_status()
-            data = r.json()
-            if data.get("data"):
-                broadcaster_id = data["data"][0]["id"]
-                logger.info(f"Got broadcaster ID for {username}: {broadcaster_id}")
-                return broadcaster_id
-            return ""
-        except requests.RequestException as e:
-            logger.error(f"Failed to get broadcaster ID: {e}")
-            return ""
-
-    def is_stream_live(self, token: str, username: str = "zackrawrr") -> bool:
-        """Check if a Twitch user is live."""
-        headers = {
-            "Client-ID": TWITCH_CLIENT_ID,
-            "Authorization": f"Bearer {token}"
-        }
-        url = f"https://api.twitch.tv/helix/streams?user_login={username}"
-        try:
-            r = requests.get(url, headers=headers, timeout=10)
-            r.raise_for_status()
-            data = r.json()
-            is_live = bool(data.get("data"))
-            logger.debug(f"Checked {username} live status: {is_live}")
-            return is_live
-        except requests.RequestException as e:
-            logger.error(f"Failed to check stream status for {username}: {e}")
-            return False
-
-    def send_discord_notification(self, title: str, description: str, color: int = 0x00FF00):
-        """Send Discord notification."""
-        if not DISCORD_WEBHOOK_URL:
-            return
-
-        payload = {
-            "embeds": [{
-                "title": title,
-                "description": description,
-                "color": color,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            }]
-        }
-        try:
-            r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-            r.raise_for_status()
-        except requests.RequestException as e:
-            logger.error(f"Failed to send Discord notification: {e}")
-
     async def update_stream_titles(self, title: str):
         """Update stream title on all enabled platforms."""
         results = await self.platform_manager.update_title_all(title)
 
         for platform, success in results.items():
             if not success:
-                self.send_discord_notification(
-                    f"{platform} Title Update Failed",
-                    f"Failed to update title on {platform}",
-                    color=0xFF0000
-                )
+                self.notification_service.notify_stream_update_failed(platform)
 
     async def update_stream_info(self, title: str, category: Optional[str] = None):
         """Update stream info (title and category) on all enabled platforms."""
@@ -236,11 +166,7 @@ class AutomationController:
 
         for platform, success in results.items():
             if not success:
-                self.send_discord_notification(
-                    f"{platform} Stream Update Failed",
-                    f"Failed to update stream info on {platform}",
-                    color=0xFF0000
-                )
+                self.notification_service.notify_stream_info_update_failed(platform)
 
     def start_rotation_session(self, manual_playlists=None):
         """Start a new rotation session."""
@@ -250,49 +176,50 @@ class AutomationController:
         next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
 
         # Use prepared playlists if available from background download, otherwise select new ones
+        using_prepared = False
         if self.next_prepared_playlists:
             playlists = self.next_prepared_playlists
             self.next_prepared_playlists = None  # Clear it
+            using_prepared = True
             logger.info(f"Using prepared playlists: {[p['name'] for p in playlists]}")
         else:
             playlists = self.playlist_manager.select_playlists_for_rotation(manual_playlists)
         
         if not playlists:
             logger.error("No playlists selected for rotation")
-            self.send_discord_notification(
-                "Rotation Error",
-                "No playlists available for rotation",
-                color=0xFF0000
-            )
+            self.notification_service.notify_rotation_error("No playlists available for rotation")
             return False
 
-        # Download playlists to next folder
-        logger.info(f"Downloading {len(playlists)} playlists...")
-        self.send_discord_notification(
-            "Content Rotation Started",
-            f"Downloading: {', '.join([p['name'] for p in playlists])}",
-            color=0xFFA500
-        )
+        # Download playlists only if not already prepared
+        if not using_prepared:
+            logger.info(f"Downloading {len(playlists)} playlists...")
+            self.notification_service.notify_rotation_started([p['name'] for p in playlists])
+            download_result = self.playlist_manager.download_playlists(playlists, next_folder)
+            total_duration_seconds = download_result.get('total_duration_seconds', 0)
 
-        download_result = self.playlist_manager.download_playlists(playlists, next_folder)
-        total_duration_seconds = download_result.get('total_duration_seconds', 0)
-
-        if not download_result.get('success'):
-            logger.error("Failed to download all playlists")
-            self.send_discord_notification(
-                "Download Warning",
-                "Some playlists failed to download, continuing with available content",
-                color=0xFF0000
-            )
+            if not download_result.get('success'):
+                logger.error("Failed to download all playlists")
+                self.notification_service.notify_download_warning(
+                    "Some playlists failed to download, continuing with available content"
+                )
+        else:
+            # Already prepared, just validate and get duration info
+            logger.info(f"Using pre-downloaded playlists, skipping download step")
+            download_result = {'success': True}
+            total_duration_seconds = 0
+            
+            # Get duration from already-registered videos
+            for playlist in playlists:
+                playlist_id = playlist.get('id')
+                if playlist_id:
+                    videos = self.db.get_videos_by_playlist(playlist_id)
+                    for video in videos:
+                        total_duration_seconds += video.get('duration_seconds', 0)
 
         # Validate downloads
         if not self.playlist_manager.validate_downloads(next_folder):
             logger.error("Download validation failed")
-            self.send_discord_notification(
-                "Rotation Failed",
-                "Downloaded content validation failed",
-                color=0xFF0000
-            )
+            self.notification_service.notify_rotation_error("Downloaded content validation failed")
             return False
 
         # Generate stream title
@@ -356,11 +283,7 @@ class AutomationController:
 
         if not success:
             logger.error("Failed to switch content folders")
-            self.send_discord_notification(
-                "Content Switch Failed",
-                "Failed to switch video folders",
-                color=0xFF0000
-            )
+            self.notification_service.notify_rotation_error("Failed to switch video folders")
             self.is_rotating = False
             return False
 
@@ -400,14 +323,33 @@ class AutomationController:
             except Exception as e:
                 logger.warning(f"Failed to update stream info: {e}")
 
-        # Reset playback tracking
-        self.total_playback_seconds = 0
-        self.playback_start_time = time.time() if self.last_stream_status != "live" else None
+        # Mark playlists as played for rotation tracking
+        if session:
+            playlists_selected = session.get('playlists_selected', '')
+            if playlists_selected:
+                try:
+                    playlist_ids = json.loads(playlists_selected)
+                    logger.info(f"Marking {len(playlist_ids)} playlists as played: {playlist_ids}")
+                    for playlist_id in playlist_ids:
+                        self.db.update_playlist_played(playlist_id)
+                    logger.info("Successfully marked playlists as played")
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.warning(f"Could not mark playlists as played: {e}")
+            else:
+                logger.warning("No playlists_selected in session, skipping mark-as-played")
         
-        # Initialize last known position to current VLC position to avoid false skip detection
-        media_status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
-        self.last_known_playback_position_ms = media_status['media_cursor'] if media_status and media_status['media_cursor'] else 0
-        self.last_playback_check_time = time.time()  # Initialize check time for skip detection
+        # Reset playback tracking
+        self.playback_tracker.reset()
+        if self.last_stream_status != "live":
+            self.playback_tracker.start_tracking()
+        
+        # Initialize skip detector
+        if self.obs_controller:
+            if self.playback_skip_detector is None:
+                self.playback_skip_detector = PlaybackSkipDetector(
+                    self.db, self.obs_controller, VLC_SOURCE_NAME
+                )
+            self.playback_skip_detector.initialize()
 
         self.is_rotating = False
         logger.info("Content switch completed successfully")
@@ -433,112 +375,15 @@ class AutomationController:
                 # Store playlists for next rotation to use
                 self.next_prepared_playlists = playlists
                 logger.info(f"Background download completed successfully. Prepared: {[p['name'] for p in playlists]}")
-                self.send_discord_notification(
-                    "Next Rotation Ready",
-                    f"Downloaded: {', '.join([p['name'] for p in playlists])}",
-                    color=0x00FF00
-                )
+                self.notification_service.notify_next_rotation_ready([p['name'] for p in playlists])
             else:
                 logger.warning("Background download had some failures")
-                self.send_discord_notification(
-                    "Background Download Warning",
-                    "Some playlists failed to download in background",
-                    color=0xFF9900
-                )
+                self.notification_service.notify_background_download_warning()
         except Exception as e:
             logger.error(f"Error during background download: {e}")
-            self.send_discord_notification(
-                "Background Download Error",
-                f"Failed to download next rotation: {str(e)}",
-                color=0xFF0000
-            )
+            self.notification_service.notify_background_download_error(str(e))
         finally:
             self.download_in_progress = False
-
-    def _check_and_handle_playback_skip(self) -> bool:
-        """Detect if user has skipped ahead in video playback and recalculate rotation times.
-        
-        Returns True if skip was detected and times were recalculated.
-        """
-        # Get current VLC playback position
-        if not self.obs_controller:
-            return False
-        
-        media_status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
-        if not media_status:
-            return False
-        
-        current_position_ms = media_status['media_cursor']
-        total_duration_ms = media_status['media_duration']
-        
-        if current_position_ms is None or total_duration_ms is None:
-            return False
-        
-        # Calculate expected playback progress based on actual time elapsed since last check
-        # This accounts for VLC variable position reporting
-        if self.last_playback_check_time is None:
-            self.last_playback_check_time = time.time()
-            self.last_known_playback_position_ms = current_position_ms
-            return False
-        
-        time_elapsed_seconds = time.time() - self.last_playback_check_time
-        # Expected playback at 1x speed: 1 second of video per second of elapsed time
-        expected_position_delta_ms = time_elapsed_seconds * 1000
-        
-        # Actual position change
-        position_delta_ms = current_position_ms - self.last_known_playback_position_ms
-        
-        # Calculate how much MORE the position advanced than expected
-        # Add 5 second margin to account for OBS/VLC reporting variations and buffering
-        SKIP_MARGIN_MS = 5000
-        excess_advance_ms = position_delta_ms - expected_position_delta_ms
-        
-        # Only flag as skip if position advanced significantly more than expected
-        # e.g., expected 15s advance but got 40s advance = 25s excess (human skip)
-        if excess_advance_ms > SKIP_MARGIN_MS:
-            time_skipped_seconds = excess_advance_ms / 1000
-            logger.info(
-                f"Playback skip detected: jumped {excess_advance_ms}ms more than expected "
-                f"(expected {expected_position_delta_ms:.0f}ms, got {position_delta_ms}ms advance). "
-                f"Position: {self.last_known_playback_position_ms}ms -> {current_position_ms}ms. "
-                f"Excess skipped: {time_skipped_seconds:.1f}s"
-            )
-            
-            # Calculate remaining playback time based on current position in video
-            remaining_ms = total_duration_ms - current_position_ms
-            remaining_seconds = remaining_ms / 1000
-            
-            # New finish time = now + remaining video seconds
-            new_finish_time = datetime.now() + timedelta(seconds=remaining_seconds)
-            
-            # Update session with new times (if session_id is available)
-            if self.current_session_id:
-                self.db.update_session_times(
-                    self.current_session_id,
-                    new_finish_time.isoformat(),
-                    (new_finish_time - timedelta(minutes=30)).isoformat()  # download_trigger_time
-                )
-            
-            logger.info(
-                f"Rotation times recalculated after skip: "
-                f"new finish time = {new_finish_time.isoformat()}"
-            )
-            
-            self.send_discord_notification(
-                "Playback Skip Detected",
-                f"Video position jumped {time_skipped_seconds:.1f}s ahead. "
-                f"Rotation finish time recalculated to: {new_finish_time.strftime('%H:%M:%S')}",
-                color=0x0099FF
-            )
-            
-            self.last_known_playback_position_ms = current_position_ms
-            self.last_playback_check_time = time.time()
-            return True
-        
-        # Update last known position and check time for next check
-        self.last_known_playback_position_ms = current_position_ms
-        self.last_playback_check_time = time.time()
-        return False
 
     async def check_for_rotation(self):
         """Check if it's time to rotate content based on duration."""
@@ -551,11 +396,16 @@ class AutomationController:
             return
 
         # Check for playback skip and recalculate times if needed
-        self._check_and_handle_playback_skip()
+        if self.playback_skip_detector:
+            skip_detected, skip_info = self.playback_skip_detector.check_for_skip(self.current_session_id)
+            if skip_detected and skip_info:
+                self.notification_service.notify_playback_skip(
+                    skip_info["time_skipped_seconds"],
+                    skip_info["new_finish_time_str"]
+                )
 
         # Trigger background download immediately after rotation (no waiting)
         if not self.download_in_progress and self.next_prepared_playlists is None:
-            logger.info("Starting background download of next rotation...")
             self.download_in_progress = True
             await self._background_download_next_rotation()
 
@@ -563,11 +413,12 @@ class AutomationController:
         if session.get('estimated_finish_time'):
             finish_time = datetime.fromisoformat(session['estimated_finish_time'])
             if datetime.now() >= finish_time:
-                logger.info(f"Rotation duration reached: {self.total_playback_seconds}s")
+                total_seconds = self.playback_tracker.get_total_seconds()
+                logger.info(f"Rotation duration reached: {total_seconds}s")
                 
                 # End current session
                 if self.current_session_id:
-                    self.db.update_session_playback(self.current_session_id, self.total_playback_seconds)
+                    self.db.update_session_playback(self.current_session_id, total_seconds)
                     self.db.end_session(self.current_session_id)
                 
                 # Start new rotation
@@ -589,7 +440,8 @@ class AutomationController:
 
                 # End current session
                 if self.current_session_id:
-                    self.db.update_session_playback(self.current_session_id, self.total_playback_seconds)
+                    total_seconds = self.playback_tracker.get_total_seconds()
+                    self.db.update_session_playback(self.current_session_id, total_seconds)
                     self.db.end_session(self.current_session_id)
 
                 # Start manual rotation
@@ -598,17 +450,6 @@ class AutomationController:
 
                 # Clear override
                 self.config_manager.clear_override()
-
-    def update_playback_time(self):
-        """Update playback time tracking."""
-        if self.playback_start_time and self.last_stream_status != "live":
-            elapsed = time.time() - self.playback_start_time
-            self.total_playback_seconds += int(elapsed)
-            self.playback_start_time = time.time()
-
-            # Update session in database periodically
-            if self.current_session_id:
-                self.db.update_session_playback(self.current_session_id, self.total_playback_seconds)
 
     async def run(self):
         """Main loop."""
@@ -652,16 +493,18 @@ class AutomationController:
                 logger.info("Starting new rotation since videos are missing")
                 # End the current session since videos are gone
                 if session['id']:
-                    self.db.update_session_playback(session['id'], self.total_playback_seconds)
+                    total_seconds = self.playback_tracker.get_total_seconds()
+                    self.db.update_session_playback(session['id'], total_seconds)
                     self.db.end_session(session['id'])
                 # Start new rotation
                 if self.start_rotation_session():
                     await self.execute_content_switch()
             else:
                 self.current_session_id = session['id']
-                self.total_playback_seconds = session.get('playback_seconds', 0)
+                playback_seconds = session.get('playback_seconds', 0)
+                self.playback_tracker.total_playback_seconds = playback_seconds
                 stream_title = session.get('stream_title')
-                logger.info(f"Resuming session {self.current_session_id}, playback: {self.total_playback_seconds}s")
+                logger.info(f"Resuming session {self.current_session_id}, playback: {playback_seconds}s")
                 # Update stream title to match what was previously playing
                 if stream_title:
                     await self.update_stream_titles(stream_title)
@@ -673,51 +516,46 @@ class AutomationController:
                 # Every 60 iterations (60 seconds): Refresh Twitch token and check stream status
                 if loop_count % 60 == 0:
                     # Refresh Twitch token if needed (for live status checking)
-                    if self.twitch_token and time.time() >= self.twitch_token_expiry:
+                    if self.twitch_live_checker:
                         try:
-                            self.twitch_token, self.twitch_token_expiry = self.get_twitch_token()
+                            self.twitch_live_checker.refresh_token_if_needed()
                             twitch = self.platform_manager.get_platform("Twitch")
-                            if twitch:
-                                twitch.update_token(self.twitch_token)
+                            if twitch and self.twitch_live_checker.token:
+                                twitch.update_token(self.twitch_live_checker.token)
                         except Exception as e:
                             logger.warning(f"Failed to refresh Twitch token: {e}")
 
-                    # Check Asmongold stream status (if we have Twitch credentials)
+                    # Check Asmongold stream status (if we have Twitch live checker)
                     is_live = False
-                    if self.twitch_token:
-                        is_live = self.is_stream_live(self.twitch_token, os.getenv("TARGET_TWITCH_STREAMER", "zackrawrr"))
+                    if self.twitch_live_checker:
+                        is_live = self.twitch_live_checker.is_stream_live(
+                            os.getenv("TARGET_TWITCH_STREAMER", "zackrawrr")
+                        )
 
                     if is_live and self.last_stream_status != "live":
                         logger.info("Asmongold is LIVE — pausing 24/7 stream")
-                        self.update_playback_time()
+                        self.playback_tracker.pause_tracking()
                         if self.obs_controller:
                             self.obs_controller.switch_scene(SCENE_LIVE)
                         self.last_stream_status = "live"
-                        self.playback_start_time = None
-
-                        self.send_discord_notification(
-                            "Asmongold is LIVE!",
-                            "24/7 stream paused",
-                            color=0x9146FF
-                        )
+                        self.notification_service.notify_asmongold_live()
 
                     elif not is_live and self.last_stream_status != "offline":
                         logger.info("Asmongold is OFFLINE — resuming 24/7 stream")
                         if self.obs_controller:
                             self.obs_controller.switch_scene(SCENE_OFFLINE)
                         self.last_stream_status = "offline"
-                        self.playback_start_time = time.time()
+                        self.playback_tracker.resume_tracking()
+                        self.notification_service.notify_asmongold_offline()
 
-                        self.send_discord_notification(
-                            "Asmongold is OFFLINE",
-                            "24/7 stream resumed",
-                            color=0x00FF00
-                        )
 
                 # Every iteration (every second): Rotation checks, config changes, playback tracking
                 # Update playback time if streaming
-                if self.last_stream_status != "live":
-                    self.update_playback_time()
+                if self.last_stream_status != "live" and self.playback_tracker.is_tracking():
+                    self.playback_tracker.pause_tracking()
+                    if self.current_session_id:
+                        self.playback_tracker.update_session(self.current_session_id)
+                    self.playback_tracker.resume_tracking()
 
                 # Check for rotation (fast detection)
                 await self.check_for_rotation()
@@ -735,7 +573,8 @@ class AutomationController:
                 if self.shutdown_event:
                     logger.info("Shutdown event detected, performing cleanup...")
                     if self.current_session_id:
-                        self.db.update_session_playback(self.current_session_id, self.total_playback_seconds)
+                        total_seconds = self.playback_tracker.get_total_seconds()
+                        self.db.update_session_playback(self.current_session_id, total_seconds)
                         self.db.end_session(self.current_session_id)
                     self.platform_manager.cleanup()
                     if self.obs_client:
@@ -746,11 +585,7 @@ class AutomationController:
 
             except Exception as e:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
-                self.send_discord_notification(
-                    "Automation Error",
-                    f"Unexpected error: {str(e)}",
-                    color=0xFF0000
-                )
+                self.notification_service.notify_automation_error(str(e))
 
             loop_count += 1
             time.sleep(1)

@@ -193,6 +193,20 @@ class DatabaseManager:
         finally:
             self.close()
 
+    def get_videos_by_playlist(self, playlist_id: int) -> List[Dict]:
+        """Get all videos for a specific playlist."""
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM videos 
+            WHERE playlist_id = ?
+        """, (playlist_id,))
+
+        videos = [dict(row) for row in cursor.fetchall()]
+        self.close()
+        return videos
+
     def create_rotation_session(self, playlists_selected: List[int],
                                 stream_title: str,
                                 total_duration_seconds: int = 0,
