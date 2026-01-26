@@ -176,21 +176,32 @@ class KickUpdater(StreamPlatform):
                     # Response structure can vary - could be {"data": {...}} or {"data": [{...}]}
                     data_obj = data.get("data")
                     
+                    if data_obj is None:
+                        logger.warning(f"[{self.platform_name}] No data in category response for '{category_name}'")
+                        return None
+                    
+                    category_data = None
+                    
                     # Handle if data is a list (take first item)
                     if isinstance(data_obj, list):
                         if len(data_obj) > 0:
                             category_data = data_obj[0]
                         else:
-                            logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}'")
+                            logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}' (empty list)")
                             return None
                     elif isinstance(data_obj, dict):
-                        category_data = data_obj.get("category", {})
+                        # Check if there's a 'category' key with the actual data
+                        if "category" in data_obj:
+                            category_data = data_obj.get("category")
+                        else:
+                            # Use the entire data_obj as category_data
+                            category_data = data_obj
                     else:
-                        logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}' (unexpected response format)")
+                        logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}' (unexpected response format: {type(data_obj).__name__})")
                         return None
                     
                     if not isinstance(category_data, dict):
-                        logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}'")
+                        logger.warning(f"[{self.platform_name}] Category data is not a dict for '{category_name}': got {type(category_data).__name__}. Response: {data}")
                         return None
                     
                     # Extract the numeric subcategory ID from the image_url
@@ -205,14 +216,14 @@ class KickUpdater(StreamPlatform):
                             logger.info(f"[{self.platform_name}] Found subcategory: {cat_name} -> {subcategory_id}")
                             return subcategory_id
                     
-                    logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}'")
+                    logger.warning(f"[{self.platform_name}] No subcategory ID found for '{category_name}'")
                     return None
                     
         except asyncio.TimeoutError:
             logger.error(f"[{self.platform_name}] Timeout fetching categories from Kick API")
             return None
         except Exception as e:
-            logger.error(f"[{self.platform_name}] Category lookup error for '{category_name}': {type(e).__name__}: {e}")
+            logger.error(f"[{self.platform_name}] Category lookup error for '{category_name}': {type(e).__name__}: {e}", exc_info=True)
             return None
 
     async def _get_current_category_id(self) -> Optional[str]:

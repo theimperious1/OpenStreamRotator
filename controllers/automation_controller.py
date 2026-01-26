@@ -71,12 +71,12 @@ class AutomationController:
         self.playback_start_time = None
         self.total_playback_seconds = 0
         self.last_known_playback_position_ms = 0
+        self.last_playback_check_time = None  # Track time of last position check for skip detection
         self.next_prepared_playlists = None  # Store playlists downloaded in background
 
         self.last_stream_status = None
         self.is_rotating = False
         self.download_in_progress = False
-        self.download_triggered_for_session = False  # Prevent duplicate download triggers
         self.shutdown_event = False
 
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -315,15 +315,8 @@ class AutomationController:
         
         estimated_finish_time = current_time + timedelta(seconds=total_duration_seconds)
         
-        # Calculate dynamic buffer: 10% of total duration, but never more than 50% of video
-        buffer_percentage = 0.10
-        max_buffer_percentage = 0.50
-        dynamic_buffer_seconds = int(total_duration_seconds * min(buffer_percentage, max_buffer_percentage))
-        download_trigger_time = estimated_finish_time - timedelta(seconds=dynamic_buffer_seconds)
-        
         logger.info(f"Total rotation duration: {total_duration_seconds}s (~{total_duration_seconds // 60} minutes)")
         logger.info(f"Estimated finish: {estimated_finish_time}")
-        logger.info(f"Next download will trigger at: {download_trigger_time}")
 
         # Create database session with timing info
         playlist_ids = [p['id'] for p in playlists]
@@ -332,13 +325,12 @@ class AutomationController:
             stream_title,
             total_duration_seconds=total_duration_seconds,
             estimated_finish_time=estimated_finish_time,
-            download_trigger_time=download_trigger_time
+            download_trigger_time=None  # No longer using trigger time, download immediately after switch
         )
         
         # Reset playback tracking for new rotation
         self.playback_start_time = time.time()
         self.total_playback_seconds = 0
-        self.download_triggered_for_session = False  # Reset for new session
 
         logger.info("Rotation session prepared, ready to switch")
         return True
@@ -420,12 +412,7 @@ class AutomationController:
         # Initialize last known position to current VLC position to avoid false skip detection
         media_status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
         self.last_known_playback_position_ms = media_status['media_cursor'] if media_status and media_status['media_cursor'] else 0
-
-        self.send_discord_notification(
-            "Content Rotated",
-            f"New content is now playing\nTitle: {stream_title}",
-            color=0x00FF00
-        )
+        self.last_playback_check_time = time.time()  # Initialize check time for skip detection
 
         self.is_rotating = False
         logger.info("Content switch completed successfully")
@@ -492,22 +479,34 @@ class AutomationController:
         if current_position_ms is None or total_duration_ms is None:
             return False
         
-        # Check if playback position jumped significantly ahead of expected
-        # Expected advance = CHECK_INTERVAL (15s) + margin (10s) = 25s tolerance
-        # Only flag as skip if position jumped MORE than 25 seconds
-        EXPECTED_ADVANCE_MS = CHECK_INTERVAL * 1000  # 15,000 ms
-        SKIP_MARGIN_MS = 10000  # 10 second margin
-        SKIP_THRESHOLD_MS = EXPECTED_ADVANCE_MS + SKIP_MARGIN_MS  # 25,000 ms total
+        # Calculate expected playback progress based on actual time elapsed since last check
+        # This accounts for VLC variable position reporting
+        if self.last_playback_check_time is None:
+            self.last_playback_check_time = time.time()
+            self.last_known_playback_position_ms = current_position_ms
+            return False
         
+        time_elapsed_seconds = time.time() - self.last_playback_check_time
+        # Expected playback at 1x speed: 1 second of video per second of elapsed time
+        expected_position_delta_ms = time_elapsed_seconds * 1000
+        
+        # Actual position change
         position_delta_ms = current_position_ms - self.last_known_playback_position_ms
         
-        # If position jumped significantly more than expected (skip detected)
-        if position_delta_ms > SKIP_THRESHOLD_MS:
-            time_skipped_seconds = position_delta_ms / 1000
+        # Calculate how much MORE the position advanced than expected
+        # Add 5 second margin to account for OBS/VLC reporting variations and buffering
+        SKIP_MARGIN_MS = 5000
+        excess_advance_ms = position_delta_ms - expected_position_delta_ms
+        
+        # Only flag as skip if position advanced significantly more than expected
+        # e.g., expected 15s advance but got 40s advance = 25s excess (human skip)
+        if excess_advance_ms > SKIP_MARGIN_MS:
+            time_skipped_seconds = excess_advance_ms / 1000
             logger.info(
-                f"Playback skip detected: jumped {position_delta_ms}ms ahead "
-                f"(from {self.last_known_playback_position_ms}ms to {current_position_ms}ms). "
-                f"Time skipped: {time_skipped_seconds:.1f}s"
+                f"Playback skip detected: jumped {excess_advance_ms}ms more than expected "
+                f"(expected {expected_position_delta_ms:.0f}ms, got {position_delta_ms}ms advance). "
+                f"Position: {self.last_known_playback_position_ms}ms → {current_position_ms}ms. "
+                f"Excess skipped: {time_skipped_seconds:.1f}s"
             )
             
             # Calculate remaining playback time based on current position in video
@@ -538,14 +537,16 @@ class AutomationController:
             )
             
             self.last_known_playback_position_ms = current_position_ms
+            self.last_playback_check_time = time.time()
             return True
         
-        # Update last known position for next check
+        # Update last known position and check time for next check
         self.last_known_playback_position_ms = current_position_ms
+        self.last_playback_check_time = time.time()
         return False
 
     async def check_for_rotation(self):
-        """Check if it's time to rotate content based on duration and download trigger."""
+        """Check if it's time to rotate content based on duration."""
         if self.is_rotating:
             return
 
@@ -557,15 +558,11 @@ class AutomationController:
         # Check for playback skip and recalculate times if needed
         self._check_and_handle_playback_skip()
 
-        # Check if we need to trigger download of next rotation
-        if session.get('download_trigger_time') and not self.download_triggered_for_session:
-            download_trigger = datetime.fromisoformat(session['download_trigger_time'])
-            if datetime.now() >= download_trigger and not self.download_in_progress:
-                logger.info("Download trigger time reached, starting background download of next rotation")
-                self.download_triggered_for_session = True  # Mark as triggered
-                self.download_in_progress = True
-                # Start download in background (non-blocking)
-                asyncio.create_task(self._background_download_next_rotation())
+        # Trigger background download immediately after rotation (no waiting)
+        if not self.download_in_progress and self.next_prepared_playlists is None:
+            logger.info("Starting background download of next rotation...")
+            self.download_in_progress = True
+            await self._background_download_next_rotation()
 
         # Check if rotation duration has been reached
         if session.get('estimated_finish_time'):
@@ -675,62 +672,66 @@ class AutomationController:
                     await self.update_stream_titles(stream_title)
 
         # Main loop
+        loop_count = 0
         while True:
             try:
-                # Refresh Twitch token if needed (for live status checking)
-                if self.twitch_token and time.time() >= self.twitch_token_expiry:
-                    try:
-                        self.twitch_token, self.twitch_token_expiry = self.get_twitch_token()
-                        twitch = self.platform_manager.get_platform("Twitch")
-                        if twitch:
-                            twitch.update_token(self.twitch_token)
-                    except Exception as e:
-                        logger.warning(f"Failed to refresh Twitch token: {e}")
+                # Every 60 iterations (60 seconds): Refresh Twitch token and check stream status
+                if loop_count % 60 == 0:
+                    # Refresh Twitch token if needed (for live status checking)
+                    if self.twitch_token and time.time() >= self.twitch_token_expiry:
+                        try:
+                            self.twitch_token, self.twitch_token_expiry = self.get_twitch_token()
+                            twitch = self.platform_manager.get_platform("Twitch")
+                            if twitch:
+                                twitch.update_token(self.twitch_token)
+                        except Exception as e:
+                            logger.warning(f"Failed to refresh Twitch token: {e}")
 
-                # Check Asmongold stream status (if we have Twitch credentials)
-                is_live = False
-                if self.twitch_token:
-                    is_live = self.is_stream_live(self.twitch_token, os.getenv("TARGET_TWITCH_STREAMER", "zackrawrr"))
-                    is_live = False  # TEMP DISABLE FOR TESTING
+                    # Check Asmongold stream status (if we have Twitch credentials)
+                    is_live = False
+                    if self.twitch_token:
+                        is_live = self.is_stream_live(self.twitch_token, os.getenv("TARGET_TWITCH_STREAMER", "zackrawrr"))
+                        is_live = False  # TEMP DISABLE FOR TESTING
 
-                if is_live and self.last_stream_status != "live":
-                    logger.info("Asmongold is LIVE — pausing 24/7 stream")
-                    self.update_playback_time()
-                    if self.obs_controller:
-                        self.obs_controller.switch_scene(SCENE_LIVE)
-                    self.last_stream_status = "live"
-                    self.playback_start_time = None
+                    if is_live and self.last_stream_status != "live":
+                        logger.info("Asmongold is LIVE — pausing 24/7 stream")
+                        self.update_playback_time()
+                        if self.obs_controller:
+                            self.obs_controller.switch_scene(SCENE_LIVE)
+                        self.last_stream_status = "live"
+                        self.playback_start_time = None
 
-                    self.send_discord_notification(
-                        "Asmongold is LIVE!",
-                        "24/7 stream paused",
-                        color=0x9146FF
-                    )
+                        self.send_discord_notification(
+                            "Asmongold is LIVE!",
+                            "24/7 stream paused",
+                            color=0x9146FF
+                        )
 
-                elif not is_live and self.last_stream_status != "offline":
-                    logger.info("Asmongold is OFFLINE — resuming 24/7 stream")
-                    if self.obs_controller:
-                        self.obs_controller.switch_scene(SCENE_OFFLINE)
-                    self.last_stream_status = "offline"
-                    self.playback_start_time = time.time()
+                    elif not is_live and self.last_stream_status != "offline":
+                        logger.info("Asmongold is OFFLINE — resuming 24/7 stream")
+                        if self.obs_controller:
+                            self.obs_controller.switch_scene(SCENE_OFFLINE)
+                        self.last_stream_status = "offline"
+                        self.playback_start_time = time.time()
 
-                    self.send_discord_notification(
-                        "Asmongold is OFFLINE",
-                        "24/7 stream resumed",
-                        color=0x00FF00
-                    )
+                        self.send_discord_notification(
+                            "Asmongold is OFFLINE",
+                            "24/7 stream resumed",
+                            color=0x00FF00
+                        )
 
+                # Every iteration (every second): Rotation checks, config changes, playback tracking
                 # Update playback time if streaming
-                if not is_live:
+                if self.last_stream_status != "live":
                     self.update_playback_time()
 
-                # Check for rotation
+                # Check for rotation (fast detection)
                 await self.check_for_rotation()
 
                 # Check for manual override
                 await self.check_manual_override()
 
-                # Check for config changes
+                # Check for config changes (fast response)
                 if self.config_manager.has_config_changed():
                     logger.info("Config file changed, syncing...")
                     config_playlists = self.config_manager.get_playlists()
@@ -757,4 +758,5 @@ class AutomationController:
                     color=0xFF0000
                 )
 
-            time.sleep(CHECK_INTERVAL)
+            loop_count += 1
+            time.sleep(1)
