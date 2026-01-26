@@ -172,36 +172,51 @@ class KickUpdater(StreamPlatform):
                         return None
                     
                     data = await response.json()
+                    logger.debug(f"[{self.platform_name}] Raw API response for '{category_name}': {data}")
                     
-                    # Response structure can vary - could be {"data": {...}} or {"data": [{...}]}
-                    data_obj = data.get("data")
+                    # Response structure can vary:
+                    # 1. Direct list: [{...}, {...}]
+                    # 2. Dict with data key: {"data": [{...}]} or {"data": {...}}
+                    # 3. Dict without data key: {...}
                     
-                    if data_obj is None:
-                        logger.warning(f"[{self.platform_name}] No data in category response for '{category_name}'")
-                        return None
-                    
-                    category_data = None
-                    
-                    # Handle if data is a list (take first item)
-                    if isinstance(data_obj, list):
-                        if len(data_obj) > 0:
-                            category_data = data_obj[0]
+                    if isinstance(data, list):
+                        # Direct list response
+                        if len(data) > 0:
+                            category_data = data[0]
                         else:
                             logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}' (empty list)")
                             return None
-                    elif isinstance(data_obj, dict):
-                        # Check if there's a 'category' key with the actual data
-                        if "category" in data_obj:
-                            category_data = data_obj.get("category")
+                    elif isinstance(data, dict):
+                        # Dict response - try to get "data" key first
+                        data_obj = data.get("data")
+                        
+                        if data_obj is None:
+                            logger.warning(f"[{self.platform_name}] No data in category response for '{category_name}'")
+                            return None
+                        
+                        if not isinstance(data_obj, (dict, list)):
+                            logger.warning(f"[{self.platform_name}] Unexpected data type in category response: {type(data_obj).__name__}")
+                            return None
+                        
+                        # Handle if data_obj is a list (take first item)
+                        if isinstance(data_obj, list):
+                            if len(data_obj) > 0:
+                                category_data = data_obj[0]
+                            else:
+                                logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}' (empty list in data)")
+                                return None
                         else:
-                            # Use the entire data_obj as category_data
-                            category_data = data_obj
+                            # data_obj is a dict
+                            if "category" in data_obj:
+                                category_data = data_obj.get("category")
+                            else:
+                                category_data = data_obj
                     else:
-                        logger.warning(f"[{self.platform_name}] Category not found on Kick: '{category_name}' (unexpected response format: {type(data_obj).__name__})")
+                        logger.warning(f"[{self.platform_name}] Unexpected response format for '{category_name}': {type(data).__name__}")
                         return None
                     
-                    if not isinstance(category_data, dict):
-                        logger.warning(f"[{self.platform_name}] Category data is not a dict for '{category_name}': got {type(category_data).__name__}. Response: {data}")
+                    if category_data is None or not isinstance(category_data, dict):
+                        logger.warning(f"[{self.platform_name}] Category data is not a dict for '{category_name}': got {type(category_data).__name__}")
                         return None
                     
                     # Extract the numeric subcategory ID from the image_url

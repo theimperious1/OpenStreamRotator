@@ -505,7 +505,7 @@ class AutomationController:
             logger.info(
                 f"Playback skip detected: jumped {excess_advance_ms}ms more than expected "
                 f"(expected {expected_position_delta_ms:.0f}ms, got {position_delta_ms}ms advance). "
-                f"Position: {self.last_known_playback_position_ms}ms → {current_position_ms}ms. "
+                f"Position: {self.last_known_playback_position_ms}ms -> {current_position_ms}ms. "
                 f"Excess skipped: {time_skipped_seconds:.1f}s"
             )
             
