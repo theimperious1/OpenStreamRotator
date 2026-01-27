@@ -18,11 +18,22 @@ formatter = logging.Formatter(
 
 file_handler = logging.FileHandler(log_file, encoding='utf-8')
 file_handler.setFormatter(formatter)
+file_handler.setLevel(logging.DEBUG)  # File gets all levels
 
 console_handler = logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8'))
 console_handler.setFormatter(formatter)
+console_handler.setLevel(logging.DEBUG)  # Console gets all levels
 
-logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)  # Root logger captures everything
+root_logger.addHandler(file_handler)
+root_logger.addHandler(console_handler)
+
+# Suppress DEBUG logs from libraries to reduce spam
+logging.getLogger('obsws_python').setLevel(logging.WARNING)
+logging.getLogger('services.playback_tracker').setLevel(logging.INFO)
+
 logger = logging.getLogger(__name__)
 
 # Import this last to ensure logging is configured first
