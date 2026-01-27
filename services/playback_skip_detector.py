@@ -150,23 +150,34 @@ class PlaybackSkipDetector:
         expected_position_delta_ms = time_elapsed_seconds * 1000
         position_delta_ms = current_position_ms - self.last_known_playback_position_ms
         
-        # Detect video transition (position reset when VLC moves to next video in playlist)
-        # When this happens, add the previous video duration to cumulative
-        if position_delta_ms < -1000:  # Large negative jump = video transition
-            logger.info(f"Video transition detected: position went from {self.last_known_playback_position_ms}ms to {current_position_ms}ms")
-            # Previous video ended, so add its duration to cumulative
-            self.cumulative_playback_ms += self.last_known_playback_position_ms
-            logger.info(f"Cumulative playback now: {self.cumulative_playback_ms}ms ({self.cumulative_playback_ms/1000:.1f}s)")
-            
-            # Delete the completed video (except if it's the last one in playlist)
-            video_files = self._get_video_files_in_order()
-            if video_files and len(video_files) > 1:
-                # Delete the first video (current one being transitioned away from)
-                self._delete_completed_video(video_files[0])
-            elif video_files:
-                logger.info(f"Not deleting {video_files[0]} - it's the last video in playlist")
-            
-            position_delta_ms = current_position_ms  # Current position in new video
+        # Detect backwards skip (user rewinding) - reset tracking to new position
+        if position_delta_ms < -1000:  # Large negative jump
+            # Check if this is a video transition or user rewind
+            # Video transition: position goes to near 0 (start of next video)
+            # User rewind: position goes to some arbitrary earlier point
+            if current_position_ms > 1000:  # Not at start of video = user rewind
+                logger.info(f"Backwards skip detected: position went from {self.last_known_playback_position_ms}ms to {current_position_ms}ms (user rewound)")
+                logger.info(f"Resetting skip detection to {current_position_ms}ms to prevent double-counting rewatched content")
+                # Reset: treat current position as new baseline
+                self.last_known_playback_position_ms = current_position_ms
+                self.last_playback_check_time = time.time()
+                return False, None
+            else:
+                # Position near 0 = video transition
+                logger.info(f"Video transition detected: position went from {self.last_known_playback_position_ms}ms to {current_position_ms}ms")
+                # Previous video ended, so add its duration to cumulative
+                self.cumulative_playback_ms += self.last_known_playback_position_ms
+                logger.info(f"Cumulative playback now: {self.cumulative_playback_ms}ms ({self.cumulative_playback_ms/1000:.1f}s)")
+                
+                # Delete the completed video (except if it's the last one in playlist)
+                video_files = self._get_video_files_in_order()
+                if video_files and len(video_files) > 1:
+                    # Delete the first video (current one being transitioned away from)
+                    self._delete_completed_video(video_files[0])
+                elif video_files:
+                    logger.info(f"Not deleting {video_files[0]} - it's the last video in playlist")
+                
+                position_delta_ms = current_position_ms  # Current position in new video
         
         # Calculate excess advance
         excess_advance_ms = position_delta_ms - expected_position_delta_ms

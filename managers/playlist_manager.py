@@ -173,7 +173,8 @@ class PlaylistManager:
                 for filename in os.listdir(current_folder):
                     file_path = os.path.join(current_folder, filename)
                     deleted = False
-                    for attempt in range(3):  # Try 3 times with brief delays
+                    # Try 5 times with longer delays (1.5s) to handle OS file locking
+                    for attempt in range(5):
                         try:
                             if os.path.isfile(file_path):
                                 os.unlink(file_path)
@@ -182,13 +183,15 @@ class PlaylistManager:
                             deleted = True
                             break
                         except (PermissionError, OSError) as e:
-                            if attempt < 2:  # Not the last attempt
-                                time.sleep(0.5)  # Brief delay before retry
+                            if attempt < 4:  # Not the last attempt
+                                time.sleep(1.5)  # Longer delay before retry
                             else:
-                                logger.warning(f"Could not delete {filename} after 3 attempts (file may still be in use): {e}")
+                                logger.error(f"CRITICAL: Could not delete {filename} after 5 attempts (6s total) - file may be locked: {e}")
                     
                     if deleted:
                         logger.info(f"Deleted override: {filename}")
+                    else:
+                        logger.error(f"CRITICAL: Failed to delete override file {filename} - restoration may be incomplete!")
             
             # Move backup folder contents back to current
             if os.path.exists(backup_folder):

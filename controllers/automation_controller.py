@@ -87,6 +87,8 @@ class AutomationController:
         self.download_in_progress = False
         self._pending_seek_position_ms = 0  # Used for seeking on PC restart resume
         self._seek_retry_count = 0  # Track retry attempts for seek
+        self._last_playback_save_time = 0  # Track last auto-save time (power loss resilience)
+        self._rotation_postpone_logged = False  # Track if we've logged postpone message for current live period
         self.shutdown_event = False
 
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -135,6 +137,33 @@ class AutomationController:
             
         except Exception as e:
             logger.error(f"Failed to save playback on exit: {e}")
+
+    def auto_save_playback_position(self):
+        """Periodically auto-save playback position (every 1 second) for power loss resilience."""
+        if not self.current_session_id:
+            return
+        
+        try:
+            # Get current VLC position
+            if not self.obs_controller:
+                return
+            
+            media_status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
+            if not media_status:
+                return
+            
+            current_position_ms = media_status.get('media_cursor', 0)
+            if current_position_ms is None:
+                return
+            
+            playback_seconds = current_position_ms / 1000
+            
+            # Auto-save to database (silent, no logging to avoid spam)
+            self.db.update_session_playback(self.current_session_id, int(playback_seconds))
+            self._last_playback_save_time = time.time()
+            
+        except Exception as e:
+            logger.debug(f"Auto-save playback failed (non-critical): {e}")
 
     def connect_obs(self) -> bool:
         """Connect to OBS WebSocket."""
@@ -555,11 +584,22 @@ class AutomationController:
                         
                         if backup_folder and suspension_data.get('backup_success'):
                             logger.info(f"Restoring original content from {backup_folder}")
+                            
+                            # IMPORTANT: Stop VLC FIRST to release file locks before trying to delete/restore files
+                            if self.obs_controller:
+                                self.obs_controller.switch_scene(SCENE_CONTENT_SWITCH)
+                                self.obs_controller.stop_vlc_source(VLC_SOURCE_NAME)
+                                # Wait longer to ensure Windows releases all file handles
+                                time.sleep(3)  # Give VLC time to release file locks
+                            
                             restore_success = self.playlist_manager.restore_content_after_override(
                                 current_folder, backup_folder
                             )
                             if not restore_success:
-                                logger.error("Failed to restore original content, attempting to continue anyway")
+                                logger.error("CRITICAL: Failed to restore original content from override - aborting override completion to prevent further corruption")
+                                logger.error("Please manually restore /live folder from temp_backup_override and /pending from temp_pending_backup")
+                                # Don't proceed with /pending restoration if /live failed
+                                pending_backup_folder = None  # This will skip the /pending restoration below
                         else:
                             logger.warning("No backup folder in suspension data, skipping restore")
                         
@@ -640,12 +680,8 @@ class AutomationController:
                     # Allow background downloads to resume now that override is done
                     self.download_in_progress = False
                     
-                    # Switch scene but don't move files (they're already in place from restore)
-                    # Just restart VLC with the restored content
+                    # Switch scene back to stream (VLC already stopped and restarted during file restoration)
                     if self.obs_controller:
-                        self.obs_controller.switch_scene(SCENE_CONTENT_SWITCH)
-                        self.obs_controller.stop_vlc_source(VLC_SOURCE_NAME)
-                        time.sleep(2)
                         self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, current_folder)
                         
                         # Switch back to stream scene
@@ -671,6 +707,13 @@ class AutomationController:
                         logger.info("Content restored and VLC restarted for resumed session")
                 else:
                     # Normal rotation completion (no suspended session)
+                    # Only rotate if stream is currently offline
+                    if self.last_stream_status == "live":
+                        if not self._rotation_postpone_logged:
+                            logger.info("Stream is live, postponing rotation until stream goes offline")
+                            self._rotation_postpone_logged = True
+                        return
+                    
                     if self.current_session_id:
                         self.db.update_session_playback(self.current_session_id, total_seconds)
                         self.db.end_session(self.current_session_id)
@@ -903,6 +946,7 @@ class AutomationController:
                         if self.obs_controller:
                             self.obs_controller.switch_scene(SCENE_OFFLINE)
                         self.last_stream_status = "offline"
+                        self._rotation_postpone_logged = False  # Reset postpone flag for next live period
                         self.playback_tracker.resume_tracking()
                         self.notification_service.notify_asmongold_offline()
 
@@ -914,6 +958,9 @@ class AutomationController:
                     if self.current_session_id:
                         self.playback_tracker.update_session(self.current_session_id)
                     self.playback_tracker.resume_tracking()
+
+                # Auto-save playback position every second for power loss resilience
+                self.auto_save_playback_position()
 
                 # Check for rotation (fast detection)
                 await self.check_for_rotation()

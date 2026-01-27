@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import os
+import io
 
 # Force UTF-8 encoding for console output to handle Unicode characters
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -18,9 +19,8 @@ formatter = logging.Formatter(
 file_handler = logging.FileHandler(log_file, encoding='utf-8')
 file_handler.setFormatter(formatter)
 
-console_handler = logging.StreamHandler(sys.stdout)
+console_handler = logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8'))
 console_handler.setFormatter(formatter)
-console_handler.stream.reconfigure(encoding='utf-8')
 
 logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
 logger = logging.getLogger(__name__)
