@@ -6,6 +6,7 @@ from typing import List, Dict, Optional
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 from services.video_processor import VideoProcessor
+from core.video_registration_queue import VideoRegistrationQueue
 
 logger = logging.getLogger(__name__)
 
@@ -16,16 +17,19 @@ _running_processes: List[subprocess.Popen] = []
 class VideoDownloader:
     """Handles YouTube playlist downloading and video registration."""
 
-    def __init__(self, db: DatabaseManager, config: ConfigManager):
+    def __init__(self, db: DatabaseManager, config: ConfigManager, 
+                 registration_queue: Optional[VideoRegistrationQueue] = None):
         """
         Initialize video downloader.
         
         Args:
             db: DatabaseManager instance
             config: ConfigManager instance
+            registration_queue: VideoRegistrationQueue for thread-safe video registration
         """
         self.db = db
         self.config = config
+        self.registration_queue = registration_queue
 
     def download_playlists(self, playlists: List[Dict], output_folder: str) -> Dict:
         """
@@ -131,7 +135,10 @@ class VideoDownloader:
 
     def _register_downloaded_videos(self, playlist_id: int, folder: str, playlist_name: str) -> int:
         """
-        Register newly downloaded videos in the database.
+        Register newly downloaded videos in the queue for later database insertion.
+        
+        This method queues videos instead of writing directly to the database,
+        allowing background downloads to avoid thread safety issues.
         
         Args:
             playlist_id: Database playlist ID
@@ -164,26 +171,42 @@ class VideoDownloader:
             
             file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
 
-            # Try to add video, skip if already exists
-            try:
-                self.db.add_video(
-                    playlist_id,
-                    filename,
-                    title=title,
-                    duration_seconds=duration,
-                    file_size_mb=int(file_size_mb)
-                )
-                total_duration += duration
-                registered_count += 1
-                logger.debug(f"Registered video: {filename} ({duration}s)")
-            except Exception as e:
-                # Check if it's a duplicate constraint error
-                if "UNIQUE constraint failed" in str(e) or "already exists" in str(e):
-                    logger.debug(f"Video already exists: {filename}, skipping")
-                else:
-                    logger.error(f"Error registering video {filename}: {e}")
+            # If queue available, queue video instead of writing directly
+            if self.registration_queue:
+                try:
+                    self.registration_queue.enqueue_video(
+                        playlist_id,
+                        filename,
+                        title=title,
+                        duration_seconds=duration,
+                        file_size_mb=int(file_size_mb)
+                    )
+                    total_duration += duration
+                    registered_count += 1
+                    logger.debug(f"Queued video for registration: {filename} ({duration}s)")
+                except Exception as e:
+                    logger.error(f"Error queueing video {filename}: {e}")
+            else:
+                # Fallback: write directly to database if no queue (shouldn't happen in normal operation)
+                try:
+                    self.db.add_video(
+                        playlist_id,
+                        filename,
+                        title=title,
+                        duration_seconds=duration,
+                        file_size_mb=int(file_size_mb)
+                    )
+                    total_duration += duration
+                    registered_count += 1
+                    logger.debug(f"Registered video: {filename} ({duration}s)")
+                except Exception as e:
+                    # Check if it's a duplicate constraint error
+                    if "UNIQUE constraint failed" in str(e) or "already exists" in str(e):
+                        logger.debug(f"Video already exists: {filename}, skipping")
+                    else:
+                        logger.error(f"Error registering video {filename}: {e}")
         
-        logger.info(f"Registered {registered_count} new videos for {playlist_name}, total: {total_duration}s")
+        logger.info(f"Queued {registered_count} new videos for {playlist_name}, total: {total_duration}s")
         return total_duration
 
 def kill_all_running_processes():

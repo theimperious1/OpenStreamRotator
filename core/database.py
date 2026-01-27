@@ -230,6 +230,23 @@ class DatabaseManager:
         self.close()
         return session_id
 
+    def get_session_by_id(self, session_id: int) -> Optional[Dict]:
+        """Get a specific session by ID."""
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM rotation_sessions 
+            WHERE id = ?
+        """, (session_id,))
+
+        row = cursor.fetchone()
+        self.close()
+
+        if row:
+            return dict(row)
+        return None
+
     def get_current_session(self) -> Optional[Dict]:
         """Get the current active rotation session."""
         conn = self.connect()

@@ -139,6 +139,18 @@ class OverrideHandler:
             logger.info(f"Saving prepared playlists for restore: {prepared_playlist_names}")
         elif download_in_progress:
             logger.warning("Override triggered during background download - will force fresh download after override")
+        else:
+            # Check if this session already has suspension data with prepared playlists (nested override case)
+            session = self.db.get_session_by_id(current_session_id)
+            if session and session.get('suspension_data'):
+                try:
+                    existing_suspension = json.loads(session['suspension_data']) if isinstance(session['suspension_data'], str) else session['suspension_data']
+                    existing_prepared = existing_suspension.get('prepared_playlist_names', [])
+                    if existing_prepared:
+                        prepared_playlist_names = existing_prepared
+                        logger.info(f"Preserving prepared playlists from previous suspension: {prepared_playlist_names}")
+                except (json.JSONDecodeError, AttributeError):
+                    pass
         
         suspension_data = {
             "suspended_by_override": True,
@@ -158,6 +170,9 @@ class OverrideHandler:
         """
         Start rotation with manually selected playlists.
         
+        Note: Downloads are handled by the controller's start_rotation_session().
+        This method just validates and prepares the override.
+        
         Args:
             selected_playlists: List of playlist names to play
             next_folder: Output folder for downloads
@@ -167,7 +182,7 @@ class OverrideHandler:
         """
         logger.info(f"Starting override rotation with: {selected_playlists}")
         
-        # Get playlist objects from names
+        # Get playlist objects from names to validate they exist
         all_playlists = self.db.get_enabled_playlists()
         selected_playlist_objs = [p for p in all_playlists if p['name'] in selected_playlists]
         
@@ -175,18 +190,10 @@ class OverrideHandler:
             logger.error("Selected playlists not found in database")
             return False
         
-        # Download selected playlists
-        logger.info(f"Downloading {len(selected_playlist_objs)} playlists for override...")
+        # Send notification about override start
         self.notification_service.notify_rotation_started([p['name'] for p in selected_playlist_objs])
         
-        download_result = self.playlist_manager.download_playlists(selected_playlist_objs, next_folder)
-        
-        if not download_result.get('success'):
-            logger.error("Failed to download override playlists")
-            self.notification_service.notify_download_warning(
-                "Some playlists failed to download for override"
-            )
-        
+        logger.info(f"Override validation complete: {len(selected_playlist_objs)} playlists ready")
         return True
 
     def clear_override(self):

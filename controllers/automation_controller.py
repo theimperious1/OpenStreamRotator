@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
+from core.video_registration_queue import VideoRegistrationQueue
 from managers.playlist_manager import PlaylistManager
 from managers.stream_manager import StreamManager
 from controllers.obs_controller import OBSController
@@ -65,7 +66,11 @@ class AutomationController:
         # Core managers
         self.db = DatabaseManager()
         self.config_manager = ConfigManager()
-        self.playlist_manager = PlaylistManager(self.db, self.config_manager)
+        
+        # Thread-safe queue for video registration from background downloads
+        self.video_registration_queue = VideoRegistrationQueue()
+        
+        self.playlist_manager = PlaylistManager(self.db, self.config_manager, self.video_registration_queue)
 
         # OBS
         self.obs_client: Optional[obs.ReqClient] = None
@@ -453,7 +458,47 @@ class AutomationController:
         except Exception as e:
             logger.error(f"Background download error: {e}")
             self.notification_service.notify_background_download_error(str(e))
-        finally:
+
+    def _process_video_registration_queue(self):
+        """Process pending videos from background download registration queue.
+        
+        This method runs in the main thread and safely registers queued videos
+        that were discovered by background download threads.
+        """
+        if not self.video_registration_queue.has_pending_videos():
+            return
+        
+        pending_videos = self.video_registration_queue.get_pending_videos()
+        if not pending_videos:
+            return
+        
+        logger.info(f"Processing {len(pending_videos)} queued videos for database registration")
+        
+        registered_count = 0
+        total_duration = 0
+        
+        for video_data in pending_videos:
+            try:
+                self.db.add_video(
+                    video_data['playlist_id'],
+                    video_data['filename'],
+                    title=video_data['title'],
+                    duration_seconds=video_data['duration_seconds'],
+                    file_size_mb=video_data['file_size_mb']
+                )
+                registered_count += 1
+                total_duration += video_data['duration_seconds']
+                logger.debug(f"Registered queued video: {video_data['filename']} ({video_data['duration_seconds']}s)")
+            except Exception as e:
+                # Check if it's a duplicate constraint error
+                if "UNIQUE constraint failed" in str(e) or "already exists" in str(e):
+                    logger.debug(f"Video already exists in database: {video_data['filename']}, skipping")
+                else:
+                    logger.error(f"Error registering queued video {video_data['filename']}: {e}")
+        
+        if registered_count > 0:
+            logger.info(f"Registered {registered_count} queued videos from background download, total: {total_duration}s")
+            # Background download thread has finished, reset the flag
             self.download_in_progress = False
 
     async def check_for_rotation(self):
@@ -609,13 +654,14 @@ class AutomationController:
         next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
         current_folder = settings.get('video_folder', 'C:/stream_videos/')
 
-        # Check if the current session is already an override (user is replacing it with a new override)
-        current_session = self.db.get_current_session()
+        # Check if we're already in an override (there's a suspended original session)
+        suspended_session = self.db.get_suspended_session()
         session_to_suspend = self.current_session_id
         
-        if current_session and current_session.get('suspended_at'):
-            # Current session IS an override - user wants to replace it
+        if suspended_session:
+            # We're replacing an active override - the suspended session is the original rotation waiting to resume
             logger.info(f"Replacing active override (session {self.current_session_id}) with new override")
+            logger.info(f"Original rotation (session {suspended_session['id']}) will resume after new override completes")
             
             # First, clean up the current override's /live folder content
             try:
@@ -638,11 +684,9 @@ class AutomationController:
             if self.current_session_id is not None:
                 self.db.end_session(self.current_session_id)
             
-            # Get the original session that was suspended (what we'll return to after new override)
-            original_suspended = self.db.get_suspended_session()
-            if original_suspended:
-                session_to_suspend = original_suspended['id']
-                logger.info(f"New override will return to original session {session_to_suspend}")
+            # Resume to the original suspended session after this new override
+            session_to_suspend = suspended_session['id']
+            logger.info(f"New override will return to original session {session_to_suspend}")
         
         # Backup prepared rotation (only if we're not replacing an override)
         self.override_handler.backup_prepared_rotation(next_folder)
@@ -777,6 +821,7 @@ class AutomationController:
                     self.playback_tracker.resume_tracking()
 
                 self.auto_save_playback_position()
+                self._process_video_registration_queue()
                 await self.check_for_rotation()
                 
                 # Handle pending seek

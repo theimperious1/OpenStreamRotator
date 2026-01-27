@@ -73,6 +73,16 @@ class RotationHandler:
         if download_in_progress or next_prepared_playlists is not None:
             return None
         
+        # Check if we have prepared content backed up waiting to be restored
+        # (happens when override completes and restores prepared rotation)
+        settings = self.config.get_settings()
+        base_path = os.path.dirname(settings.get('video_folder', 'C:/stream_videos/'))
+        pending_backup_folder = os.path.normpath(os.path.join(base_path, 'temp_pending_backup'))
+        
+        if os.path.exists(pending_backup_folder) and os.listdir(pending_backup_folder):
+            logger.debug(f"Pending backup folder has content, skipping background download")
+            return None
+        
         # Select playlists in main thread (can't be done in executor thread due to SQLite)
         playlists = self.playlist_manager.select_playlists_for_rotation()
         return playlists if playlists else None
