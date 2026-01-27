@@ -838,6 +838,34 @@ class AutomationController:
                         # We'll do this in the main loop after the first check_for_rotation call
                         self._pending_seek_position_ms = playback_ms
                         logger.info(f"Scheduled seek to {playback_seconds}s ({playback_ms}ms) on playback resume")
+                    
+                    # Initialize skip detector for resumed session
+                    if self.obs_controller:
+                        settings = self.config_manager.get_settings()
+                        video_folder = settings.get('video_folder', 'C:/stream_videos/')
+                        
+                        if self.playback_skip_detector is None:
+                            self.playback_skip_detector = PlaybackSkipDetector(
+                                self.db, self.obs_controller, VLC_SOURCE_NAME, video_folder
+                            )
+                        
+                        # Get rotation duration and finish time from session
+                        total_duration = session.get('total_duration_seconds', 0)
+                        finish_time_str = session.get('estimated_finish_time')
+                        original_finish = None
+                        if finish_time_str:
+                            try:
+                                original_finish = datetime.fromisoformat(finish_time_str)
+                            except (ValueError, TypeError):
+                                pass
+                        
+                        # Initialize with resume position
+                        resume_position_ms = int(playback_seconds * 1000) if playback_seconds > 0 else 0
+                        self.playback_skip_detector.initialize(
+                            total_duration_seconds=total_duration,
+                            original_finish_time=original_finish,
+                            resume_position_ms=resume_position_ms
+                        )
 
         # Main loop
         loop_count = 0
