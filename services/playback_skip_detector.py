@@ -28,14 +28,27 @@ class PlaybackSkipDetector:
         
         self.last_known_playback_position_ms = 0
         self.last_playback_check_time: Optional[float] = None
+        self.total_rotation_duration_ms = 0  # Total duration of current rotation session
+        self.original_finish_time: Optional[datetime] = None  # Original finish time - don't extend past this
+        self.cumulative_playback_ms = 0  # Cumulative playback across all videos in playlist (accounts for video transitions)
 
-    def initialize(self):
-        """Initialize detector with current VLC position."""
+    def initialize(self, total_duration_seconds: int = 0, original_finish_time: Optional[datetime] = None):
+        """Initialize detector with current VLC position and rotation duration.
+        
+        Args:
+            total_duration_seconds: Total duration of the rotation session in seconds.
+                                   If 0, will try to use current video duration.
+            original_finish_time: Original estimated finish time for this session.
+                                 Used as ceiling to prevent extending rotation indefinitely.
+        """
         media_status = self.obs_controller.get_media_input_status(self.vlc_source_name)
         if media_status:
             self.last_known_playback_position_ms = media_status.get('media_cursor', 0) or 0
         self.last_playback_check_time = time.time()
-        logger.debug("Playback skip detector initialized")
+        self.total_rotation_duration_ms = total_duration_seconds * 1000
+        self.original_finish_time = original_finish_time
+        self.cumulative_playback_ms = 0
+        logger.info(f"Playback skip detector initialized (total rotation: {total_duration_seconds}s, original finish: {original_finish_time})")
 
     def reset(self):
         """Reset detector for new rotation."""
@@ -75,6 +88,15 @@ class PlaybackSkipDetector:
         expected_position_delta_ms = time_elapsed_seconds * 1000
         position_delta_ms = current_position_ms - self.last_known_playback_position_ms
         
+        # Detect video transition (position reset when VLC moves to next video in playlist)
+        # When this happens, add the previous video duration to cumulative
+        if position_delta_ms < -1000:  # Large negative jump = video transition
+            logger.info(f"Video transition detected: position went from {self.last_known_playback_position_ms}ms to {current_position_ms}ms")
+            # Previous video ended, so add its duration to cumulative
+            self.cumulative_playback_ms += self.last_known_playback_position_ms
+            logger.info(f"Cumulative playback now: {self.cumulative_playback_ms}ms ({self.cumulative_playback_ms/1000:.1f}s)")
+            position_delta_ms = current_position_ms  # Current position in new video
+        
         # Calculate excess advance
         excess_advance_ms = position_delta_ms - expected_position_delta_ms
         
@@ -89,10 +111,30 @@ class PlaybackSkipDetector:
                 f"Excess skipped: {time_skipped_seconds:.1f}s"
             )
             
-            # Calculate new finish time
-            remaining_ms = total_duration_ms - current_position_ms
-            remaining_seconds = remaining_ms / 1000
+            # Calculate remaining using CUMULATIVE playback position across all videos
+            # cumulative_playback_ms = all previous videos' durations
+            # + current_position_ms = position within current video
+            total_consumed_ms = self.cumulative_playback_ms + current_position_ms
+            remaining_ms = self.total_rotation_duration_ms - total_consumed_ms
+            
+            logger.info(
+                f"Cumulative consumed: {total_consumed_ms/1000:.1f}s "
+                f"(previous videos: {self.cumulative_playback_ms/1000:.1f}s + current video: {current_position_ms/1000:.1f}s). "
+                f"Total duration: {self.total_rotation_duration_ms/1000:.1f}s. "
+                f"Remaining: {remaining_ms/1000:.1f}s"
+            )
+            
+            remaining_seconds = max(0, remaining_ms / 1000)  # Don't go negative
             new_finish_time = datetime.now() + timedelta(seconds=remaining_seconds)
+            
+            logger.info(f"Skip recalculation - new finish would be: {new_finish_time}, original: {self.original_finish_time}")
+            
+            # Cap finish time: never extend past original session finish time
+            if self.original_finish_time and new_finish_time > self.original_finish_time:
+                logger.warning(f"Skip would extend finish time to {new_finish_time}, capping at original: {self.original_finish_time}")
+                new_finish_time = self.original_finish_time
+            elif not self.original_finish_time:
+                logger.warning("No original finish time set - capping disabled!")
             
             # Update session if provided
             if session_id:

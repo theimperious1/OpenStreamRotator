@@ -143,3 +143,10 @@ class NotificationService:
             f"Unexpected error: {error_message}",
             color=0xFF0000
         )
+    def notify_override_complete(self, resumed_playlist_names: list[str]):
+        """Notify that manual override is complete and returning to original content."""
+        self.send_discord(
+            "Override Complete",
+            f"Returning to: {', '.join(resumed_playlist_names)}",
+            color=0x00FF00
+        )

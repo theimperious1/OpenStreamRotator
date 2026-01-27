@@ -123,6 +123,129 @@ class PlaylistManager:
             logger.error(f"Failed to switch content folders: {e}")
             return False
 
+    def backup_current_content(self, current_folder: str, backup_folder: str) -> bool:
+        """
+        Backup current folder contents to backup folder.
+        Used before override to preserve original content.
+        """
+        try:
+            # Normalize paths to avoid Windows path issues
+            current_folder = os.path.normpath(current_folder)
+            backup_folder = os.path.normpath(backup_folder)
+            
+            # Create backup folder
+            os.makedirs(backup_folder, exist_ok=True)
+            
+            # Move current folder contents to backup
+            if os.path.exists(current_folder):
+                for filename in os.listdir(current_folder):
+                    src = os.path.join(current_folder, filename)
+                    dst = os.path.join(backup_folder, filename)
+                    try:
+                        if os.path.isfile(src) or os.path.isdir(src):
+                            shutil.move(src, dst)
+                            logger.info(f"Backed up: {filename}")
+                    except Exception as e:
+                        logger.error(f"Error backing up {src} to {dst}: {e}")
+            
+            logger.info(f"Backup complete: {current_folder} → {backup_folder}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to backup content: {e}")
+            return False
+
+    def restore_content_after_override(self, current_folder: str, backup_folder: str) -> bool:
+        """
+        Restore original content from backup folder after override completes.
+        Cleans up override content and restores original.
+        """
+        try:
+            import time
+            
+            # Normalize paths to avoid Windows path issues
+            current_folder = os.path.normpath(current_folder)
+            backup_folder = os.path.normpath(backup_folder)
+            
+            # Delete override content from current folder
+            # Use retry logic since VLC might still hold file locks briefly
+            if os.path.exists(current_folder):
+                for filename in os.listdir(current_folder):
+                    file_path = os.path.join(current_folder, filename)
+                    deleted = False
+                    for attempt in range(3):  # Try 3 times with brief delays
+                        try:
+                            if os.path.isfile(file_path):
+                                os.unlink(file_path)
+                            elif os.path.isdir(file_path):
+                                shutil.rmtree(file_path)
+                            deleted = True
+                            break
+                        except (PermissionError, OSError) as e:
+                            if attempt < 2:  # Not the last attempt
+                                time.sleep(0.5)  # Brief delay before retry
+                            else:
+                                logger.warning(f"Could not delete {filename} after 3 attempts (file may still be in use): {e}")
+                    
+                    if deleted:
+                        logger.info(f"Deleted override: {filename}")
+            
+            # Move backup folder contents back to current
+            if os.path.exists(backup_folder):
+                for filename in os.listdir(backup_folder):
+                    src = os.path.join(backup_folder, filename)
+                    dst = os.path.join(current_folder, filename)
+                    try:
+                        shutil.move(src, dst)
+                        logger.info(f"Restored: {filename}")
+                    except Exception as e:
+                        logger.error(f"Error restoring {src} to {dst}: {e}")
+            
+            # Clean up backup folder
+            try:
+                if os.path.exists(backup_folder):
+                    os.rmdir(backup_folder)
+                    logger.info(f"Cleaned up backup folder: {backup_folder}")
+            except Exception as e:
+                logger.warning(f"Could not remove backup folder {backup_folder}: {e}")
+            
+            logger.info(f"Restore complete: {backup_folder} → {current_folder}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to restore content: {e}")
+            return False
+
+    def add_override_content(self, current_folder: str, next_folder: str) -> bool:
+        """
+        Add override content to current folder WITHOUT wiping existing content.
+        This is used when temporarily overriding but preserving original content.
+        """
+        try:
+            # Ensure current folder exists
+            os.makedirs(current_folder, exist_ok=True)
+            
+            # Move next folder contents to current folder (but don't delete current)
+            if os.path.exists(next_folder):
+                for filename in os.listdir(next_folder):
+                    src = os.path.join(next_folder, filename)
+                    dst = os.path.join(current_folder, filename)
+                    try:
+                        # Skip if file already exists with same name
+                        if not os.path.exists(dst):
+                            shutil.move(src, dst)
+                        else:
+                            logger.warning(f"File already exists, skipping: {filename}")
+                    except Exception as e:
+                        logger.error(f"Error moving {src} to {dst}: {e}")
+
+            logger.info("Override content added to current folder")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to add override content: {e}")
+            return False
+
     def validate_downloads(self, folder: str) -> bool:
         """Validate that downloads completed successfully."""
         video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')

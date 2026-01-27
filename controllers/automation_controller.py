@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import json
+import shutil
 from datetime import datetime, timedelta
 from typing import Optional
 from dotenv import load_dotenv
@@ -257,13 +258,18 @@ class AutomationController:
         logger.info("Rotation session prepared, ready to switch")
         return True
 
-    async def execute_content_switch(self):
-        """Execute the content switch operation."""
+    async def execute_content_switch(self, is_override_resumption: bool = False):
+        """Execute the content switch operation.
+        
+        Args:
+            is_override_resumption: If True, add override content without wiping existing (for continuity).
+                                   If False, do normal switch (wipe + move).
+        """
         if not self.obs_controller:
             logger.error("OBS controller not initialized")
             return False
         
-        logger.info("Executing content switch...")
+        logger.info(f"Executing content switch... (override_resumption={is_override_resumption})")
         self.is_rotating = True
 
         settings = self.config_manager.get_settings()
@@ -278,8 +284,48 @@ class AutomationController:
 
         time.sleep(3)
 
-        # Switch folders
-        success = self.playlist_manager.switch_content_folders(current_folder, next_folder)
+        # Check if this is an override situation (suspended session exists)
+        is_override_switch = False
+        backup_folder = None
+        suspended_session = self.db.get_suspended_session()
+        if suspended_session and not is_override_resumption:
+            # This is the content switch for the OVERRIDE (switching FROM original TO override)
+            is_override_switch = True
+            suspension_data_str = suspended_session.get('suspension_data', '{}')
+            try:
+                suspension_data = json.loads(suspension_data_str)
+                backup_folder = suspension_data.get('backup_folder')
+                logger.info(f"Override content switch: backing up {current_folder} to {backup_folder}")
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(f"Failed to parse suspension data: {e}")
+
+        # Switch folders based on scenario
+        if is_override_resumption:
+            # Add override content without wiping for continuity
+            success = self.playlist_manager.add_override_content(current_folder, next_folder)
+        elif is_override_switch and backup_folder:
+            # Override content switch: BACKUP current content first, then wipe and move override in
+            backup_success = self.playlist_manager.backup_current_content(current_folder, backup_folder)
+            if not backup_success:
+                logger.error("Failed to backup current content for override")
+                self.notification_service.notify_rotation_error("Failed to backup content for override")
+                self.is_rotating = False
+                return False
+            
+            # Mark backup as successful in suspension data so we know to restore it
+            if suspended_session:
+                suspension_data['backup_success'] = True
+                self.db.update_session_column(
+                    suspended_session['id'],
+                    'suspension_data',
+                    json.dumps(suspension_data)
+                )
+            
+            # Now do normal switch (wipe + move override)
+            success = self.playlist_manager.switch_content_folders(current_folder, next_folder)
+        else:
+            # Normal rotation: wipe and switch
+            success = self.playlist_manager.switch_content_folders(current_folder, next_folder)
 
         if not success:
             logger.error("Failed to switch content folders")
@@ -349,7 +395,24 @@ class AutomationController:
                 self.playback_skip_detector = PlaybackSkipDetector(
                     self.db, self.obs_controller, VLC_SOURCE_NAME
                 )
-            self.playback_skip_detector.initialize()
+            
+            # Get current session to find total rotation duration and original finish time
+            current_session = self.db.get_current_session()
+            total_duration = 0
+            original_finish = None
+            if current_session:
+                total_duration = current_session.get('total_duration_seconds', 0)
+                finish_time_str = current_session.get('estimated_finish_time')
+                if finish_time_str:
+                    try:
+                        original_finish = datetime.fromisoformat(finish_time_str)
+                    except (ValueError, TypeError):
+                        pass
+            
+            self.playback_skip_detector.initialize(
+                total_duration_seconds=total_duration,
+                original_finish_time=original_finish
+            )
 
         self.is_rotating = False
         logger.info("Content switch completed successfully")
@@ -416,14 +479,153 @@ class AutomationController:
                 total_seconds = self.playback_tracker.get_total_seconds()
                 logger.info(f"Rotation duration reached: {total_seconds}s")
                 
-                # End current session
-                if self.current_session_id:
-                    self.db.update_session_playback(self.current_session_id, total_seconds)
-                    self.db.end_session(self.current_session_id)
-                
-                # Start new rotation
-                if self.start_rotation_session():
-                    await self.execute_content_switch()
+                # Check if this is an override rotation (has suspended session to resume)
+                suspended_session = self.db.get_suspended_session()
+                if suspended_session:
+                    logger.info(f"Override completed, resuming suspended session {suspended_session['id']}")
+                    
+                    # End the override rotation
+                    if self.current_session_id:
+                        self.db.update_session_playback(self.current_session_id, total_seconds)
+                        self.db.end_session(self.current_session_id)
+                    
+                    # Restore original content from backup
+                    settings = self.config_manager.get_settings()
+                    current_folder = settings.get('video_folder', 'C:/stream_videos/')
+                    
+                    # Parse suspension data to get backup folders
+                    suspension_data_str = suspended_session.get('suspension_data', '{}')
+                    try:
+                        suspension_data = json.loads(suspension_data_str)
+                        backup_folder = suspension_data.get('backup_folder')
+                        pending_backup_folder = suspension_data.get('pending_backup_folder')
+                        prepared_playlist_names = suspension_data.get('prepared_playlist_names', [])
+                        
+                        if backup_folder and suspension_data.get('backup_success'):
+                            logger.info(f"Restoring original content from {backup_folder}")
+                            restore_success = self.playlist_manager.restore_content_after_override(
+                                current_folder, backup_folder
+                            )
+                            if not restore_success:
+                                logger.error("Failed to restore original content, attempting to continue anyway")
+                        else:
+                            logger.warning("No backup folder in suspension data, skipping restore")
+                        
+                        # Restore prepared next rotation that was saved before override
+                        if pending_backup_folder and os.path.exists(pending_backup_folder):
+                            logger.info(f"Restoring prepared next rotation from {pending_backup_folder}")
+                            settings = self.config_manager.get_settings()
+                            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+                            
+                            # Clear any override remnants from /pending, then restore what we saved
+                            os.makedirs(next_folder, exist_ok=True)
+                            for filename in os.listdir(next_folder):
+                                try:
+                                    file_path = os.path.join(next_folder, filename)
+                                    if os.path.isfile(file_path):
+                                        os.unlink(file_path)
+                                    elif os.path.isdir(file_path):
+                                        shutil.rmtree(file_path)
+                                except Exception as e:
+                                    logger.error(f"Error clearing {filename} from {next_folder}: {e}")
+                            
+                            # Restore from backup
+                            for filename in os.listdir(pending_backup_folder):
+                                src = os.path.join(pending_backup_folder, filename)
+                                dst = os.path.join(next_folder, filename)
+                                try:
+                                    shutil.move(src, dst)
+                                    logger.info(f"Restored prepared content: {filename}")
+                                except Exception as e:
+                                    logger.error(f"Error restoring {filename}: {e}")
+                            
+                            # Clean up backup folder
+                            try:
+                                shutil.rmtree(pending_backup_folder)
+                                logger.info(f"Cleaned up pending backup folder: {pending_backup_folder}")
+                            except Exception as e:
+                                logger.error(f"Error cleaning pending backup folder: {e}")
+                            
+                            # Restore prepared playlists list from suspension_data
+                            # Query database to get full playlist objects with names from the saved list
+                            if prepared_playlist_names:
+                                restored_playlists = []
+                                all_playlists = self.db.get_enabled_playlists()
+                                for playlist in all_playlists:
+                                    if playlist['name'] in prepared_playlist_names:
+                                        restored_playlists.append(playlist)
+                                if restored_playlists:
+                                    self.next_prepared_playlists = restored_playlists
+                                    logger.info(f"Restored prepared playlists: {[p['name'] for p in restored_playlists]}")
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.error(f"Failed to parse suspension data: {e}")
+                    
+                    # Resume the suspended session
+                    self.db.resume_session(suspended_session['id'])
+                    
+                    # Restore playback tracker state
+                    self.current_session_id = suspended_session['id']
+                    self.playback_tracker.total_playback_seconds = suspended_session.get('playback_seconds', 0)
+                    
+                    # Recalculate finish time based on remaining duration
+                    original_duration = suspended_session.get('total_duration_seconds', 0)
+                    elapsed = suspended_session.get('playback_seconds', 0)
+                    remaining_seconds = original_duration - elapsed
+                    new_finish_time = datetime.now() + timedelta(seconds=remaining_seconds)
+                    
+                    # Update session with new finish time
+                    self.db.update_session_times(
+                        suspended_session['id'],
+                        new_finish_time.isoformat(),
+                        None
+                    )
+                    
+                    logger.info(f"Resumed session {suspended_session['id']}, remaining duration: {remaining_seconds}s")
+                    self.notification_service.notify_override_complete(
+                        [suspended_session.get('stream_title', 'Unknown')]
+                    )
+                    
+                    # Allow background downloads to resume now that override is done
+                    self.download_in_progress = False
+                    
+                    # Switch scene but don't move files (they're already in place from restore)
+                    # Just restart VLC with the restored content
+                    if self.obs_controller:
+                        self.obs_controller.switch_scene(SCENE_CONTENT_SWITCH)
+                        self.obs_controller.stop_vlc_source(VLC_SOURCE_NAME)
+                        time.sleep(2)
+                        self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, current_folder)
+                        
+                        # Switch back to stream scene
+                        if self.last_stream_status == "live":
+                            self.obs_controller.switch_scene(SCENE_LIVE)
+                        else:
+                            self.obs_controller.switch_scene(SCENE_OFFLINE)
+                        
+                        # Reset playback tracking
+                        self.playback_tracker.reset()
+                        if self.last_stream_status != "live":
+                            self.playback_tracker.start_tracking()
+                        
+                        # Reinitialize skip detector with remaining duration for resumed session
+                        if self.playback_skip_detector:
+                            # For resumed sessions, calculate new finish time for skip detector ceiling
+                            resumed_finish = datetime.now() + timedelta(seconds=remaining_seconds)
+                            self.playback_skip_detector.initialize(
+                                total_duration_seconds=remaining_seconds,
+                                original_finish_time=resumed_finish
+                            )
+                        
+                        logger.info("Content restored and VLC restarted for resumed session")
+                else:
+                    # Normal rotation completion (no suspended session)
+                    if self.current_session_id:
+                        self.db.update_session_playback(self.current_session_id, total_seconds)
+                        self.db.end_session(self.current_session_id)
+                    
+                    # Start new rotation
+                    if self.start_rotation_session():
+                        await self.execute_content_switch()
 
     async def check_manual_override(self):
         """Check for manual override requests."""
@@ -437,19 +639,67 @@ class AutomationController:
                 self.db.sync_playlists_from_config(config_playlists)
 
                 selected = override.get('selected_playlists', [])
+                settings = self.config_manager.get_settings()
+                next_folder = os.path.normpath(settings.get('next_rotation_folder', 'C:/stream_videos_next/'))
+                base_path = os.path.dirname(settings.get('video_folder', 'C:/stream_videos/'))
+                backup_folder = os.path.normpath(os.path.join(base_path, 'temp_backup_override'))
+                pending_backup_folder = os.path.normpath(os.path.join(base_path, 'temp_pending_backup'))
 
-                # End current session
+                # Save what's currently in /pending (prepared next rotation) so we don't lose it
+                if os.path.exists(next_folder) and os.listdir(next_folder):
+                    next_folder = os.path.normpath(next_folder)
+                    pending_backup_folder = os.path.normpath(pending_backup_folder)
+                    logger.info(f"Saving prepared next rotation from {next_folder} to {pending_backup_folder}")
+                    os.makedirs(pending_backup_folder, exist_ok=True)
+                    for filename in os.listdir(next_folder):
+                        src = os.path.join(next_folder, filename)
+                        dst = os.path.join(pending_backup_folder, filename)
+                        try:
+                            shutil.move(src, dst)
+                            logger.info(f"Saved prepared: {filename}")
+                        except Exception as e:
+                            logger.error(f"Error saving pending content {src}: {e}")
+                    logger.info(f"Pending backup complete: {next_folder} → {pending_backup_folder}")
+
+                # Suspend current session (backup happens later during execute_content_switch)
                 if self.current_session_id:
                     total_seconds = self.playback_tracker.get_total_seconds()
                     self.db.update_session_playback(self.current_session_id, total_seconds)
-                    self.db.end_session(self.current_session_id)
+                    
+                    # Store the prepared playlists list in suspension_data so we can restore it
+                    # BUT: only if no background download is in progress (to avoid race condition)
+                    # If a download is in progress when override happens, we'll force a fresh download after
+                    prepared_playlist_names = []
+                    if self.next_prepared_playlists and not self.download_in_progress:
+                        prepared_playlist_names = [p['name'] for p in self.next_prepared_playlists]
+                        logger.info(f"Saving prepared playlists for restore: {prepared_playlist_names}")
+                    elif self.download_in_progress:
+                        logger.warning("Override triggered during background download - will force fresh download after override")
+                    
+                    suspension_data = {
+                        "suspended_by_override": True,
+                        "override_playlists": selected,
+                        "playback_seconds_before_override": total_seconds,
+                        "backup_folder": backup_folder,
+                        "pending_backup_folder": pending_backup_folder,
+                        "prepared_playlist_names": prepared_playlist_names
+                    }
+                    self.db.suspend_session(self.current_session_id, suspension_data)
+                    logger.info(f"Suspended session {self.current_session_id} for override")
 
                 # Clear prepared playlists to force fresh download of manually selected ones
+                # Also prevent background download while override is playing
                 self.next_prepared_playlists = None
+                self.download_in_progress = True
                 
-                # Start manual rotation
+                # Start manual rotation (downloads override to /pending)
                 if self.start_rotation_session(manual_playlists=selected):
+                    # Once override is downloaded and ready, execute the switch
+                    # This is where the backup will happen (VLC already stopped)
                     await self.execute_content_switch()
+                
+                # NOTE: download_in_progress stays True until override actually ends
+                # It will be set to False in check_for_rotation() when override completes
 
                 # Clear override
                 self.config_manager.clear_override()

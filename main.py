@@ -15,19 +15,18 @@ formatter = logging.Formatter(
     datefmt='%H:%M:%S'
 )
 
-file_handler = logging.FileHandler(log_file)
+file_handler = logging.FileHandler(log_file, encoding='utf-8')
 file_handler.setFormatter(formatter)
 
-console_handler = logging.StreamHandler()
+console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setFormatter(formatter)
+console_handler.stream.reconfigure(encoding='utf-8')
 
 logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
 logger = logging.getLogger(__name__)
 
 # Import this last to ensure logging is configured first
 from controllers.automation_controller import AutomationController
-
-
 if __name__ == "__main__":
     try:
         controller = AutomationController()
