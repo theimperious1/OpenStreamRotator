@@ -120,18 +120,18 @@ class NotificationService:
             color=0x0099FF
         )
 
-    def notify_asmongold_live(self):
-        """Notify that Asmongold is live."""
+    def notify_streamer_live(self):
+        """Notify that the streamer is live."""
         self.send_discord(
-            "Asmongold is LIVE!",
+            "Streamer is LIVE!",
             "24/7 stream paused",
             color=0x9146FF
         )
 
-    def notify_asmongold_offline(self):
-        """Notify that Asmongold is offline."""
+    def notify_streamer_offline(self):
+        """Notify that the streamer is offline."""
         self.send_discord(
-            "Asmongold is OFFLINE",
+            "Streamer is OFFLINE",
             "24/7 stream resumed",
             color=0x00FF00
         )

@@ -42,7 +42,7 @@ class ConfigManager:
                 "min_playlists_per_rotation": 2,
                 "max_playlists_per_rotation": 4,
                 "download_retry_attempts": 3,
-                "stream_title_template": "24/7 @zackrawrr / @asmongold | {GAMES} | !playlist !streamtime !new"
+                "stream_title_template": "24/7 @example1 / @example2 | {GAMES} | !playlist !streamtime !new"
             }
         }
 

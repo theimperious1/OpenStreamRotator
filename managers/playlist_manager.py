@@ -84,7 +84,7 @@ class PlaylistManager:
         settings = self.config.get_settings()
         template = settings.get(
             'stream_title_template',
-            '24/7 @zackrawrr / @asmongold | {GAMES} | !playlist !streamtime !new'
+            '24/7 @example1 / @example2 | {GAMES} | !playlist !streamtime !new'
         )
 
         games_str = ' | '.join(p.upper() for p in playlists) if playlists else 'VARIETY'

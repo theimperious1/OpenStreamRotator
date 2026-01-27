@@ -1,4 +1,4 @@
-# Asmongold247 - 24/7 Stream Automation
+# OpenStreamRotator - 24/7 Stream Automation
 
 Fully automated content rotation system for 24/7 streaming with Kick and Twitch integration, OBS automation, and intelligent playlist management.
 
@@ -30,7 +30,7 @@ Fully automated content rotation system for 24/7 streaming with Kick and Twitch 
 
 ```bash
 git clone <repository_link>.git
-cd Asmongold247
+cd OpenStreamRotator
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -122,7 +122,7 @@ Edit `config/playlists.json`:
     "min_playlists_per_rotation": 1,
     "max_playlists_per_rotation": 3,
     "download_retry_attempts": 3,
-    "stream_title_template": "24/7 @zackrawrr / @Asmongold | {GAMES} | !playlist !streamtime !new"
+    "stream_title_template": "24/7 @example1 / @example2 | {GAMES} | !playlist !streamtime !new"
   }
 }
 ```
@@ -229,7 +229,7 @@ Higher priority = more likely to be selected:
 
 ```json
 {
-  "stream_title_template": "24/7 @zackrawrr / @Asmongold | {GAMES} | !playlist !streamtime !new"
+  "stream_title_template": "24/7 @example1 / @example2 | {GAMES} | !playlist !streamtime !new"
 }
 ```
 

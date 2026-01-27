@@ -798,20 +798,20 @@ class AutomationController:
                         is_live=False
 
                     if is_live and self.last_stream_status != "live":
-                        logger.info("Asmongold is LIVE — pausing 24/7 stream")
+                        logger.info("Streamer is LIVE — pausing 24/7 stream")
                         self.playback_tracker.pause_tracking()
                         if self.obs_controller:
                             self.obs_controller.switch_scene(SCENE_LIVE)
                         self.last_stream_status = "live"
-                        self.notification_service.notify_asmongold_live()
+                        self.notification_service.notify_streamer_live()
                     elif not is_live and self.last_stream_status != "offline":
-                        logger.info("Asmongold is OFFLINE — resuming 24/7 stream")
+                        logger.info("Streamer is OFFLINE — resuming 24/7 stream")
                         if self.obs_controller:
                             self.obs_controller.switch_scene(SCENE_OFFLINE)
                         self.last_stream_status = "offline"
                         self._rotation_postpone_logged = False
                         self.playback_tracker.resume_tracking()
-                        self.notification_service.notify_asmongold_offline()
+                        self.notification_service.notify_streamer_offline()
 
                 # Every iteration: Check everything
                 if self.last_stream_status != "live" and self.playback_tracker.is_tracking():
