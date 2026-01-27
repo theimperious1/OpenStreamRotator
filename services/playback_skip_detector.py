@@ -127,16 +127,19 @@ class PlaybackSkipDetector:
             skip_info contains: time_skipped_seconds, new_finish_time
         """
         if not self.obs_controller:
+            logger.warning("No OBS controller available for skip detection")
             return False, None
         
         media_status = self.obs_controller.get_media_input_status(self.vlc_source_name)
         if not media_status:
+            logger.warning(f"Could not get media status for '{self.vlc_source_name}' - VLC may not be reporting playback data")
             return False, None
         
         current_position_ms = media_status.get('media_cursor')
         total_duration_ms = media_status.get('media_duration')
         
         if current_position_ms is None or total_duration_ms is None:
+            logger.warning(f"Incomplete media status - cursor={current_position_ms}ms, duration={total_duration_ms}ms")
             return False, None
         
         # First check initialization

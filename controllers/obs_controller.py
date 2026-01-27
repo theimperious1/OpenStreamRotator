@@ -1,4 +1,5 @@
 import logging
+import time
 import obsws_python as obs
 from typing import Optional
 
@@ -163,3 +164,113 @@ class OBSController:
         except Exception as e:
             logger.debug(f"Failed to trigger play on {source_name}: {e}")
             return False
+
+    def switch_scene_and_wait(self, scene_name: str, wait_seconds: float = 1.0) -> bool:
+        """Switch scene and wait for transition.
+        
+        Args:
+            scene_name: Name of scene to switch to
+            wait_seconds: Seconds to wait after switching
+        
+        Returns:
+            True if successful
+        """
+        success = self.switch_scene(scene_name)
+        if success:
+            time.sleep(wait_seconds)
+        return success
+
+    def prepare_for_content_switch(self, scene_content_switch: str, 
+                                   vlc_source_name: str, wait_seconds: float = 3.0) -> bool:
+        """Prepare for content switch (switch to content-switch scene and stop VLC).
+        
+        Args:
+            scene_content_switch: Name of content-switch scene
+            vlc_source_name: Name of VLC source
+            wait_seconds: Seconds to wait for OS to release file locks
+        
+        Returns:
+            True if successful
+        """
+        # Switch to content-switch scene
+        if not self.switch_scene(scene_content_switch):
+            return False
+        
+        # Stop VLC source
+        if not self.stop_vlc_source(vlc_source_name):
+            return False
+        
+        # Wait for file locks to release
+        time.sleep(wait_seconds)
+        return True
+
+    def finalize_content_switch(self, vlc_source_name: str, video_folder: str,
+                                target_scene: str) -> bool:
+        """Finalize content switch (update VLC source and switch to target scene).
+        
+        Args:
+            vlc_source_name: Name of VLC source to update
+            video_folder: Folder containing new video content
+            target_scene: Scene to switch to after update
+        
+        Returns:
+            True if successful
+        """
+        # Update VLC source with new content
+        if not self.update_vlc_source(vlc_source_name, video_folder):
+            logger.error("Failed to update VLC source during finalization")
+            return False
+        
+        # Switch to target scene
+        if not self.switch_scene(target_scene):
+            logger.error("Failed to switch to target scene during finalization")
+            return False
+        
+        return True
+
+    def get_playback_position_ms(self, source_name: str) -> int:
+        """Get current playback position of media source.
+        
+        Args:
+            source_name: Name of media source
+        
+        Returns:
+            Playback position in milliseconds, or 0 if unable to determine
+        """
+        status = self.get_media_input_status(source_name)
+        if not status:
+            return 0
+        
+        position = status.get('media_cursor')
+        return position if position is not None else 0
+
+    def get_total_media_duration_ms(self, source_name: str) -> int:
+        """Get total duration of media source.
+        
+        Args:
+            source_name: Name of media source
+        
+        Returns:
+            Total duration in milliseconds, or 0 if unable to determine
+        """
+        status = self.get_media_input_status(source_name)
+        if not status:
+            return 0
+        
+        duration = status.get('media_duration')
+        return duration if duration is not None else 0
+
+    def get_media_state(self, source_name: str) -> Optional[str]:
+        """Get current playback state of media source.
+        
+        Args:
+            source_name: Name of media source
+        
+        Returns:
+            Media state string (PLAYING, PAUSED, STOPPED, ENDED, etc.) or None
+        """
+        status = self.get_media_input_status(source_name)
+        if not status:
+            return None
+        
+        return status.get('media_state')
