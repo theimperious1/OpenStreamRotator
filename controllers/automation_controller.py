@@ -89,6 +89,7 @@ class AutomationController:
         self._seek_retry_count = 0  # Track retry attempts for seek
         self._last_playback_save_time = 0  # Track last auto-save time (power loss resilience)
         self._rotation_postpone_logged = False  # Track if we've logged postpone message for current live period
+        self._rotation_duration_reached_logged = False  # Track if we've logged rotation reached for current session
         self.shutdown_event = False
 
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -244,6 +245,9 @@ class AutomationController:
     def start_rotation_session(self, manual_playlists=None):
         """Start a new rotation session."""
         logger.info("Starting new rotation session...")
+        
+        # Reset rotation duration log flag for new session
+        self._rotation_duration_reached_logged = False
 
         settings = self.config_manager.get_settings()
         next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
@@ -558,7 +562,11 @@ class AutomationController:
             finish_time = datetime.fromisoformat(session['estimated_finish_time'])
             if datetime.now() >= finish_time:
                 total_seconds = self.playback_tracker.get_total_seconds()
-                logger.info(f"Rotation duration reached: {total_seconds}s")
+                
+                # Only log once per session rotation (prevent spam)
+                if not self._rotation_duration_reached_logged:
+                    logger.info(f"Rotation duration reached: {total_seconds}s")
+                    self._rotation_duration_reached_logged = True
                 
                 # Check if this is an override rotation (has suspended session to resume)
                 suspended_session = self.db.get_suspended_session()
