@@ -363,6 +363,7 @@ class AutomationController:
         # Check if this is an override situation (suspended session exists)
         is_override_switch = False
         backup_folder = None
+        suspension_data = {}  # Initialize at function level to avoid unbound errors
         suspended_session = self.db.get_suspended_session()
         if suspended_session and not is_override_resumption:
             # This is the content switch for the OVERRIDE (switching FROM original TO override)
@@ -677,7 +678,7 @@ class AutomationController:
                     self.db.update_session_times(
                         suspended_session['id'],
                         new_finish_time.isoformat(),
-                        None
+                        ""  # Empty string for download_trigger_time (not used for resumed sessions)
                     )
                     
                     logger.info(f"Resumed session {suspended_session['id']}, remaining duration: {remaining_seconds}s")
