@@ -24,6 +24,7 @@ console_handler.setFormatter(formatter)
 logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
 logger = logging.getLogger(__name__)
 
+# Import this last to ensure logging is configured first
 from controllers.automation_controller import AutomationController
 
 
