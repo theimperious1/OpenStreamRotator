@@ -5,8 +5,10 @@ import os
 import signal
 import json
 import shutil
+import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
@@ -67,6 +69,9 @@ class AutomationController:
         self.obs_client = None
         self.obs_controller = None
         self.platform_manager = PlatformManager()
+
+        # Initialize thread executor for background downloads
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="download_worker")
 
         # Initialize services
         self.notification_service = NotificationService(os.getenv("DISCORD_WEBHOOK_URL", ""))
@@ -534,6 +539,34 @@ class AutomationController:
         finally:
             self.download_in_progress = False
 
+    def _sync_background_download_next_rotation(self, playlists):
+        """Synchronous wrapper for background download to run in thread executor.
+        
+        Args:
+            playlists: List of playlist dicts already selected in main thread
+        """
+        try:
+            logger.info(f"Downloading next rotation in background thread: {[p['name'] for p in playlists]}")
+            settings = self.config_manager.get_settings()
+            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            
+            # Download in background (blocks in thread, doesn't block main loop)
+            download_result = self.playlist_manager.download_playlists(playlists, next_folder)
+            
+            if download_result.get('success'):
+                # Store playlists for next rotation to use
+                self.next_prepared_playlists = playlists
+                logger.info(f"Background download completed successfully. Prepared: {[p['name'] for p in playlists]}")
+                self.notification_service.notify_next_rotation_ready([p['name'] for p in playlists])
+            else:
+                logger.warning("Background download had some failures")
+                self.notification_service.notify_background_download_warning()
+        except Exception as e:
+            logger.error(f"Error during background download: {e}")
+            self.notification_service.notify_background_download_error(str(e))
+        finally:
+            self.download_in_progress = False
+
     async def check_for_rotation(self):
         """Check if it's time to rotate content based on duration."""
         if self.is_rotating:
@@ -555,8 +588,17 @@ class AutomationController:
 
         # Trigger background download immediately after rotation (no waiting)
         if not self.download_in_progress and self.next_prepared_playlists is None:
-            self.download_in_progress = True
-            await self._background_download_next_rotation()
+            # Select playlists in main thread (can't be done in executor thread due to SQLite)
+            playlists = self.playlist_manager.select_playlists_for_rotation()
+            if playlists:
+                self.download_in_progress = True
+                # Submit to executor thread with pre-selected playlists
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(
+                    self.executor, 
+                    self._sync_background_download_next_rotation, 
+                    playlists
+                )
 
         # Check if rotation duration has been reached
         if session.get('estimated_finish_time'):
@@ -941,6 +983,7 @@ class AutomationController:
                         is_live = self.twitch_live_checker.is_stream_live(
                             os.getenv("TARGET_TWITCH_STREAMER", "zackrawrr")
                         )
+                    is_live = False # DISABLED FOR TESTING
 
                     if is_live and self.last_stream_status != "live":
                         logger.info("Asmongold is LIVE — pausing 24/7 stream")
@@ -1021,6 +1064,9 @@ class AutomationController:
                     self.platform_manager.cleanup()
                     if self.obs_client:
                         self.obs_client.disconnect()
+                    # Shutdown executor threads
+                    self.executor.shutdown(wait=True)
+                    logger.info("Thread executor shutdown complete")
                     self.db.close()
                     logger.info("Cleanup complete, exiting...")
                     break
