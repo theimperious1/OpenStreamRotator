@@ -1,4 +1,5 @@
 import logging
+import inspect
 from typing import Optional, List
 from integrations.platforms.base.stream_platform import StreamPlatform
 from integrations.platforms.twitch import TwitchUpdater
@@ -80,8 +81,19 @@ class PlatformManager:
     def cleanup(self):
         """Clean up all platform resources."""
         for platform in self.platforms:
-            if hasattr(platform, 'close'):
-                try:
+            try:
+                if not hasattr(platform, 'close'):  # type: ignore
+                    logger.debug(f"Platform {platform.platform_name} has no close method")
+                    continue
+                
+                # Check if it's a coroutine (async function)
+                close_method = platform.close  # type: ignore
+                if inspect.iscoroutinefunction(close_method):
+                    # Skip async cleanup - it will be handled by event loop shutdown
+                    logger.debug(f"Skipping async cleanup for {platform.platform_name}")
+                else:
                     platform.close()  # type: ignore
-                except Exception as e:
-                    logger.error(f"Error closing {platform.platform_name}: {e}")
+            except Exception:
+                pass
+                # I'm opting to just ignore the error here since cleanup is non-critical in this location.
+                # logger.debug(f"Error closing {platform.platform_name}: {e}")

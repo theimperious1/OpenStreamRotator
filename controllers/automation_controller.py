@@ -852,7 +852,10 @@ class AutomationController:
                 if self.shutdown_event:
                     logger.info("Shutdown event detected, cleaning up...")
                     self.save_playback_on_exit()
-                    self.platform_manager.cleanup()
+                    try:
+                        self.platform_manager.cleanup()
+                    except Exception as e:
+                        logger.debug(f"Platform cleanup warning (non-critical): {e}")
                     if self.obs_client:
                         self.obs_client.disconnect()
                     self.executor.shutdown(wait=True)

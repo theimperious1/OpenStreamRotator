@@ -25,6 +25,7 @@ class VideoProcessor:
         Returns:
             Duration in seconds, or 0 if unable to determine
         """
+        proc = None
         try:
             cmd = [
                 'ffprobe',
@@ -33,7 +34,6 @@ class VideoProcessor:
                 '-of', 'json',
                 file_path
             ]
-            proc = None
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             _running_processes.append(proc)
             
