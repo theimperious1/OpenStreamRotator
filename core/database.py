@@ -75,6 +75,8 @@ class DatabaseManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 ended_at TIMESTAMP,
+                suspended_at TIMESTAMP,
+                suspension_data TEXT,
                 playlists_selected TEXT,
                 total_videos INTEGER,
                 total_size_mb INTEGER,
@@ -288,6 +290,90 @@ class DatabaseManager:
 
         conn.commit()
         self.close()
+
+    def suspend_session(self, session_id: int, suspension_data: Dict) -> bool:
+        """Suspend a rotation session (pause it for manual override)."""
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("""
+                UPDATE rotation_sessions 
+                SET suspended_at = ?, suspension_data = ?
+                WHERE id = ?
+            """, (datetime.now().isoformat(), json.dumps(suspension_data), session_id))
+
+            conn.commit()
+            logger.info(f"Suspended session {session_id}: {suspension_data}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to suspend session: {e}")
+            return False
+        finally:
+            self.close()
+
+    def resume_session(self, session_id: int) -> bool:
+        """Resume a suspended rotation session."""
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("""
+                UPDATE rotation_sessions 
+                SET suspended_at = NULL, suspension_data = NULL
+                WHERE id = ?
+            """, (session_id,))
+
+            conn.commit()
+            logger.info(f"Resumed session {session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to resume session: {e}")
+            return False
+        finally:
+            self.close()
+
+    def get_suspended_session(self) -> Optional[Dict]:
+        """Get the most recent suspended rotation session."""
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM rotation_sessions 
+            WHERE suspended_at IS NOT NULL AND ended_at IS NULL
+            ORDER BY suspended_at DESC 
+            LIMIT 1
+        """)
+
+        row = cursor.fetchone()
+        self.close()
+
+        if row:
+            return dict(row)
+        return None
+
+    def update_session_column(self, session_id: int, column_name: str, value: str) -> bool:
+        """Update a specific column in a session."""
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            # Build dynamic query based on column name (safe for known columns only)
+            allowed_columns = ['suspension_data', 'suspension_notes']
+            if column_name not in allowed_columns:
+                logger.error(f"Invalid column name: {column_name}")
+                return False
+            
+            query = f"UPDATE rotation_sessions SET {column_name} = ? WHERE id = ?"
+            cursor.execute(query, (value, session_id))
+            conn.commit()
+            logger.info(f"Updated session {session_id} column {column_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update session column: {e}")
+            return False
+        finally:
+            self.close()
 
     def sync_playlists_from_config(self, config_playlists: List[Dict]):
         """Sync playlists from config file to database."""

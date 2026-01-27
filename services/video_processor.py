@@ -3,8 +3,12 @@ import os
 import logging
 import re
 import json
+from typing import List
 
 logger = logging.getLogger(__name__)
+
+# Global list to track running subprocesses for cleanup on exit
+_running_processes: List[subprocess.Popen] = []
 
 
 class VideoProcessor:
@@ -29,20 +33,32 @@ class VideoProcessor:
                 '-of', 'json',
                 file_path
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
+            proc = None
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            _running_processes.append(proc)
+            
+            try:
+                stdout, stderr = proc.communicate(timeout=30)
+                result_returncode = proc.returncode
+            finally:
+                if proc in _running_processes:
+                    _running_processes.remove(proc)
+            
+            if result_returncode == 0:
+                data = json.loads(stdout)
                 duration_str = data.get('format', {}).get('duration', '0')
                 duration = int(float(duration_str))
                 logger.debug(f"Got duration for {os.path.basename(file_path)}: {duration}s")
                 return duration
             else:
-                logger.warning(f"ffprobe returned {result.returncode} for {os.path.basename(file_path)}")
-                if result.stderr:
-                    logger.warning(f"ffprobe stderr: {result.stderr[:200]}")
+                logger.warning(f"ffprobe returned {result_returncode} for {os.path.basename(file_path)}")
+                if stderr:
+                    logger.warning(f"ffprobe stderr: {stderr[:200]}")
             return 0
         except subprocess.TimeoutExpired:
             logger.warning(f"Timeout getting duration for: {file_path}")
+            if proc and proc.poll() is None:  # Check if proc exists and is still running
+                proc.kill()
             return 0
         except FileNotFoundError:
             logger.warning("ffprobe not found. Install ffmpeg for video duration detection.")
@@ -110,3 +126,20 @@ class VideoProcessor:
             logger.error(f"Error reading folder {folder_path}: {e}")
         
         return video_files
+
+def kill_all_running_processes():
+    """Kill all tracked subprocesses. Called on program exit."""
+    global _running_processes
+    for proc in _running_processes:
+        try:
+            if proc.poll() is None:  # Process still running
+                logger.info(f"Killing subprocess (PID {proc.pid})")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"Subprocess {proc.pid} didn't terminate, forcing kill")
+                    proc.kill()
+        except Exception as e:
+            logger.error(f"Error killing subprocess: {e}")
+    _running_processes.clear()

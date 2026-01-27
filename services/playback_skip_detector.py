@@ -1,5 +1,6 @@
 import time
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Optional
 from core.database import DatabaseManager
@@ -13,7 +14,7 @@ class PlaybackSkipDetector:
 
     SKIP_MARGIN_MS = 5000  # 5 second margin for VLC reporting variations
 
-    def __init__(self, db: DatabaseManager, obs_controller: OBSController, vlc_source_name: str):
+    def __init__(self, db: DatabaseManager, obs_controller: OBSController, vlc_source_name: str, video_folder: str = ""):
         """
         Initialize skip detector.
         
@@ -21,27 +22,101 @@ class PlaybackSkipDetector:
             db: DatabaseManager for session updates
             obs_controller: OBSController for media status queries
             vlc_source_name: Name of VLC source in OBS
+            video_folder: Path to the folder containing videos for deletion on transition
         """
         self.db = db
         self.obs_controller = obs_controller
         self.vlc_source_name = vlc_source_name
+        self.video_folder = video_folder
         
         self.last_known_playback_position_ms = 0
         self.last_playback_check_time: Optional[float] = None
+        self.total_rotation_duration_ms = 0  # Total duration of current rotation session
+        self.original_finish_time: Optional[datetime] = None  # Original finish time - don't extend past this
+        self.cumulative_playback_ms = 0  # Cumulative playback across all videos in playlist (accounts for video transitions)
 
-    def initialize(self):
-        """Initialize detector with current VLC position."""
+    def initialize(self, total_duration_seconds: int = 0, original_finish_time: Optional[datetime] = None, resume_position_ms: int = 0):
+        """Initialize detector with current VLC position and rotation duration.
+        
+        Args:
+            total_duration_seconds: Total duration of the rotation session in seconds.
+                                   If 0, will try to use current video duration.
+            original_finish_time: Original estimated finish time for this session.
+                                 Used as ceiling to prevent extending rotation indefinitely.
+            resume_position_ms: If resuming from a paused position, the position to initialize from (in ms).
+                               Used to properly calculate remaining time for PC restart scenarios.
+        """
         media_status = self.obs_controller.get_media_input_status(self.vlc_source_name)
         if media_status:
             self.last_known_playback_position_ms = media_status.get('media_cursor', 0) or 0
         self.last_playback_check_time = time.time()
-        logger.debug("Playback skip detector initialized")
+        self.total_rotation_duration_ms = total_duration_seconds * 1000
+        self.original_finish_time = original_finish_time
+        self.cumulative_playback_ms = 0
+        
+        # If resuming from a paused position, set cumulative to indicate we've already consumed that much
+        # This way remaining time calculation will be correct when skip detection triggers
+        if resume_position_ms > 0:
+            self.cumulative_playback_ms = resume_position_ms
+            logger.info(f"Initialized skip detector with resume position: {resume_position_ms}ms ({resume_position_ms/1000:.1f}s)")
+        
+        logger.info(f"Playback skip detector initialized (total rotation: {total_duration_seconds}s, original finish: {original_finish_time})")
 
     def reset(self):
         """Reset detector for new rotation."""
         self.last_known_playback_position_ms = 0
         self.last_playback_check_time = None
+        self.cumulative_playback_ms = 0
         logger.debug("Playback skip detector reset")
+
+    def _get_video_files_in_order(self) -> list[str]:
+        """Get list of video files in folder, sorted alphabetically."""
+        if not self.video_folder or not os.path.exists(self.video_folder):
+            return []
+        
+        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
+        video_files = []
+        
+        try:
+            for filename in sorted(os.listdir(self.video_folder)):
+                if filename.lower().endswith(video_extensions):
+                    video_files.append(filename)
+        except Exception as e:
+            logger.warning(f"Failed to list video files: {e}")
+        
+        return video_files
+
+    def _delete_completed_video(self, video_filename: str) -> bool:
+        """Delete a completed video file from the video folder.
+        
+        Args:
+            video_filename: Name of the video file to delete
+        
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        if not self.video_folder:
+            return False
+        
+        try:
+            video_path = os.path.join(self.video_folder, video_filename)
+            if os.path.exists(video_path):
+                os.remove(video_path)
+                logger.info(f"Deleted completed video: {video_filename}")
+                
+                # Update OBS VLC source to remove the deleted video from its playlist
+                # This prevents VLC from trying to play a non-existent file
+                if self.obs_controller:
+                    self.obs_controller.update_vlc_source(self.vlc_source_name, self.video_folder)
+                    logger.info(f"Updated OBS VLC source to remove {video_filename}")
+                
+                return True
+            else:
+                logger.warning(f"Video file not found for deletion: {video_filename}")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to delete video {video_filename}: {e}")
+            return False
 
     def check_for_skip(self, session_id: Optional[int] = None) -> tuple[bool, Optional[dict]]:
         """
@@ -75,6 +150,35 @@ class PlaybackSkipDetector:
         expected_position_delta_ms = time_elapsed_seconds * 1000
         position_delta_ms = current_position_ms - self.last_known_playback_position_ms
         
+        # Detect backwards skip (user rewinding) - reset tracking to new position
+        if position_delta_ms < -1000:  # Large negative jump
+            # Check if this is a video transition or user rewind
+            # Video transition: position goes to near 0 (start of next video)
+            # User rewind: position goes to some arbitrary earlier point
+            if current_position_ms > 1000:  # Not at start of video = user rewind
+                logger.info(f"Backwards skip detected: position went from {self.last_known_playback_position_ms}ms to {current_position_ms}ms (user rewound)")
+                logger.info(f"Resetting skip detection to {current_position_ms}ms to prevent double-counting rewatched content")
+                # Reset: treat current position as new baseline
+                self.last_known_playback_position_ms = current_position_ms
+                self.last_playback_check_time = time.time()
+                return False, None
+            else:
+                # Position near 0 = video transition
+                logger.info(f"Video transition detected: position went from {self.last_known_playback_position_ms}ms to {current_position_ms}ms")
+                # Previous video ended, so add its duration to cumulative
+                self.cumulative_playback_ms += self.last_known_playback_position_ms
+                logger.info(f"Cumulative playback now: {self.cumulative_playback_ms}ms ({self.cumulative_playback_ms/1000:.1f}s)")
+                
+                # Delete the completed video (except if it's the last one in playlist)
+                video_files = self._get_video_files_in_order()
+                if video_files and len(video_files) > 1:
+                    # Delete the first video (current one being transitioned away from)
+                    self._delete_completed_video(video_files[0])
+                elif video_files:
+                    logger.info(f"Not deleting {video_files[0]} - it's the last video in playlist")
+                
+                position_delta_ms = current_position_ms  # Current position in new video
+        
         # Calculate excess advance
         excess_advance_ms = position_delta_ms - expected_position_delta_ms
         
@@ -89,10 +193,30 @@ class PlaybackSkipDetector:
                 f"Excess skipped: {time_skipped_seconds:.1f}s"
             )
             
-            # Calculate new finish time
-            remaining_ms = total_duration_ms - current_position_ms
-            remaining_seconds = remaining_ms / 1000
+            # Calculate remaining using CUMULATIVE playback position across all videos
+            # cumulative_playback_ms = all previous videos' durations
+            # + current_position_ms = position within current video
+            total_consumed_ms = self.cumulative_playback_ms + current_position_ms
+            remaining_ms = self.total_rotation_duration_ms - total_consumed_ms
+            
+            logger.info(
+                f"Cumulative consumed: {total_consumed_ms/1000:.1f}s "
+                f"(previous videos: {self.cumulative_playback_ms/1000:.1f}s + current video: {current_position_ms/1000:.1f}s). "
+                f"Total duration: {self.total_rotation_duration_ms/1000:.1f}s. "
+                f"Remaining: {remaining_ms/1000:.1f}s"
+            )
+            
+            remaining_seconds = max(0, remaining_ms / 1000)  # Don't go negative
             new_finish_time = datetime.now() + timedelta(seconds=remaining_seconds)
+            
+            logger.info(f"Skip recalculation - new finish would be: {new_finish_time}, original: {self.original_finish_time}")
+            
+            # Cap finish time: never extend past original session finish time
+            if self.original_finish_time and new_finish_time > self.original_finish_time:
+                logger.warning(f"Skip would extend finish time to {new_finish_time}, capping at original: {self.original_finish_time}")
+                new_finish_time = self.original_finish_time
+            elif not self.original_finish_time:
+                logger.warning("No original finish time set - capping disabled!")
             
             # Update session if provided
             if session_id:

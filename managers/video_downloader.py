@@ -2,12 +2,15 @@ import os
 import subprocess
 import sys
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 from services.video_processor import VideoProcessor
 
 logger = logging.getLogger(__name__)
+
+# Global list to track running subprocesses for cleanup on exit
+_running_processes: List[subprocess.Popen] = []
 
 
 class VideoDownloader:
@@ -91,18 +94,32 @@ class VideoDownloader:
                 ]
 
                 logger.info(f"Downloading playlist (attempt {attempt + 1}/{max_retries}): {playlist_url}")
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+                
+                # Use Popen to track the process for cleanup
+                proc = None
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                _running_processes.append(proc)
+                
+                try:
+                    stdout, stderr = proc.communicate(timeout=3600)
+                    result_returncode = proc.returncode
+                finally:
+                    # Remove from tracking list
+                    if proc in _running_processes:
+                        _running_processes.remove(proc)
 
-                if result.returncode == 0:
+                if result_returncode == 0:
                     logger.info(f"Successfully downloaded playlist: {playlist_url}")
                     return {'success': True}
                 else:
-                    logger.warning(f"yt-dlp returned code {result.returncode}")
-                    if result.stderr:
-                        logger.warning(f"yt-dlp stderr: {result.stderr[:200]}")
+                    logger.warning(f"yt-dlp returned code {result_returncode}")
+                    if stderr:
+                        logger.warning(f"yt-dlp stderr: {stderr[:200]}")
 
             except subprocess.TimeoutExpired:
                 logger.warning(f"Download timeout (attempt {attempt + 1}/{max_retries})")
+                if proc and proc.poll() is None:  # Check if proc exists and is still running
+                    proc.kill()
             except FileNotFoundError:
                 logger.error("yt-dlp not found. Install it with: pip install yt-dlp")
                 return {'success': False}
@@ -139,6 +156,12 @@ class VideoDownloader:
             # Get video metadata
             title = VideoProcessor.extract_title_from_filename(filename)
             duration = VideoProcessor.get_video_duration(video_path)
+            
+            # Handle None duration (video processing failed)
+            if duration is None:
+                logger.warning(f"Failed to get duration for {filename}, using 0")
+                duration = 0
+            
             file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
 
             # Try to add video, skip if already exists
@@ -159,6 +182,24 @@ class VideoDownloader:
                     logger.debug(f"Video already exists: {filename}, skipping")
                 else:
                     logger.error(f"Error registering video {filename}: {e}")
-
+        
         logger.info(f"Registered {registered_count} new videos for {playlist_name}, total: {total_duration}s")
         return total_duration
+
+def kill_all_running_processes():
+    """Kill all tracked subprocesses. Called on program exit."""
+    global _running_processes
+    for proc in _running_processes:
+        try:
+            if proc.poll() is None:  # Process still running
+                logger.info(f"Killing subprocess (PID {proc.pid})")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"Subprocess {proc.pid} didn't terminate, forcing kill")
+                    proc.kill()
+        except Exception as e:
+            logger.error(f"Error killing subprocess: {e}")
+    _running_processes.clear()
+
