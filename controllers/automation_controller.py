@@ -2,6 +2,7 @@ import time
 import obsws_python as obs
 import logging
 import os
+import shutil
 import signal
 import asyncio
 from typing import Optional
@@ -99,6 +100,7 @@ class AutomationController:
         self.last_stream_status = None
         self.is_rotating = False
         self.download_in_progress = False
+        self.override_already_cleaned = False
         self._pending_seek_position_ms = 0
         self._seek_retry_count = 0
         self._last_playback_save_time = 0
@@ -333,10 +335,12 @@ class AutomationController:
             backup_folder = None
             suspended_session = self.db.get_suspended_session()
             if suspended_session and not is_override_resumption:
-                is_override_switch = True
-                import json
-                suspension_data = json.loads(suspended_session.get('suspension_data', '{}'))
-                backup_folder = suspension_data.get('backup_folder')
+                # Skip backup if we already cleaned up this override
+                if not self.override_already_cleaned:
+                    is_override_switch = True
+                    import json
+                    suspension_data = json.loads(suspended_session.get('suspension_data', '{}'))
+                    backup_folder = suspension_data.get('backup_folder')
 
             # Execute folder operations
             if not self.content_switch_handler.execute_switch(
@@ -382,6 +386,7 @@ class AutomationController:
             self._initialize_skip_detector()
 
             self.is_rotating = False
+            self.override_already_cleaned = False
             logger.info("Content switch completed successfully")
             return True
 
@@ -552,13 +557,14 @@ class AutomationController:
         self.notification_service.notify_override_complete([suspended_session.get('stream_title', 'Unknown')])
         
         # Update VLC with restored content
-        if not self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, current_folder):
-            logger.error("Failed to update VLC source after override restore")
-        
-        # Switch back to appropriate scene based on stream status
-        target_scene = SCENE_LIVE if self.last_stream_status == "live" else SCENE_OFFLINE
-        self.obs_controller.switch_scene(target_scene)
-        logger.info(f"Switched back to {target_scene} scene after override completion")
+        if self.obs_controller:
+            if not self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, current_folder):
+                logger.error("Failed to update VLC source after override restore")
+            
+            # Switch back to appropriate scene based on stream status
+            target_scene = SCENE_LIVE if self.last_stream_status == "live" else SCENE_OFFLINE
+            self.obs_controller.switch_scene(target_scene)
+            logger.info(f"Switched back to {target_scene} scene after override completion")
         
         self.download_in_progress = False
         self._initialize_skip_detector()
@@ -601,14 +607,50 @@ class AutomationController:
         selected = override.get('selected_playlists', [])
         settings = self.config_manager.get_settings()
         next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+        current_folder = settings.get('video_folder', 'C:/stream_videos/')
 
-        # Backup prepared rotation
-        pending_backup_folder = self.override_handler.backup_prepared_rotation(next_folder)
+        # Check if the current session is already an override (user is replacing it with a new override)
+        current_session = self.db.get_current_session()
+        session_to_suspend = self.current_session_id
+        
+        if current_session and current_session.get('suspended_at'):
+            # Current session IS an override - user wants to replace it
+            logger.info(f"Replacing active override (session {self.current_session_id}) with new override")
+            
+            # First, clean up the current override's /live folder content
+            try:
+                logger.info("Cleaning up current override content")
+                if os.path.exists(current_folder):
+                    for filename in os.listdir(current_folder):
+                        file_path = os.path.join(current_folder, filename)
+                        try:
+                            if os.path.isfile(file_path):
+                                os.unlink(file_path)
+                            elif os.path.isdir(file_path):
+                                shutil.rmtree(file_path)
+                        except Exception as e:
+                            logger.warning(f"Could not delete {filename}: {e}")
+                self.override_already_cleaned = True
+            except Exception as e:
+                logger.error(f"Error cleaning up override content: {e}")
+            
+            # End the current override session (user doesn't want it anymore)
+            if self.current_session_id is not None:
+                self.db.end_session(self.current_session_id)
+            
+            # Get the original session that was suspended (what we'll return to after new override)
+            original_suspended = self.db.get_suspended_session()
+            if original_suspended:
+                session_to_suspend = original_suspended['id']
+                logger.info(f"New override will return to original session {session_to_suspend}")
+        
+        # Backup prepared rotation (only if we're not replacing an override)
+        self.override_handler.backup_prepared_rotation(next_folder)
 
-        # Suspend current session
-        if self.current_session_id:
+        # Suspend current session (or the original if we're replacing an override)
+        if session_to_suspend:
             self.override_handler.suspend_current_session(
-                self.current_session_id, self.next_prepared_playlists,
+                session_to_suspend, self.next_prepared_playlists,
                 self.download_in_progress, override
             )
 
