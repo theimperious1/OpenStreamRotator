@@ -17,6 +17,8 @@ from services.notification_service import NotificationService
 from services.playback_tracker import PlaybackTracker
 from services.playback_skip_detector import PlaybackSkipDetector
 from services.twitch_live_checker import TwitchLiveChecker
+from managers.video_downloader import kill_all_running_processes as kill_downloader_processes
+from services.video_processor import kill_all_running_processes as kill_processor_processes
 
 
 # Load environment variables
@@ -83,6 +85,8 @@ class AutomationController:
         self.last_stream_status = None
         self.is_rotating = False
         self.download_in_progress = False
+        self._pending_seek_position_ms = 0  # Used for seeking on PC restart resume
+        self._seek_retry_count = 0  # Track retry attempts for seek
         self.shutdown_event = False
 
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -90,8 +94,47 @@ class AutomationController:
 
     def signal_handler(self, sig, frame):
         """Handle shutdown signals gracefully."""
-        logger.info("Shutdown signal received. Setting shutdown flag...")
+        logger.info("Shutdown signal received. Killing any running subprocesses...")
+        # Kill subprocesses immediately to prevent hanging
+        kill_downloader_processes()
+        kill_processor_processes()
+        logger.info("Subprocesses killed. Setting shutdown flag...")
         self.shutdown_event = True
+    
+    def save_playback_on_exit(self):
+        """Save current playback position when program exits (for PC restart resume)."""
+        if not self.current_session_id:
+            logger.debug("No active session, skipping playback save")
+            return
+        
+        try:
+            # Get current VLC position
+            if not self.obs_controller:
+                logger.warning("No OBS controller available, skipping playback save")
+                return
+            
+            media_status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
+            if not media_status:
+                logger.warning("Could not get VLC status for playback save")
+                return
+            
+            current_position_ms = media_status.get('media_cursor', 0)
+            if current_position_ms is None:
+                logger.warning("VLC position is None, skipping save")
+                return
+            
+            playback_seconds = current_position_ms / 1000
+            
+            # Save to database
+            self.db.update_session_playback(self.current_session_id, int(playback_seconds))
+            logger.info(f"Saved playback position for session {self.current_session_id}: {playback_seconds:.1f}s")
+            
+            # Switch to pause scene
+            if self.obs_controller.switch_scene(SCENE_LIVE):
+                logger.info("Switched to pause scene on exit")
+            
+        except Exception as e:
+            logger.error(f"Failed to save playback on exit: {e}")
 
     def connect_obs(self) -> bool:
         """Connect to OBS WebSocket."""
@@ -391,15 +434,19 @@ class AutomationController:
         
         # Initialize skip detector
         if self.obs_controller:
+            settings = self.config_manager.get_settings()
+            video_folder = settings.get('video_folder', 'C:/stream_videos/')
+            
             if self.playback_skip_detector is None:
                 self.playback_skip_detector = PlaybackSkipDetector(
-                    self.db, self.obs_controller, VLC_SOURCE_NAME
+                    self.db, self.obs_controller, VLC_SOURCE_NAME, video_folder
                 )
             
             # Get current session to find total rotation duration and original finish time
             current_session = self.db.get_current_session()
             total_duration = 0
             original_finish = None
+            resume_position = 0
             if current_session:
                 total_duration = current_session.get('total_duration_seconds', 0)
                 finish_time_str = current_session.get('estimated_finish_time')
@@ -408,10 +455,15 @@ class AutomationController:
                         original_finish = datetime.fromisoformat(finish_time_str)
                     except (ValueError, TypeError):
                         pass
+                # Get playback position if resuming from pause
+                playback_seconds = current_session.get('playback_seconds', 0)
+                if playback_seconds > 0:
+                    resume_position = playback_seconds * 1000  # Convert to milliseconds
             
             self.playback_skip_detector.initialize(
                 total_duration_seconds=total_duration,
-                original_finish_time=original_finish
+                original_finish_time=original_finish,
+                resume_position_ms=resume_position
             )
 
         self.is_rotating = False
@@ -627,8 +679,12 @@ class AutomationController:
                     if self.start_rotation_session():
                         await self.execute_content_switch()
 
-    async def check_manual_override(self):
-        """Check for manual override requests."""
+    async def check_manual_override(self) -> bool:
+        """Check for manual override requests.
+        
+        Returns:
+            True if override was triggered, False otherwise
+        """
         if self.config_manager.has_override_changed():
             override = self.config_manager.get_active_override()
             if override and override.get('trigger_now', False):
@@ -698,11 +754,18 @@ class AutomationController:
                     # This is where the backup will happen (VLC already stopped)
                     await self.execute_content_switch()
                 
-                # NOTE: download_in_progress stays True until override actually ends
-                # It will be set to False in check_for_rotation() when override completes
+                # Allow background download to proceed for next rotation after override starts
+                self.download_in_progress = False
+                
+                # NOTE: download_in_progress was kept True during override setup to prevent
+                # interference, but now that content switch is complete, we allow next rotation
+                # to be prepared in background
 
                 # Clear override
                 self.config_manager.clear_override()
+                return True  # Override was triggered
+        
+        return False  # No override was triggered
 
     async def run(self):
         """Main loop."""
@@ -730,37 +793,51 @@ class AutomationController:
         config_playlists = self.config_manager.get_playlists()
         self.db.sync_playlists_from_config(config_playlists)
 
-        # Check if we need initial rotation
-        session = self.db.get_current_session()
-        if not session:
-            logger.info("No active session, starting initial rotation")
-            if self.start_rotation_session():
-                await self.execute_content_switch()
-        else:
-            # Check if video files still exist
-            settings = self.config_manager.get_settings()
-            video_folder = settings.get('video_folder', 'C:/stream_videos/')
-            
-            if not os.path.exists(video_folder) or len(os.listdir(video_folder)) == 0:
-                logger.warning(f"Video folder is empty or missing: {video_folder}")
-                logger.info("Starting new rotation since videos are missing")
-                # End the current session since videos are gone
-                if session['id']:
-                    total_seconds = self.playback_tracker.get_total_seconds()
-                    self.db.update_session_playback(session['id'], total_seconds)
-                    self.db.end_session(session['id'])
-                # Start new rotation
+        # Check for manual override on startup FIRST (before auto-rotation)
+        logger.info("Checking for manual override on startup...")
+        override_triggered = await self.check_manual_override()
+        
+        if not override_triggered:
+            # Only start normal rotation if no override was triggered
+            # Check if we need initial rotation
+            session = self.db.get_current_session()
+            if not session:
+                logger.info("No active session, starting initial rotation")
                 if self.start_rotation_session():
                     await self.execute_content_switch()
             else:
-                self.current_session_id = session['id']
-                playback_seconds = session.get('playback_seconds', 0)
-                self.playback_tracker.total_playback_seconds = playback_seconds
-                stream_title = session.get('stream_title')
-                logger.info(f"Resuming session {self.current_session_id}, playback: {playback_seconds}s")
-                # Update stream title to match what was previously playing
-                if stream_title:
-                    await self.update_stream_titles(stream_title)
+                # Check if video files still exist
+                settings = self.config_manager.get_settings()
+                video_folder = settings.get('video_folder', 'C:/stream_videos/')
+                
+                if not os.path.exists(video_folder) or len(os.listdir(video_folder)) == 0:
+                    logger.warning(f"Video folder is empty or missing: {video_folder}")
+                    logger.info("Starting new rotation since videos are missing")
+                    # End the current session since videos are gone
+                    if session['id']:
+                        total_seconds = self.playback_tracker.get_total_seconds()
+                        self.db.update_session_playback(session['id'], total_seconds)
+                        self.db.end_session(session['id'])
+                    # Start new rotation
+                    if self.start_rotation_session():
+                        await self.execute_content_switch()
+                else:
+                    self.current_session_id = session['id']
+                    playback_seconds = session.get('playback_seconds', 0)
+                    self.playback_tracker.total_playback_seconds = playback_seconds
+                    stream_title = session.get('stream_title')
+                    logger.info(f"Resuming session {self.current_session_id}, playback: {playback_seconds}s")
+                    # Update stream title to match what was previously playing
+                    if stream_title:
+                        await self.update_stream_titles(stream_title)
+                    
+                    # If resuming from a paused position (PC restart), seek VLC to that position
+                    if playback_seconds > 0:
+                        playback_ms = int(playback_seconds * 1000)
+                        # Schedule a seek operation to happen once videos are loaded
+                        # We'll do this in the main loop after the first check_for_rotation call
+                        self._pending_seek_position_ms = playback_ms
+                        logger.info(f"Scheduled seek to {playback_seconds}s ({playback_ms}ms) on playback resume")
 
         # Main loop
         loop_count = 0
@@ -812,6 +889,31 @@ class AutomationController:
 
                 # Check for rotation (fast detection)
                 await self.check_for_rotation()
+                
+                # Handle pending seek (from PC restart resume)
+                if self._pending_seek_position_ms > 0:
+                    # First attempt: trigger play to ensure media is playing/paused
+                    if self._seek_retry_count == 0:
+                        # On first attempt, trigger play and skip seek this iteration
+                        # to give VLC time to transition state
+                        self.obs_controller.play_media(VLC_SOURCE_NAME)
+                        self._seek_retry_count += 1
+                        logger.debug("Triggered play, will attempt seek on next iteration")
+                    else:
+                        # On subsequent attempts, try to seek
+                        if self.obs_controller.seek_media(VLC_SOURCE_NAME, self._pending_seek_position_ms):
+                            logger.info(f"Seeked VLC to {self._pending_seek_position_ms/1000:.1f}s on resume")
+                            self._pending_seek_position_ms = 0  # Clear after successful seek
+                            self._seek_retry_count = 0  # Reset retry count
+                        else:
+                            # Retry up to 10 more times (10 seconds total) before giving up
+                            self._seek_retry_count += 1
+                            if self._seek_retry_count >= 11:  # 1 for play + 10 for seek attempts
+                                logger.warning(f"Failed to seek VLC after 10 attempts, giving up")
+                                self._pending_seek_position_ms = 0  # Give up
+                                self._seek_retry_count = 0
+                            else:
+                                logger.debug(f"Seek failed (attempt {self._seek_retry_count - 1}/10), will retry next iteration")
 
                 # Check for manual override
                 await self.check_manual_override()
@@ -825,10 +927,13 @@ class AutomationController:
                 # Check for shutdown signal
                 if self.shutdown_event:
                     logger.info("Shutdown event detected, performing cleanup...")
+                    # Save playback position for PC restart resume
+                    self.save_playback_on_exit()
                     if self.current_session_id:
-                        total_seconds = self.playback_tracker.get_total_seconds()
-                        self.db.update_session_playback(self.current_session_id, total_seconds)
-                        self.db.end_session(self.current_session_id)
+                        # Only end session if we didn't already save it in save_playback_on_exit
+                        # We want to keep the session active if paused for resume
+                        # So we just update it without ending it
+                        logger.info(f"Session {self.current_session_id} left in paused state for next startup")
                     self.platform_manager.cleanup()
                     if self.obs_client:
                         self.obs_client.disconnect()

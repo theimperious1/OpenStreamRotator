@@ -122,3 +122,44 @@ class OBSController:
         except Exception as e:
             logger.debug(f"Failed to get media input status for {source_name}: {e}")
             return None
+
+    def seek_media(self, source_name: str, position_ms: int) -> bool:
+        """Seek VLC media source to a specific position.
+        
+        Args:
+            source_name: Name of the VLC source
+            position_ms: Position to seek to in milliseconds
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            self.obs_client.set_media_input_cursor(
+                name=source_name,
+                cursor=position_ms
+            )
+            logger.info(f"Seeked {source_name} to {position_ms}ms ({position_ms/1000:.1f}s)")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to seek media {source_name}: {e}")
+            return False
+
+    def play_media(self, source_name: str) -> bool:
+        """Trigger play action on a media input source.
+        
+        Args:
+            source_name: Name of the media input source (VLC)
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            self.obs_client.trigger_media_input_action(
+                name=source_name,
+                action="OBS_WEBSOCKET_MEDIA_INPUT_ACTION_PLAY"
+            )
+            logger.info(f"Triggered play on {source_name}")
+            return True
+        except Exception as e:
+            logger.debug(f"Failed to trigger play on {source_name}: {e}")
+            return False
