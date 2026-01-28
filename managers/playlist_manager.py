@@ -6,9 +6,9 @@ from typing import List, Dict, Optional
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 from core.video_registration_queue import VideoRegistrationQueue
-from managers.playlist_selector import PlaylistSelector
-from managers.video_downloader import VideoDownloader
-from services.video_processor import VideoProcessor
+from managers.utils.playlist_selector import PlaylistSelector
+from managers.utils.video_downloader import VideoDownloader
+from utils.video_processor import VideoProcessor
 
 logger = logging.getLogger(__name__)
 

@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 from managers.playlist_manager import PlaylistManager
-from services.playback_skip_detector import PlaybackSkipDetector
+from playback.playback_skip_detector import PlaybackSkipDetector
 from services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)

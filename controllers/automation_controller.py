@@ -16,14 +16,14 @@ from managers.stream_manager import StreamManager
 from controllers.obs_controller import OBSController
 from managers.platform_manager import PlatformManager
 from services.notification_service import NotificationService
-from services.playback_tracker import PlaybackTracker
-from services.playback_skip_detector import PlaybackSkipDetector
+from playback.playback_tracker import PlaybackTracker
+from playback.playback_skip_detector import PlaybackSkipDetector
 from services.twitch_live_checker import TwitchLiveChecker
 from handlers.rotation_handler import RotationHandler
 from handlers.override_handler import OverrideHandler
 from handlers.content_switch_handler import ContentSwitchHandler
-from managers.video_downloader import kill_all_running_processes as kill_downloader_processes
-from services.video_processor import kill_all_running_processes as kill_processor_processes
+from managers.utils.video_downloader import kill_all_running_processes as kill_downloader_processes
+from utils.video_processor import kill_all_running_processes as kill_processor_processes
 
 # Load environment variables
 load_dotenv()
