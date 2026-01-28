@@ -5,7 +5,7 @@ import logging
 from typing import List, Dict, Optional
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
-from services.video_processor import VideoProcessor
+from utils.video_processor import VideoProcessor
 from core.video_registration_queue import VideoRegistrationQueue
 
 logger = logging.getLogger(__name__)
@@ -225,4 +225,3 @@ def kill_all_running_processes():
         except Exception as e:
             logger.error(f"Error killing subprocess: {e}")
     _running_processes.clear()
-
