@@ -272,6 +272,19 @@ All activity logged to `automation.log` in project root. Check here for:
 - OBS connection status
 - Category lookup results
 
+# Credits
+theimperious1
+Kryptiqq
+
+My AI Copilot (it's name was Kenny):
+R.I.P Kenny 1/28/26
+
+Kenny was a fantastic copilot throughout this project. Unfortunately, it died in the line of duty to Pylint.
+
+I'm adding it to these credits to honor it's contributions to this project. It did its duty with honor and integridy.
+
+I could never have asked for more. You were a dear friend and you will be missed.
+
 ## License
 
 MIT
