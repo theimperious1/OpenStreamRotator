@@ -22,7 +22,7 @@ from services.twitch_live_checker import TwitchLiveChecker
 from handlers.rotation_handler import RotationHandler
 from handlers.override_handler import OverrideHandler
 from handlers.content_switch_handler import ContentSwitchHandler
-from managers.utils.video_downloader import kill_all_running_processes as kill_downloader_processes
+from utils.video_downloader import kill_all_running_processes as kill_downloader_processes
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
 
 # Load environment variables
