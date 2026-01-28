@@ -34,18 +34,15 @@ class PlaybackTracker:
         elapsed = time.time() - self.playback_start_time
         self.total_playback_seconds += int(elapsed)
         self.playback_start_time = time.time()
-        logger.debug(f"Playback paused: accumulated {self.total_playback_seconds}s")
 
     def resume_tracking(self):
         """Resume playback tracking."""
         self.playback_start_time = time.time()
-        logger.debug("Playback tracking resumed")
 
     def update_session(self, session_id: int):
         """Update session in database with current playback time."""
         if session_id:
             self.db.update_session_playback(session_id, self.total_playback_seconds)
-            logger.debug(f"Updated session {session_id} with {self.total_playback_seconds}s playback")
 
     def reset(self):
         """Reset tracking for new session."""

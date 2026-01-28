@@ -84,7 +84,8 @@ class DatabaseManager:
                 estimated_finish_time TIMESTAMP,
                 download_trigger_time TIMESTAMP,
                 stream_title TEXT,
-                playback_seconds INTEGER DEFAULT 0
+                playback_seconds INTEGER DEFAULT 0,
+                is_current BOOLEAN DEFAULT 0
             )
         """)
 
@@ -218,10 +219,13 @@ class DatabaseManager:
         conn = self.connect()
         cursor = conn.cursor()
 
+        # Clear any previous current session
+        cursor.execute("UPDATE rotation_sessions SET is_current = 0")
+
         cursor.execute("""
             INSERT INTO rotation_sessions (playlists_selected, stream_title, total_duration_seconds, 
-                                          estimated_finish_time, download_trigger_time)
-            VALUES (?, ?, ?, ?, ?)
+                                          estimated_finish_time, download_trigger_time, is_current)
+            VALUES (?, ?, ?, ?, ?, 1)
         """, (json.dumps(playlists_selected), stream_title, total_duration_seconds,
               estimated_finish_time, download_trigger_time))
 
@@ -254,8 +258,7 @@ class DatabaseManager:
 
         cursor.execute("""
             SELECT * FROM rotation_sessions 
-            WHERE ended_at IS NULL 
-            ORDER BY started_at DESC 
+            WHERE is_current = 1 
             LIMIT 1
         """)
 
@@ -301,7 +304,7 @@ class DatabaseManager:
 
         cursor.execute("""
             UPDATE rotation_sessions 
-            SET ended_at = ?
+            SET ended_at = ?, is_current = 0
             WHERE id = ?
         """, (datetime.now(), session_id))
 
@@ -335,9 +338,11 @@ class DatabaseManager:
         cursor = conn.cursor()
 
         try:
+            # Clear any other current session and set this one as current
+            cursor.execute("UPDATE rotation_sessions SET is_current = 0")
             cursor.execute("""
                 UPDATE rotation_sessions 
-                SET suspended_at = NULL, suspension_data = NULL
+                SET suspended_at = NULL, suspension_data = NULL, is_current = 1
                 WHERE id = ?
             """, (session_id,))
 
