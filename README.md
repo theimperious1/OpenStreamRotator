@@ -130,7 +130,7 @@ Edit `config/playlists.json`:
 **Important:**
 - Change `video_folder` and `next_rotation_folder` to your actual paths
 - The playlist **name** is used to search for Kick categories (e.g., "Hytale" → searches Hytale category)
-- Script automatically creates these folders if they don't exist
+- Script automatically creates these folders if they don't exist, but you may want to change where they are made.
 
 ### 5. Kick OAuth Setup
 
@@ -139,12 +139,12 @@ Edit `config/playlists.json`:
 2. Copy both the URL and `code_verifier` from the logs
 3. Visit the authorization URL in your browser and approve
 4. Copy the `code` from the redirect URL
-5. Edit `authorize_kick.py`:
+5. Edit `integrations/platforms/auth/authorize_kick.py`:
    ```python
    code = "your_code_here"
    code_verifier = "your_code_verifier_here"
    ```
-6. Run: `python authorize_kick.py`
+6. Run: `python integrations/platforms/auth/authorize_kick.py`
 7. Run: `python main.py` again - it's ready to go!
 
 ## Run
@@ -189,14 +189,14 @@ Take manual control when needed (e.g., raid scenario, special events). **Plan ah
 2. The script will:
    - Download selected playlists while current content continues playing (this is why planning ahead matters)
    - Once download completes, pause stream and switch to "content-switch" scene
-   - Wipe current content folder and load ONLY the manual override playlists
+   - Backup current content folder and load ONLY the manual override playlists
    - Restart stream with new content
    - Update stream title and category
    - Resume streaming
 
-3. After completion, it automatically resets to automatic mode and resumes normal rotation
+3. After completion, it automatically resets to automatic mode and resumes normal rotations. The next rotation that was planned will continue as planned.
 
-**Note:** Manual override replaces everything currently playing with **only** the playlists you specify. Nothing else will play.
+**Note:** Manual override replaces everything currently playing with **only** the playlists you specify. Nothing else will play until it's over.
 
 ### Temporarily Disabling Playlists
 
@@ -233,17 +233,23 @@ Higher priority = more likely to be selected:
 }
 ```
 
+# More on the inner workings of OSR
+
 ### Rotation Timing
 
-Change rotation interval:
+OpenStreamRotator automatically handles rotation timing. The next rotation begins when the current rotation ends.
 
-```json
-{
-  "rotation_hours": 12
-}
-```
+You can even skip through videos both forwards and backwards. It's advised you wait 1 second between skips though, as it only checks for them every second. 
 
-## Troubleshooting
+### Skipping through videos
+You can skip through videos in VLC like you would a YouTube video. Provided you wait 1 second between skips, no issues should occur.
+
+### Stopping OSR and restarting it
+When you're ready to stop the stream, ALWAYS exit by pressing CTRL + C in the terminal window. This is very important, however things should continue to work as intended if it was abruptly shutdown, e.g via power outage. OSR saves your state every second. A graceful shutdown is highly recommended though, where possible.
+
+When you start the program up again, OSR will automatically start the Stream back up at the same video you left off on, within 1 second of the exact timestamp it ended on.
+
+# Troubleshooting
 
 **Videos not downloading?**
 - Check yt-dlp is installed: `yt-dlp --version`
