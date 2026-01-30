@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import sqlite3
+import webbrowser
 from typing import Optional
 import aiohttp
 from integrations.platforms.base.stream_platform import StreamPlatform
@@ -89,19 +90,34 @@ class KickUpdater(StreamPlatform):
             if not tokens_exist:
                 logger.info(
                     f"[{self.platform_name}] No valid tokens found. "
-                    "You need to complete the OAuth flow once."
+                    "Starting automated OAuth authorization flow..."
                 )
                 auth_data = self.api.get_auth_url(self.scopes)
                 auth_url = auth_data["auth_url"]
                 code_verifier = auth_data["code_verifier"]
 
-                logger.info(f"[{self.platform_name}] Please visit:\n{auth_url}")
-                logger.info(f"[{self.platform_name}] After authorizing → copy 'code' from redirect URL.")
-                logger.info(f"[{self.platform_name}] Edit authorize_kick.py and set \'code\' to the code you copied.")
-                logger.info(f"[{self.platform_name}] Then set code_verifier to ${code_verifier}")
-                logger.info(f"[{self.platform_name}] Finally: Run \'python authorize_kick.py\'. Once done, restart main.py.")
-
-                raise RuntimeError("OAuth authorization required.")
+                logger.info(f"[{self.platform_name}] Opening authorization URL in browser...")
+                # Open browser automatically
+                webbrowser.open(auth_url)
+                
+                logger.info(f"[{self.platform_name}] Authorization URL: {auth_url}")
+                logger.info(f"[{self.platform_name}] Waiting for you to authorize and copy the code...")
+                
+                # Prompt user to paste code
+                code = input(f"[{self.platform_name}] Paste the authorization code from the redirect URL: ").strip()
+                
+                if not code:
+                    raise RuntimeError("OAuth authorization code is required.")
+                
+                logger.info(f"[{self.platform_name}] Exchanging authorization code for tokens...")
+                try:
+                    token_data = await self.api.exchange_code(code, code_verifier)
+                    logger.info(f"[{self.platform_name}] SUCCESS! Tokens exchanged and saved.")
+                    await self.api.start_token_refresh()
+                    logger.info(f"[{self.platform_name}] Token refresh started. Authorization complete!")
+                except Exception as e:
+                    logger.error(f"[{self.platform_name}] Failed to exchange code: {e}")
+                    raise RuntimeError(f"OAuth token exchange failed: {e}")
             else:
                 logger.info(f"[{self.platform_name}] Found cached tokens, using stored credentials")
 
