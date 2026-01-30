@@ -179,7 +179,8 @@ class VideoDownloader:
                         filename,
                         title=title,
                         duration_seconds=duration,
-                        file_size_mb=int(file_size_mb)
+                        file_size_mb=int(file_size_mb),
+                        playlist_name=playlist_name
                     )
                     total_duration += duration
                     registered_count += 1
@@ -194,7 +195,8 @@ class VideoDownloader:
                         filename,
                         title=title,
                         duration_seconds=duration,
-                        file_size_mb=int(file_size_mb)
+                        file_size_mb=int(file_size_mb),
+                        playlist_name=playlist_name
                     )
                     total_duration += duration
                     registered_count += 1

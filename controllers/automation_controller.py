@@ -484,7 +484,8 @@ class AutomationController:
                     video_data['filename'],
                     title=video_data['title'],
                     duration_seconds=video_data['duration_seconds'],
-                    file_size_mb=video_data['file_size_mb']
+                    file_size_mb=video_data['file_size_mb'],
+                    playlist_name=video_data.get('playlist_name')
                 )
                 registered_count += 1
                 total_duration += video_data['duration_seconds']
@@ -519,6 +520,14 @@ class AutomationController:
                 skip_info["time_skipped_seconds"],
                 skip_info["new_finish_time_str"]
             )
+            
+            # Update stream category based on current video
+            current_video = skip_info.get("current_video_filename")
+            if current_video and self.content_switch_handler and self.stream_manager:
+                try:
+                    self.content_switch_handler.update_category_by_video(current_video, self.stream_manager)
+                except Exception as e:
+                    logger.warning(f"Failed to update category on video transition: {e}")
 
         # Trigger background download
         playlists = self.rotation_handler.trigger_background_download(

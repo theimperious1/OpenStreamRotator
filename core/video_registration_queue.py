@@ -15,7 +15,7 @@ class VideoRegistrationQueue:
         self._queue: queue.Queue = queue.Queue()
     
     def enqueue_video(self, playlist_id: int, filename: str, title: str, 
-                      duration_seconds: int, file_size_mb: int):
+                      duration_seconds: int, file_size_mb: int, playlist_name: Optional[str] = None):
         """
         Add a video to the registration queue.
         
@@ -27,13 +27,15 @@ class VideoRegistrationQueue:
             title: Video title
             duration_seconds: Duration in seconds
             file_size_mb: File size in MB
+            playlist_name: Name of the playlist from config (for category lookups)
         """
         video_data = {
             'playlist_id': playlist_id,
             'filename': filename,
             'title': title,
             'duration_seconds': duration_seconds,
-            'file_size_mb': file_size_mb
+            'file_size_mb': file_size_mb,
+            'playlist_name': playlist_name
         }
         self._queue.put(video_data)
         logger.debug(f"Queued video for registration: {filename}")
