@@ -67,7 +67,7 @@ class StreamManager:
 
     async def update_both(self, title: str, category: Optional[str] = None) -> bool:
         """
-        Update both title and category on all platforms.
+        Update both title and category on all platforms (legacy method).
         
         Args:
             title: New stream title
@@ -86,7 +86,8 @@ class StreamManager:
 
     async def update_stream_info(self, title: str, category: Optional[str] = None) -> bool:
         """
-        Update stream information (alias for update_both).
+        Update stream information (title and category together).
+        Uses platform's update_stream_info method for optimal compatibility.
         
         Args:
             title: New stream title
@@ -95,4 +96,16 @@ class StreamManager:
         Returns:
             True if successful
         """
-        return await self.update_both(title, category)
+        if not title:
+            logger.warning("Empty title provided for update")
+            return False
+        
+        results = await self.platform_manager.update_stream_info_all(title, category)
+        if not results:
+            logger.debug("No platforms configured for stream info update")
+            return True
+        
+        success_count = sum(1 for success in results.values() if success)
+        if success_count > 0:
+            logger.info(f"Updated stream info on {success_count}/{len(results)} platforms: title='{title}', category='{category}'")
+        return success_count > 0

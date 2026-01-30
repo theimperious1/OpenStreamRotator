@@ -162,7 +162,7 @@ class ContentSwitchHandler:
                 playlist_ids = json.loads(playlists_selected)
                 playlists = self.playlist_manager.get_playlists_by_ids(playlist_ids)
                 if playlists and len(playlists) > 0:
-                    category = playlists[0].get('name')
+                    category = playlists[0].get('category') or playlists[0].get('name')
             except (json.JSONDecodeError, ValueError) as e:
                 logger.warning(f"Could not parse playlists_selected: {e}")
         
