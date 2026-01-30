@@ -1,9 +1,51 @@
 {
   "playlists": [
     {
-      "name": "Small test 1",
+      "name": "MUSIC",
       "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyF6XOwb53qTmbyLa2xsSHR-",
-      "category": "Hytale",
+      "category": "Just Chatting",
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "name": "NARWHALS",
+      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyFkfqt3Oga1pab8ePbKFscB",
+      "enabled": true,
+      "category": "Just Chatting",
+      "priority": 1
+    },
+    {
+      "name": "CATS",
+      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyEKFKMuMWtiCWJGjwYsblck",
+      "category": "Just Chatting",
+      "enabled": true,
+      "priority": 2
+    },
+    {
+      "name": "MW2",
+      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjkZRMdYQ5cn5hUmaqyUVqYO",
+      "category": "Call of Duty: Modern Warfare 2",
+      "enabled": true,
+      "priority": 3
+    },
+    {
+      "name": "ASMONGOLD SHORTS",
+      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjnr40tReiGs84uifUAJtlRu",
+      "category": "Just Chatting",
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "name": "CAT MEMES",
+      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjlbzhcE-hePMPqPQ_B7YXNC",
+      "category": "Just Chatting",
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "name": "FF14",
+      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjkhpjL87dSagEcu1L1c2C3G",
+      "category": "Final Fantasy XIV",
       "enabled": true,
       "priority": 3
     }
@@ -14,9 +56,9 @@
     "video_folder": "C:/Projects/OpenStreamRotator/videos/live",
     "next_rotation_folder": "C:/Projects/OpenStreamRotator/videos/pending",
     "check_config_interval": 60,
-    "min_playlists_per_rotation": 1,
-    "max_playlists_per_rotation": 1,
-    "download_retry_attempts": 3,
-    "stream_title_template": "24/7 @test / @test | {GAMES} | !playlist !streamtime !new"
+    "min_playlists_per_rotation": 2,
+    "max_playlists_per_rotation": 4,
+    "download_retry_attempts": 5,
+    "stream_title_template": "24/7 TEST FOR @Asmongold247 | {GAMES} | "
   }
 }

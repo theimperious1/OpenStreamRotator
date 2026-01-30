@@ -1,0 +1,22 @@
+{
+  "playlists": [
+    {
+      "name": "Small test 1",
+      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyF6XOwb53qTmbyLa2xsSHR-",
+      "category": "Hytale",
+      "enabled": true,
+      "priority": 3
+    }
+  ],
+  "settings": {
+    "rotation_hours": 12,
+    "download_buffer_minutes": 30,
+    "video_folder": "C:/Projects/OpenStreamRotator/videos/live",
+    "next_rotation_folder": "C:/Projects/OpenStreamRotator/videos/pending",
+    "check_config_interval": 60,
+    "min_playlists_per_rotation": 1,
+    "max_playlists_per_rotation": 1,
+    "download_retry_attempts": 3,
+    "stream_title_template": "24/7 @test / @test | {GAMES} | !playlist !streamtime !new"
+  }
+}
