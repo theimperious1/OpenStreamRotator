@@ -3,27 +3,16 @@
     {
       "name": "Small test 1",
       "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyF6XOwb53qTmbyLa2xsSHR-",
+      "category": "Hytale",
       "enabled": true,
       "priority": 3
-    },
-    {
-      "name": "Small test 2",
-      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyFkfqt3Oga1pab8ePbKFscB",
-      "enabled": true,
-      "priority": 2
-    },
-    {
-      "name": "Cat videos",
-      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyEKFKMuMWtiCWJGjwYsblck",
-      "enabled": true,
-      "priority": 1
     }
   ],
   "settings": {
     "rotation_hours": 12,
     "download_buffer_minutes": 30,
-    "video_folder": "C:/Projects/Asmon247Reborn/videos/live",
-    "next_rotation_folder": "C:/Projects/Asmon247Reborn/videos/pending",
+    "video_folder": "C:/Projects/OpenStreamRotator/videos/live",
+    "next_rotation_folder": "C:/Projects/OpenStreamRotator/videos/pending",
     "check_config_interval": 60,
     "min_playlists_per_rotation": 1,
     "max_playlists_per_rotation": 1,

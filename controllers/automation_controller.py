@@ -377,7 +377,7 @@ class AutomationController:
                         playlist_ids = json.loads(playlists_selected)
                         playlists = self.playlist_manager.get_playlists_by_ids(playlist_ids)
                         if playlists:
-                            category = playlists[0].get('name')
+                            category = playlists[0].get('category') or playlists[0].get('name')
                     
                     await self.stream_manager.update_stream_info(stream_title, category)
                     logger.info(f"Updated stream: title='{stream_title}', category='{category}'")
