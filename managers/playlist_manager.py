@@ -55,12 +55,20 @@ class PlaylistManager:
         """
         return self.selector.select_for_rotation(manual_selection)
 
-    def download_playlists(self, playlists: List[Dict], output_folder: str) -> Dict:
+    def download_playlists(self, playlists: List[Dict], output_folder: str, verbose: bool = False) -> Dict:
         """
         Download selected playlists using yt-dlp.
         Returns dict with 'success' bool and 'total_duration_seconds' from all videos.
+        
+        Args:
+            playlists: List of playlist dictionaries to download
+            output_folder: Output folder for videos
+            verbose: If True, enable verbose yt-dlp logging for debugging
+        
+        Returns:
+            Dict with 'success' and 'total_duration_seconds' keys
         """
-        return self.downloader.download_playlists(playlists, output_folder)
+        return self.downloader.download_playlists(playlists, output_folder, verbose=verbose)
 
     def extract_playlists_from_folder(self, folder: str) -> List[str]:
         """Extract unique playlist names from files in folder."""

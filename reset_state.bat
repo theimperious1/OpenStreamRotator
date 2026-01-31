@@ -7,21 +7,6 @@ setlocal enabledelayedexpansion
 echo Resetting OpenStreamRotator state...
 echo.
 
-REM Delete database
-if exist "core\stream_data.db" (
-    echo Deleting stream_data.db...
-    del /f /q "core\stream_data.db"
-    if exist "core\stream_data.db" (
-        echo WARNING: Failed to delete stream_data.db (may be in use)
-    ) else (
-        echo Successfully deleted stream_data.db
-    )
-) else (
-    echo stream_data.db not found (already deleted)
-)
-
-echo.
-
 REM Read video folders from playlists.json using PowerShell
 echo Reading configuration from playlists.json...
 for /f "tokens=*" %%A in ('powershell -NoProfile -Command "try { $config = Get-Content 'config/playlists.json' | ConvertFrom-Json; Write-Output $config.settings.video_folder } catch { Write-Output 'videos/live' }"') do set "VIDEO_FOLDER=%%A"
@@ -33,18 +18,35 @@ if "!VIDEO_FOLDER:~-1!"=="/" set "VIDEO_FOLDER=!VIDEO_FOLDER:~0,-1!"
 if "!NEXT_FOLDER:~-1!"=="\" set "NEXT_FOLDER=!NEXT_FOLDER:~0,-1!"
 if "!NEXT_FOLDER:~-1!"=="/" set "NEXT_FOLDER=!NEXT_FOLDER:~0,-1!"
 
+echo.
 echo Configured video folder: !VIDEO_FOLDER!
 echo Configured next rotation folder: !NEXT_FOLDER!
 echo.
-
-REM Final confirmation before deletion
-echo WARNING: This will delete all files in the above folders and the database!
+echo WARNING: This will delete:
+echo   - core\stream_data.db
+echo   - All files in !VIDEO_FOLDER!
+echo   - All files in !NEXT_FOLDER!
 echo.
-set /p CONFIRM="Type 'YES' to confirm and continue: "
-if /i not "!CONFIRM!"=="YES" (
+set /p CONFIRM="Type 'y' to confirm and continue: "
+if /i not "!CONFIRM!"=="y" (
     echo Reset cancelled.
     pause
     exit /b 0
+)
+
+echo.
+
+REM Delete database
+if exist "core\stream_data.db" (
+    echo Deleting stream_data.db...
+    del /f /q "core\stream_data.db"
+    if exist "core\stream_data.db" (
+        echo WARNING: Failed to delete stream_data.db (may be in use)
+    ) else (
+        echo Successfully deleted stream_data.db
+    )
+) else (
+    echo stream_data.db not found (already deleted)
 )
 
 echo.

@@ -5,6 +5,32 @@
 echo "Resetting OpenStreamRotator state..."
 echo ""
 
+# Read video folders from playlists.json using Python
+echo "Reading configuration from playlists.json..."
+VIDEO_FOLDER=$(python3 -c "import json; config = json.load(open('config/playlists.json')); print(config['settings'].get('video_folder', 'videos/live'))" 2>/dev/null || echo "videos/live")
+NEXT_FOLDER=$(python3 -c "import json; config = json.load(open('config/playlists.json')); print(config['settings'].get('next_rotation_folder', 'videos/pending'))" 2>/dev/null || echo "videos/pending")
+
+# Cleanup path formatting (remove trailing slashes)
+VIDEO_FOLDER="${VIDEO_FOLDER%/}"
+NEXT_FOLDER="${NEXT_FOLDER%/}"
+
+echo ""
+echo "Configured video folder: $VIDEO_FOLDER"
+echo "Configured next rotation folder: $NEXT_FOLDER"
+echo ""
+echo "WARNING: This will delete:"
+echo "   - core/stream_data.db"
+echo "   - All files in $VIDEO_FOLDER"
+echo "   - All files in $NEXT_FOLDER"
+echo ""
+read -p "Type 'y' to confirm and continue: " CONFIRM
+if [ "$CONFIRM" != "y" ]; then
+    echo "Reset cancelled."
+    exit 0
+fi
+
+echo ""
+
 # Delete database
 if [ -f "core/stream_data.db" ]; then
     echo "Deleting stream_data.db..."
@@ -16,30 +42,6 @@ if [ -f "core/stream_data.db" ]; then
     fi
 else
     echo "stream_data.db not found (already deleted)"
-fi
-
-echo ""
-
-# Read video folders from playlists.json using Python
-echo "Reading configuration from playlists.json..."
-VIDEO_FOLDER=$(python3 -c "import json; config = json.load(open('config/playlists.json')); print(config['settings'].get('video_folder', 'videos/live'))" 2>/dev/null || echo "videos/live")
-NEXT_FOLDER=$(python3 -c "import json; config = json.load(open('config/playlists.json')); print(config['settings'].get('next_rotation_folder', 'videos/pending'))" 2>/dev/null || echo "videos/pending")
-
-# Cleanup path formatting (remove trailing slashes)
-VIDEO_FOLDER="${VIDEO_FOLDER%/}"
-NEXT_FOLDER="${NEXT_FOLDER%/}"
-
-echo "Configured video folder: $VIDEO_FOLDER"
-echo "Configured next rotation folder: $NEXT_FOLDER"
-echo ""
-
-# Final confirmation before deletion
-echo "WARNING: This will delete all files in the above folders and the database!"
-echo ""
-read -p "Type 'YES' to confirm and continue: " CONFIRM
-if [ "$CONFIRM" != "YES" ]; then
-    echo "Reset cancelled."
-    exit 0
 fi
 
 echo ""
