@@ -60,6 +60,6 @@
     "max_playlists_per_rotation": 4,
     "download_retry_attempts": 5,
     "stream_title_template": "24/7 TEST FOR @Asmongold247 | {GAMES} | ",
-    "yt_dlp_verbose": true
+    "yt_dlp_verbose": false
   }
 }
