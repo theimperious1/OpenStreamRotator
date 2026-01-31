@@ -22,7 +22,6 @@ from services.twitch_live_checker import TwitchLiveChecker
 from handlers.rotation_handler import RotationHandler
 from handlers.override_handler import OverrideHandler
 from handlers.content_switch_handler import ContentSwitchHandler
-from utils.video_downloader import kill_all_running_processes as kill_downloader_processes
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
 
 # Load environment variables
@@ -117,10 +116,9 @@ class AutomationController:
 
     def signal_handler(self, sig, frame):
         """Handle shutdown signals gracefully."""
-        logger.info("Shutdown signal received. Killing any running subprocesses...")
-        kill_downloader_processes()
+        logger.info("Shutdown signal received...")
         kill_processor_processes()
-        logger.info("Subprocesses killed. Setting shutdown flag...")
+        logger.info("Cleanup complete. Setting shutdown flag...")
         self.shutdown_event = True
 
     def _initialize_handlers(self):
@@ -261,7 +259,12 @@ class AutomationController:
         if not using_prepared:
             logger.info(f"Downloading {len(playlists)} playlists...")
             self.notification_service.notify_rotation_started([p['name'] for p in playlists])
-            download_result = self.playlist_manager.download_playlists(playlists, next_folder)
+            
+            # Check for verbose yt-dlp logging
+            settings = self.config_manager.get_settings()
+            verbose_download = settings.get('yt_dlp_verbose', False)
+            
+            download_result = self.playlist_manager.download_playlists(playlists, next_folder, verbose=verbose_download)
             total_duration_seconds = download_result.get('total_duration_seconds', 0)
 
             if not download_result.get('success'):
@@ -446,7 +449,10 @@ class AutomationController:
             settings = self.config_manager.get_settings()
             next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
             
-            download_result = self.playlist_manager.download_playlists(playlists, next_folder)
+            # Check for verbose yt-dlp logging
+            verbose_download = settings.get('yt_dlp_verbose', False)
+            
+            download_result = self.playlist_manager.download_playlists(playlists, next_folder, verbose=verbose_download)
             
             if download_result.get('success'):
                 self.next_prepared_playlists = playlists
@@ -484,7 +490,8 @@ class AutomationController:
                     video_data['filename'],
                     title=video_data['title'],
                     duration_seconds=video_data['duration_seconds'],
-                    file_size_mb=video_data['file_size_mb']
+                    file_size_mb=video_data['file_size_mb'],
+                    playlist_name=video_data.get('playlist_name')
                 )
                 registered_count += 1
                 total_duration += video_data['duration_seconds']
@@ -519,6 +526,14 @@ class AutomationController:
                 skip_info["time_skipped_seconds"],
                 skip_info["new_finish_time_str"]
             )
+            
+            # Update stream category based on current video
+            current_video = skip_info.get("current_video_filename")
+            if current_video and self.content_switch_handler and self.stream_manager:
+                try:
+                    self.content_switch_handler.update_category_by_video(current_video, self.stream_manager)
+                except Exception as e:
+                    logger.warning(f"Failed to update category on video transition: {e}")
 
         # Trigger background download
         playlists = self.rotation_handler.trigger_background_download(

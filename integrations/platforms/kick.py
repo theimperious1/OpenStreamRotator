@@ -178,7 +178,9 @@ class KickUpdater(StreamPlatform):
             logger.info(f"[{self.platform_name}] Searching for subcategory: {category_name}")
             
             # Use Kick private API endpoint to search for subcategory
-            url = f"https://api.kick.com/private/v1/categories/{category_name.lower()}"
+            # Convert to slug format: lowercase and replace spaces with hyphens, but keep colons
+            category_slug = category_name.lower().replace(" ", "-")
+            url = f"https://api.kick.com/private/v1/categories/{category_slug}"
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:

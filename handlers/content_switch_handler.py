@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 class ContentSwitchHandler:
     """Handles content switching operations (normal rotations and overrides)."""
 
+    MAX_TITLE_LENGTH = 140  # Kick's title character limit
+
     def __init__(self, db: DatabaseManager, config: ConfigManager,
                  playlist_manager: PlaylistManager, obs_controller: OBSController,
                  notification_service: NotificationService):
@@ -33,6 +35,54 @@ class ContentSwitchHandler:
         self.obs_controller = obs_controller
         self.notification_service = notification_service
 
+    def truncate_stream_title(self, title: str) -> str:
+        """
+        Truncate stream title to fit character limit while preserving template.
+        
+        If the full title exceeds MAX_TITLE_LENGTH, removes playlists from the end
+        until it fits. Always keeps the template portion (before first playlist name).
+        
+        Args:
+            title: Full stream title with template and playlist names
+        
+        Returns:
+            Truncated title that fits within MAX_TITLE_LENGTH
+        """
+        if len(title) <= self.MAX_TITLE_LENGTH:
+            return title
+        
+        # Title is too long, need to truncate by removing playlists from the end
+        # Format is typically: "TEMPLATE | PLAYLIST1 | PLAYLIST2 | ..."
+        
+        # Split on " | " to separate template and playlists
+        parts = title.split(' | ')
+        if len(parts) < 2:
+            # Can't parse, just truncate to limit
+            logger.warning(f"Could not parse title for truncation: {title[:50]}...")
+            return title[:self.MAX_TITLE_LENGTH]
+        
+        template = parts[0]  # Keep the template part
+        playlists = parts[1:]  # These are the playlist names
+        
+        # Start with just the template
+        result = template
+        
+        # Add playlists back one by one until it exceeds the limit
+        for playlist in playlists:
+            candidate = f"{result} | {playlist}"
+            if len(candidate) <= self.MAX_TITLE_LENGTH:
+                result = candidate
+            else:
+                # This playlist would make it too long, stop
+                break
+        
+        # Ensure we always end with the separator for consistency
+        if not result.endswith(' | ') and len(result) + 3 <= self.MAX_TITLE_LENGTH:
+            result += ' | '
+        
+        logger.info(f"Truncated title from {len(title)} to {len(result)} chars: {result}")
+        return result
+    
     def prepare_for_switch(self, scene_content_switch: str, vlc_source_name: str) -> bool:
         """
         Prepare for content switch (switch scene, stop VLC).
@@ -154,6 +204,9 @@ class ContentSwitchHandler:
         
         stream_title = session.get('stream_title', 'Unknown')
         
+        # Truncate title to fit platform limits (140 chars for Kick, probably same for Twitch)
+        stream_title = self.truncate_stream_title(stream_title)
+        
         # Get category from selected playlists
         category = None
         playlists_selected = session.get('playlists_selected', '')
@@ -204,4 +257,60 @@ class ContentSwitchHandler:
             return True
         except Exception as e:
             logger.error(f"Failed to mark playlists as played: {e}")
+            return False
+
+    def update_category_by_video(self, video_filename: str, stream_manager) -> bool:
+        """
+        Update stream category based on the currently playing video's source playlist.
+        
+        This is called when a video transition is detected to update the stream category
+        to match the currently playing video's source playlist.
+        
+        Args:
+            video_filename: Filename of the currently playing video
+            stream_manager: StreamManager instance for updates
+            
+        Returns:
+            True if successful or no update needed, False if error
+        """
+        if not video_filename:
+            return True
+        
+        try:
+            # Look up the video in database to find its source playlist
+            video = self.db.get_video_by_filename(video_filename)
+            if not video:
+                logger.debug(f"Video not found in database: {video_filename} (may be already deleted)")
+                return True
+            
+            playlist_name = video.get('playlist_name')
+            if not playlist_name:
+                logger.debug(f"No playlist_name for video: {video_filename}")
+                return True
+            
+            # Get the category for this playlist from playlists config
+            playlists_config = self.config.get_playlists()
+            target_playlist = None
+            for p in playlists_config:
+                if p.get('name') == playlist_name:
+                    target_playlist = p
+                    break
+            
+            if not target_playlist:
+                logger.warning(f"Playlist '{playlist_name}' not found in config for video: {video_filename}")
+                return True
+            
+            category = target_playlist.get('category') or target_playlist.get('name')
+            
+            # Update via stream manager
+            try:
+                stream_manager.update_stream_info(None, category)  # Only update category, not title
+                logger.info(f"Updated category to '{category}' (from video: {video_filename})")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to update category: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error updating category by video: {e}")
             return False

@@ -55,6 +55,7 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS videos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 playlist_id INTEGER NOT NULL,
+                playlist_name TEXT,
                 filename TEXT NOT NULL,
                 youtube_id TEXT,
                 title TEXT,
@@ -68,6 +69,20 @@ class DatabaseManager:
                 UNIQUE(playlist_id, filename)
             )
         """)
+        
+        # Add playlist_name column to existing videos table if it doesn't exist
+        cursor.execute("""
+            PRAGMA table_info(videos)
+        """)
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'playlist_name' not in columns:
+            try:
+                cursor.execute("""
+                    ALTER TABLE videos ADD COLUMN playlist_name TEXT
+                """)
+                logger.info("Added playlist_name column to videos table")
+            except sqlite3.OperationalError:
+                logger.debug("playlist_name column already exists")
 
         # Rotation sessions table
         cursor.execute("""
@@ -171,16 +186,29 @@ class DatabaseManager:
         self.close()
 
     def add_video(self, playlist_id: int, filename: str, title: Optional[str] = None,
-                  file_size_mb: Optional[int] = None, duration_seconds: Optional[int] = None) -> Optional[int]:
-        """Add a video to the database."""
+                  file_size_mb: Optional[int] = None, duration_seconds: Optional[int] = None,
+                  playlist_name: Optional[str] = None) -> Optional[int]:
+        """Add a video to the database.
+        
+        Args:
+            playlist_id: Database ID of the playlist
+            filename: Video filename
+            title: Video title
+            file_size_mb: File size in MB
+            duration_seconds: Video duration in seconds
+            playlist_name: Name of the playlist from config (for category lookups)
+        
+        Returns:
+            Video ID
+        """
         conn = self.connect()
         cursor = conn.cursor()
 
         try:
             cursor.execute("""
-                INSERT INTO videos (playlist_id, filename, title, file_size_mb, duration_seconds)
-                VALUES (?, ?, ?, ?, ?)
-            """, (playlist_id, filename, title, file_size_mb, duration_seconds))
+                INSERT INTO videos (playlist_id, playlist_name, filename, title, file_size_mb, duration_seconds)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (playlist_id, playlist_name, filename, title, file_size_mb, duration_seconds))
             conn.commit()
             video_id = cursor.lastrowid
             return video_id
@@ -209,6 +237,31 @@ class DatabaseManager:
         videos = [dict(row) for row in cursor.fetchall()]
         self.close()
         return videos
+
+    def get_video_by_filename(self, filename: str) -> Optional[Dict]:
+        """Get a video by its filename (searches across all playlists).
+        
+        Args:
+            filename: Video filename
+        
+        Returns:
+            Video dict with playlist_name, or None if not found
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM videos 
+            WHERE filename = ?
+            LIMIT 1
+        """, (filename,))
+
+        row = cursor.fetchone()
+        self.close()
+
+        if row:
+            return dict(row)
+        return None
 
     def create_rotation_session(self, playlists_selected: List[int],
                                 stream_title: str,

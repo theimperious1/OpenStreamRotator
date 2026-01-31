@@ -1,17 +1,14 @@
 import os
-import subprocess
-import sys
 import logging
+import time
 from typing import List, Dict, Optional
+from yt_dlp import YoutubeDL
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 from utils.video_processor import VideoProcessor
 from core.video_registration_queue import VideoRegistrationQueue
 
 logger = logging.getLogger(__name__)
-
-# Global list to track running subprocesses for cleanup on exit
-_running_processes: List[subprocess.Popen] = []
 
 
 class VideoDownloader:
@@ -30,8 +27,17 @@ class VideoDownloader:
         self.db = db
         self.config = config
         self.registration_queue = registration_queue
+        
+        # Force yt-dlp to use Deno instead of Node.js by removing Node.js from PATH
+        # This prevents conflicts between Node.js and Deno JavaScript runtimes
+        if 'PATH' in os.environ:
+            path_parts = os.environ['PATH'].split(';')
+            # Filter out Node.js installation directory
+            path_parts = [p for p in path_parts if 'nodejs' not in p.lower()]
+            os.environ['PATH'] = ';'.join(path_parts)
+            logger.debug("Removed Node.js from PATH to force yt-dlp to use Deno")
 
-    def download_playlists(self, playlists: List[Dict], output_folder: str) -> Dict:
+    def download_playlists(self, playlists: List[Dict], output_folder: str, verbose: bool = False) -> Dict:
         """
         Download selected playlists using yt-dlp.
         
@@ -40,6 +46,7 @@ class VideoDownloader:
         Args:
             playlists: List of playlist dictionaries with 'youtube_url' key
             output_folder: Folder to download videos to
+            verbose: If True, enable verbose yt-dlp logging for debugging
         
         Returns:
             Dict with keys: success (bool), total_duration_seconds (int)
@@ -54,7 +61,7 @@ class VideoDownloader:
         total_duration = 0
 
         for playlist in playlists:
-            result = self._download_single_playlist(playlist['youtube_url'], output_folder, max_retries)
+            result = self._download_single_playlist(playlist['youtube_url'], output_folder, max_retries, verbose=verbose)
             
             if result.get('success'):
                 # Register downloaded videos in database
@@ -73,62 +80,68 @@ class VideoDownloader:
             'total_duration_seconds': total_duration
         }
 
-    def _download_single_playlist(self, playlist_url: str, output_folder: str, max_retries: int = 3) -> Dict:
+    def _download_single_playlist(self, playlist_url: str, output_folder: str, max_retries: int = 3, verbose: bool = False) -> Dict:
         """
-        Download a single YouTube playlist using yt-dlp.
+        Download a single YouTube playlist using yt-dlp library.
         
         Args:
             playlist_url: YouTube playlist URL
             output_folder: Folder to download to
             max_retries: Maximum retry attempts
+            verbose: If True, log full yt-dlp output for debugging
         
         Returns:
             Dict with 'success' key (bool)
         """
         for attempt in range(max_retries):
             try:
-                # yt-dlp download command - run as Python module
-                cmd = [
-                    sys.executable,
-                    "-m", "yt_dlp",
-                    "--no-warnings",
-                    "-q",
-                    "-o", os.path.join(output_folder, '%(title)s.%(ext)s'),
-                    playlist_url
-                ]
-
                 logger.info(f"Downloading playlist (attempt {attempt + 1}/{max_retries}): {playlist_url}")
                 
-                # Use Popen to track the process for cleanup
-                proc = None
-                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                _running_processes.append(proc)
+                # Configure yt-dlp options
+                ydl_opts = {
+                    'quiet': not verbose,
+                    'no_warnings': not verbose,
+                    'extract_flat': False,  # Extract video URLs
+                    'fragment_retries': 3,
+                    'http_chunk_size': 10485760,  # 10MB chunks
+                    'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
+                    # Request throttling to avoid YouTube IP-based blocking
+                    'socket_timeout': 30,
+                    'sleep_interval': 2,  # Sleep 2 seconds between requests
+                    'max_sleep_interval': 5,  # Randomize sleep up to 5 seconds
+                    'sleep_interval_requests': 1,  # Sleep after every request
+                    'ratelimit': 5000000,  # 5MB/s rate limit to appear human
+                    'extractor_args': {
+                        'youtube': {
+                            # Use ios_downgraded to avoid YouTube's aggressive IP-based blocking
+                            # Mobile clients have different detection patterns, reducing blocks
+                            'player_client': ['ios_downgraded', 'default', '-android_sdkless'],
+                        }
+                    },
+                }
                 
-                try:
-                    stdout, stderr = proc.communicate(timeout=3600)
-                    result_returncode = proc.returncode
-                finally:
-                    # Remove from tracking list
-                    if proc in _running_processes:
-                        _running_processes.remove(proc)
-
-                if result_returncode == 0:
-                    logger.info(f"Successfully downloaded playlist: {playlist_url}")
-                    return {'success': True}
-                else:
-                    logger.warning(f"yt-dlp returned code {result_returncode}")
-                    if stderr:
-                        logger.warning(f"yt-dlp stderr: {stderr[:200]}")
-
-            except subprocess.TimeoutExpired:
-                logger.warning(f"Download timeout (attempt {attempt + 1}/{max_retries})")
-                if proc and proc.poll() is None:  # Check if proc exists and is still running
-                    proc.kill()
-            except FileNotFoundError:
-                logger.error("yt-dlp not found. Install it with: pip install yt-dlp")
-                return {'success': False}
+                if verbose:
+                    logger.debug(f"yt-dlp options (attempt {attempt + 1}): {ydl_opts}")
+                
+                # Exponential backoff on retries
+                if attempt > 0:
+                    wait_time = min(2 ** (attempt - 1), 8)  # 1s, 2s, 4s, 8s
+                    logger.debug(f"Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                
+                # Download using yt-dlp library directly
+                with YoutubeDL(ydl_opts) as ydl:  # type: ignore
+                    ydl.extract_info(playlist_url, download=True)
+                
+                logger.info(f"Successfully downloaded playlist: {playlist_url}")
+                return {'success': True}
+                
             except Exception as e:
-                logger.warning(f"Download error (attempt {attempt + 1}/{max_retries}): {e}")
+                error_msg = str(e)
+                if 'Requested format is not available' in error_msg:
+                    logger.warning(f"Format not available - YouTube blocking (attempt {attempt + 1}/{max_retries}): {error_msg[:200]}")
+                else:
+                    logger.warning(f"Download error (attempt {attempt + 1}/{max_retries}): {error_msg[:200]}")
 
         logger.error(f"Failed to download playlist after {max_retries} attempts: {playlist_url}")
         return {'success': False}
@@ -179,7 +192,8 @@ class VideoDownloader:
                         filename,
                         title=title,
                         duration_seconds=duration,
-                        file_size_mb=int(file_size_mb)
+                        file_size_mb=int(file_size_mb),
+                        playlist_name=playlist_name
                     )
                     total_duration += duration
                     registered_count += 1
@@ -194,7 +208,8 @@ class VideoDownloader:
                         filename,
                         title=title,
                         duration_seconds=duration,
-                        file_size_mb=int(file_size_mb)
+                        file_size_mb=int(file_size_mb),
+                        playlist_name=playlist_name
                     )
                     total_duration += duration
                     registered_count += 1
@@ -208,20 +223,3 @@ class VideoDownloader:
         
         logger.info(f"Queued {registered_count} new videos for {playlist_name}, total: {total_duration}s")
         return total_duration
-
-def kill_all_running_processes():
-    """Kill all tracked subprocesses. Called on program exit."""
-    global _running_processes
-    for proc in _running_processes:
-        try:
-            if proc.poll() is None:  # Process still running
-                logger.info(f"Killing subprocess (PID {proc.pid})")
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    logger.warning(f"Subprocess {proc.pid} didn't terminate, forcing kill")
-                    proc.kill()
-        except Exception as e:
-            logger.error(f"Error killing subprocess: {e}")
-    _running_processes.clear()

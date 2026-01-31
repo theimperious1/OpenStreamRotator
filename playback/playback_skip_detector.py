@@ -69,6 +69,19 @@ class PlaybackSkipDetector:
         self.cumulative_playback_ms = 0
         logger.debug("Playback skip detector reset")
 
+    def get_current_video_filename(self) -> Optional[str]:
+        """Get the filename of the currently playing video in the folder.
+        
+        Returns:
+            Filename of current video, or None if unable to determine
+        """
+        video_files = self._get_video_files_in_order()
+        if not video_files:
+            return None
+        
+        # The first file is the current one being played
+        return video_files[0]
+
     def _get_video_files_in_order(self) -> list[str]:
         """Get list of video files in folder, sorted alphabetically."""
         if not self.video_folder or not os.path.exists(self.video_folder):
@@ -237,7 +250,8 @@ class PlaybackSkipDetector:
             skip_info = {
                 "time_skipped_seconds": time_skipped_seconds,
                 "new_finish_time": new_finish_time,
-                "new_finish_time_str": new_finish_time.strftime('%H:%M:%S')
+                "new_finish_time_str": new_finish_time.strftime('%H:%M:%S'),
+                "current_video_filename": self.get_current_video_filename()
             }
             
             return True, skip_info
