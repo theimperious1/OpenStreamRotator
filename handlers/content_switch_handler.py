@@ -7,6 +7,7 @@ from config.config_manager import ConfigManager
 from managers.playlist_manager import PlaylistManager
 from controllers.obs_controller import OBSController
 from services.notification_service import NotificationService
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -302,9 +303,9 @@ class ContentSwitchHandler:
             
             category = target_playlist.get('category') or target_playlist.get('name')
             
-            # Update via stream manager
+            # Update via stream manager (async, so schedule it)
             try:
-                stream_manager.update_stream_info(None, category)  # Only update category, not title
+                asyncio.create_task(stream_manager.update_stream_info(None, category))  # Only update category, not title
                 logger.info(f"Updated category to '{category}' (from video: {video_filename})")
                 return True
             except Exception as e:
