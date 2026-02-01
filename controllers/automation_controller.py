@@ -368,7 +368,23 @@ class AutomationController:
                 self.is_rotating = False
                 return False
 
-            # Update stream metadata
+            # Mark playlists as played
+            try:
+                session = self.db.get_current_session()
+                if session:
+                    self.content_switch_handler.mark_playlists_as_played(session.get('id'))
+            except Exception as e:
+                logger.warning(f"Failed to mark playlists as played: {e}")
+
+            # Initialize skip detector
+            # This will handle category updates on the first video transition
+            self._initialize_skip_detector()
+            
+            # Update category for the currently playing first video
+            if self.playback_skip_detector:
+                self.playback_skip_detector._update_category_for_current_video()
+            
+            # Update stream title and category
             try:
                 session = self.db.get_current_session()
                 if session:
@@ -384,14 +400,8 @@ class AutomationController:
                     
                     await self.stream_manager.update_stream_info(stream_title, category)
                     logger.info(f"Updated stream: title='{stream_title}', category='{category}'")
-                    
-                    # Mark playlists as played
-                    self.content_switch_handler.mark_playlists_as_played(session.get('id'))
             except Exception as e:
                 logger.warning(f"Failed to update stream metadata: {e}")
-
-            # Initialize skip detector
-            self._initialize_skip_detector()
 
             self.is_rotating = False
             self.override_already_cleaned = False
@@ -413,7 +423,8 @@ class AutomationController:
         
         if self.playback_skip_detector is None:
             self.playback_skip_detector = PlaybackSkipDetector(
-                self.db, self.obs_controller, VLC_SOURCE_NAME, video_folder
+                self.db, self.obs_controller, VLC_SOURCE_NAME, video_folder,
+                self.content_switch_handler, self.stream_manager
             )
             # Update rotation handler's reference to the newly created detector
             assert self.rotation_handler is not None, "Rotation handler must be initialized"
@@ -543,6 +554,22 @@ class AutomationController:
             self.download_in_progress = True
             loop = asyncio.get_event_loop()
             loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, playlists)
+
+        # Check if all content is consumed and prepared playlists are ready for immediate rotation
+        if self.playback_skip_detector and self.playback_skip_detector._all_content_consumed and self.next_prepared_playlists:
+            logger.info("All content consumed and prepared playlists ready - triggering immediate rotation")
+            total_seconds, has_suspended = self.rotation_handler.get_rotation_completion_info(session)
+            self.rotation_handler.log_rotation_completion(total_seconds)
+            
+            # Reset flag before handling rotation
+            self.playback_skip_detector._all_content_consumed = False
+            
+            # Handle rotation immediately
+            if has_suspended:
+                await self._handle_override_completion(session)
+            else:
+                await self._handle_normal_rotation()
+            return
 
         # Check rotation duration
         if not self.rotation_handler.check_rotation_duration(session):
@@ -867,6 +894,17 @@ class AutomationController:
                 if self.shutdown_event:
                     logger.info("Shutdown event detected, cleaning up...")
                     self.save_playback_on_exit()
+                    
+                    # Cancel all pending asyncio tasks to prevent orphaned tasks from executing with torn-down state
+                    try:
+                        pending = asyncio.all_tasks()
+                        for task in pending:
+                            if not task.done():
+                                task.cancel()
+                        logger.debug(f"Cancelled {len(pending)} pending asyncio tasks")
+                    except Exception as e:
+                        logger.debug(f"Error cancelling tasks (non-critical): {e}")
+                    
                     try:
                         self.platform_manager.cleanup()
                     except Exception as e:
