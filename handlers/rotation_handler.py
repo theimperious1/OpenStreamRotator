@@ -80,7 +80,7 @@ class RotationHandler:
         pending_backup_folder = os.path.normpath(os.path.join(base_path, 'temp_pending_backup'))
         
         if os.path.exists(pending_backup_folder) and os.listdir(pending_backup_folder):
-            logger.debug(f"Pending backup folder has content, skipping background download")
+            # logger.debug(f"Pending backup folder has content, skipping background download")
             return None
         
         # Select playlists in main thread (can't be done in executor thread due to SQLite)

@@ -57,7 +57,7 @@
     "next_rotation_folder": "C:/Projects/OpenStreamRotator/videos/pending",
     "check_config_interval": 60,
     "min_playlists_per_rotation": 2,
-    "max_playlists_per_rotation": 2,
+    "max_playlists_per_rotation": 4,
     "download_retry_attempts": 5,
     "stream_title_template": "24/7 TEST FOR @Asmongold247 | {GAMES} | ",
     "yt_dlp_verbose": false

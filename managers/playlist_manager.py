@@ -47,6 +47,23 @@ class PlaylistManager:
         
         return result
     
+    def get_playlists_by_names(self, playlist_names: List[str]) -> List[Dict]:
+        """Get full playlist data from config by their names.
+        
+        Used to restore prepared playlists from database by name.
+        """
+        config_playlists = self.config.get_playlists()
+        
+        # Find matching playlists in config by name
+        result = []
+        for name in playlist_names:
+            for p in config_playlists:
+                if p.get('name') == name:
+                    result.append(p)
+                    break
+        
+        return result
+    
     def select_playlists_for_rotation(self, manual_selection: Optional[List[str]] = None) -> List[Dict]:
         """
         Select playlists for the next rotation.
