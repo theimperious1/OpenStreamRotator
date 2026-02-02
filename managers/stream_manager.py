@@ -28,7 +28,6 @@ class StreamManager:
             True if at least one platform succeeded
         """
         if not title:
-            logger.warning("Empty title provided for update")
             return False
         
         results = await self.platform_manager.update_title_all(title)
@@ -97,7 +96,6 @@ class StreamManager:
             True if successful
         """
         if not title:
-            logger.warning("Empty title provided for update")
             return False
         
         results = await self.platform_manager.update_stream_info_all(title, category)

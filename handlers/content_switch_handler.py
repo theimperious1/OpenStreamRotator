@@ -35,6 +35,7 @@ class ContentSwitchHandler:
         self.playlist_manager = playlist_manager
         self.obs_controller = obs_controller
         self.notification_service = notification_service
+        self._last_category_update_time = 0  # Track last category update to throttle spam
 
     def truncate_stream_title(self, title: str) -> str:
         """
@@ -305,9 +306,20 @@ class ContentSwitchHandler:
             
             # Update via stream manager (async, so schedule it)
             try:
-                asyncio.create_task(stream_manager.update_stream_info(None, category))  # Only update category, not title
-                logger.info(f"Updated category to '{category}' (from video: {video_filename})")
-                return True
+                if category:  # Only create task if category is valid
+                    # Throttle category updates to prevent spam (only allow one per 3 seconds)
+                    import time
+                    current_time = time.time()
+                    if current_time - self._last_category_update_time >= 3:
+                        asyncio.create_task(stream_manager.update_stream_info(None, category))  # Only update category, not title
+                        self._last_category_update_time = current_time
+                        logger.info(f"Updated category to '{category}' (from video: {video_filename})")
+                    else:
+                        logger.debug(f"Skipping category update for '{category}' - throttled (from video: {video_filename})")
+                    return True
+                else:
+                    logger.warning(f"No valid category for video: {video_filename}")
+                    return True
             except Exception as e:
                 logger.error(f"Failed to update category: {e}")
                 return False

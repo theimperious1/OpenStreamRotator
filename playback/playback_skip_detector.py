@@ -39,6 +39,7 @@ class PlaybackSkipDetector:
         self.original_finish_time: Optional[datetime] = None  # Original finish time - don't extend past this
         self.cumulative_playback_ms = 0  # Cumulative playback across all videos in playlist (accounts for video transitions)
         self._all_content_consumed = False  # Flag set when final video transitions
+        self._resume_seek_pending = False  # Flag to skip cumulative increment on first position check after resume
 
     def initialize(self, total_duration_seconds: int = 0, original_finish_time: Optional[datetime] = None, resume_position_ms: int = 0):
         """Initialize detector with current VLC position and rotation duration.
@@ -63,6 +64,7 @@ class PlaybackSkipDetector:
         # This way remaining time calculation will be correct when skip detection triggers
         if resume_position_ms > 0:
             self.cumulative_playback_ms = resume_position_ms
+            self._resume_seek_pending = True  # Flag the next position check to handle seek
             logger.info(f"Initialized skip detector with resume position: {resume_position_ms}ms ({resume_position_ms/1000:.1f}s)")
         
         logger.info(f"Playback skip detector initialized (total rotation: {total_duration_seconds}s, original finish: {original_finish_time})")
@@ -73,6 +75,7 @@ class PlaybackSkipDetector:
         self.last_playback_check_time = None
         self.cumulative_playback_ms = 0
         self._all_content_consumed = False
+        self._resume_seek_pending = False
         logger.debug("Playback skip detector reset")
 
     def set_handlers(self, content_switch_handler, stream_manager):
@@ -193,6 +196,16 @@ class PlaybackSkipDetector:
         time_elapsed_seconds = time.time() - self.last_playback_check_time
         expected_position_delta_ms = time_elapsed_seconds * 1000
         position_delta_ms = current_position_ms - self.last_known_playback_position_ms
+        
+        # Handle resume/seek pending: skip the seek operation that positions us at the resume point
+        if self._resume_seek_pending and position_delta_ms > 0:
+            # This is the seek to resume position - don't treat it as content consumption
+            logger.info(f"Resume seek detected: VLC seeked to {current_position_ms}ms (resume point)")
+            logger.info(f"Skipping cumulative increment to prevent double-counting - already initialized with resume position")
+            self.last_known_playback_position_ms = current_position_ms
+            self.last_playback_check_time = time.time()
+            self._resume_seek_pending = False  # Clear the flag, next check will be normal playback tracking
+            return False, None
         
         # Detect backwards skip (user rewinding) - reset tracking to new position
         if position_delta_ms < -1000:  # Large negative jump

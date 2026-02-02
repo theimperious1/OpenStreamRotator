@@ -109,6 +109,8 @@ class AutomationController:
         self._seek_retry_count = 0
         self._last_playback_save_time = 0
         self._rotation_postpone_logged = False
+        self._downloads_triggered_this_rotation = False  # Track if downloads already triggered after rotation
+        self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
         self.shutdown_event = False
 
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -120,6 +122,22 @@ class AutomationController:
         kill_processor_processes()
         logger.info("Cleanup complete. Setting shutdown flag...")
         self.shutdown_event = True
+
+    def _is_pending_folder_empty(self) -> bool:
+        """Check if the pending folder is empty or doesn't exist."""
+        try:
+            settings = self.config_manager.get_settings()
+            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_pending/')
+            
+            if not os.path.exists(pending_folder):
+                return True
+            
+            # Check if folder is empty (excluding hidden files)
+            items = [f for f in os.listdir(pending_folder) if not f.startswith('.')]
+            return len(items) == 0
+        except Exception as e:
+            logger.warning(f"Error checking pending folder: {e}")
+            return False  # Conservative: assume not empty if we can't check
 
     def _initialize_handlers(self):
         """Initialize all handler objects after OBS and services are ready."""
@@ -234,6 +252,7 @@ class AutomationController:
     def start_rotation_session(self, manual_playlists=None) -> bool:
         """Start a new rotation session."""
         assert self.rotation_handler is not None, "Rotation handler not initialized"
+        
         logger.info("Starting new rotation session...")
         self.rotation_handler.reset_rotation_log_flag()
 
@@ -323,7 +342,7 @@ class AutomationController:
         if not self.obs_controller:
             logger.error("OBS controller not initialized")
             return False
-        
+
         logger.info(f"Executing content switch (override_resumption={is_override_resumption})")
         self.is_rotating = True
 
@@ -546,14 +565,33 @@ class AutomationController:
                 except Exception as e:
                     logger.warning(f"Failed to update category on video transition: {e}")
 
-        # Trigger background download
-        playlists = self.rotation_handler.trigger_background_download(
-            self.next_prepared_playlists, self.download_in_progress
-        )
-        if playlists:
-            self.download_in_progress = True
-            loop = asyncio.get_event_loop()
-            loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, playlists)
+        # Trigger background download only if pending folder is empty and not already triggered
+        # Skip on first loop after resume to avoid downloading when resuming into existing rotation
+        if (not self._downloads_triggered_this_rotation and 
+            self._is_pending_folder_empty() and 
+            not self.download_in_progress and
+            not self._just_resumed_session):
+            
+            playlists = self.rotation_handler.trigger_background_download(
+                self.next_prepared_playlists, self.download_in_progress
+            )
+            if playlists:
+                self._downloads_triggered_this_rotation = True
+                self.download_in_progress = True
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, playlists)
+                logger.debug("Download triggered (pending folder empty)")
+        else:
+            if not self._is_pending_folder_empty():
+                logger.debug("Pending folder not empty, deferring downloads")
+            elif self.download_in_progress:
+                logger.debug("Download already in progress")
+            elif self._just_resumed_session:
+                logger.debug("Just resumed session, skipping initial download trigger")
+        
+        # Clear the resume flag after first loop iteration
+        if self._just_resumed_session:
+            self._just_resumed_session = False
 
         # Check if all content is consumed and prepared playlists are ready for immediate rotation
         if self.playback_skip_detector and self.playback_skip_detector._all_content_consumed and self.next_prepared_playlists:
@@ -654,6 +692,7 @@ class AutomationController:
             logger.info(f"Switched back to {target_scene} scene after override completion")
         
         self.download_in_progress = False
+        self._downloads_triggered_this_rotation = False  # Reset flag when resuming original rotation
         self._initialize_skip_detector()
 
     async def _handle_normal_rotation(self):
@@ -671,6 +710,9 @@ class AutomationController:
             self.db.end_session(self.current_session_id)
 
         if self.start_rotation_session():
+            # Reset download flag when starting new rotation
+            self._downloads_triggered_this_rotation = False
+            self.download_in_progress = False
             await self.execute_content_switch()
 
     async def check_manual_override(self) -> bool:
@@ -801,6 +843,10 @@ class AutomationController:
                 playback_seconds = session.get('playback_seconds', 0)
                 self.playback_tracker.total_playback_seconds = playback_seconds
                 logger.info(f"Resuming session {self.current_session_id}, playback: {playback_seconds}s")
+                
+                # Reset download flag but mark as just resumed to skip initial download trigger
+                self._downloads_triggered_this_rotation = False
+                self._just_resumed_session = True
                 
                 if session.get('stream_title'):
                     assert self.stream_manager is not None, "Stream manager not initialized"
