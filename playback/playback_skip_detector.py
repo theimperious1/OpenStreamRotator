@@ -40,6 +40,7 @@ class PlaybackSkipDetector:
         self.cumulative_playback_ms = 0  # Cumulative playback across all videos in playlist (accounts for video transitions)
         self._all_content_consumed = False  # Flag set when final video transitions
         self._resume_seek_pending = False  # Flag to skip cumulative increment on first position check after resume
+        self._grace_period_checks = 0  # Grace period to allow VLC to stabilize after initialization
 
     def initialize(self, total_duration_seconds: int = 0, original_finish_time: Optional[datetime] = None, resume_position_ms: int = 0):
         """Initialize detector with current VLC position and rotation duration.
@@ -59,13 +60,17 @@ class PlaybackSkipDetector:
         self.total_rotation_duration_ms = total_duration_seconds * 1000
         self.original_finish_time = original_finish_time
         self.cumulative_playback_ms = 0
+        self._grace_period_checks = 0  # Reset grace period on initialization
         
         # If resuming from a paused position, set cumulative to indicate we've already consumed that much
         # This way remaining time calculation will be correct when skip detection triggers
         if resume_position_ms > 0:
             self.cumulative_playback_ms = resume_position_ms
             self._resume_seek_pending = True  # Flag the next position check to handle seek
-            logger.info(f"Initialized skip detector with resume position: {resume_position_ms}ms ({resume_position_ms/1000:.1f}s)")
+            # Set grace period to prevent premature _all_content_consumed flag on first transition check
+            # This gives VLC time to stabilize after loading/seeking
+            self._grace_period_checks = 2  # Allow 2 checks before setting flag
+            logger.info(f"Initialized skip detector with resume position: {resume_position_ms}ms ({resume_position_ms/1000:.1f}s), grace period enabled")
         
         logger.info(f"Playback skip detector initialized (total rotation: {total_duration_seconds}s, original finish: {original_finish_time})")
 
@@ -76,6 +81,7 @@ class PlaybackSkipDetector:
         self.cumulative_playback_ms = 0
         self._all_content_consumed = False
         self._resume_seek_pending = False
+        self._grace_period_checks = 0
         logger.debug("Playback skip detector reset")
 
     def set_handlers(self, content_switch_handler, stream_manager):
@@ -239,7 +245,12 @@ class PlaybackSkipDetector:
                 elif video_files:
                     logger.info(f"Not deleting {video_files[0]} - it's the last video in playlist")
                     # Flag that all content has been consumed - ready for immediate rotation if prepared playlists exist
-                    self._all_content_consumed = True
+                    # Only set this flag after grace period expires (allows VLC to stabilize after resume/seek)
+                    if self._grace_period_checks <= 0:
+                        self._all_content_consumed = True
+                    else:
+                        self._grace_period_checks -= 1
+                        logger.info(f"Grace period active: {self._grace_period_checks} checks remaining before allowing rotation trigger")
                 
                 position_delta_ms = current_position_ms  # Current position in new video
         
@@ -315,4 +326,9 @@ class PlaybackSkipDetector:
         # No skip, update tracking
         self.last_known_playback_position_ms = current_position_ms
         self.last_playback_check_time = time.time()
+        
+        # Decrement grace period on normal playback to allow it to expire
+        if self._grace_period_checks > 0:
+            self._grace_period_checks -= 1
+        
         return False, None

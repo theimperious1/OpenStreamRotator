@@ -111,6 +111,8 @@ class AutomationController:
         self._rotation_postpone_logged = False
         self._downloads_triggered_this_rotation = False  # Track if downloads already triggered after rotation
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
+        self._skip_detector_init_delay = 0  # Delay skip detector initialization after override to let VLC reload
+        self._skip_rotation_check_delay = 0  # Delay rotation checks after override restoration to let VLC stabilize
         self.shutdown_event = False
         
         # Background download state (thread-safe communication from background thread)
@@ -629,15 +631,19 @@ class AutomationController:
 
         # Check if all content is consumed and prepared playlists are ready for immediate rotation
         # Also trigger rotation if there's pending content even if prepared_playlists flag is empty (covers restart scenario)
+        # Also trigger rotation if there's a suspended session waiting to be restored (override completion)
         has_pending_content = not self._is_pending_folder_empty()
+        has_suspended_session = self.db.get_suspended_session() is not None
         should_rotate = False
         
         if self.playback_skip_detector is not None and self.playback_skip_detector._all_content_consumed:
-            should_rotate = self.next_prepared_playlists or has_pending_content
+            should_rotate = self.next_prepared_playlists or has_pending_content or has_suspended_session
         
         if should_rotate:
             if self.next_prepared_playlists:
                 logger.info("All content consumed and prepared playlists ready - triggering immediate rotation")
+            elif has_suspended_session:
+                logger.info("All content consumed and suspended session exists - triggering override completion/restoration")
             else:
                 logger.info("All content consumed and pending content exists - triggering rotation (prepared from previous run)")
             
@@ -739,7 +745,12 @@ class AutomationController:
         
         self.download_in_progress = False
         self._downloads_triggered_this_rotation = False  # Reset flag when resuming original rotation
-        self._initialize_skip_detector()
+        
+        # Set delays after override restoration:
+        # 1. _skip_detector_init_delay: Wait for VLC to reload playlist and seek to resume position
+        # 2. _skip_rotation_check_delay: Wait before checking for rotation to prevent premature trigger
+        self._skip_detector_init_delay = 5  # 5 iterations of ~0.5s each = ~2.5 seconds
+        self._skip_rotation_check_delay = 10  # 10 iterations of ~0.5s each = ~5 seconds (longer buffer)
 
     async def _handle_normal_rotation(self):
         """Handle normal rotation completion."""
@@ -1021,7 +1032,21 @@ class AutomationController:
                 self.auto_save_playback_position()
                 self._process_video_registration_queue()
                 self._process_pending_database_operations()
-                await self.check_for_rotation()
+                
+                # Handle skip detector initialization delay after override restoration
+                if self._skip_detector_init_delay > 0:
+                    self._skip_detector_init_delay -= 1
+                    if self._skip_detector_init_delay == 0:
+                        logger.info("Initialization delay complete, initializing skip detector after override restoration")
+                        self._initialize_skip_detector()
+                
+                # Handle rotation check delay after override restoration
+                if self._skip_rotation_check_delay > 0:
+                    self._skip_rotation_check_delay -= 1
+                
+                # Only check for rotation if not in skip delay period
+                if self._skip_rotation_check_delay == 0:
+                    await self.check_for_rotation()
                 
                 # Handle pending seek
                 if self._pending_seek_position_ms > 0:
