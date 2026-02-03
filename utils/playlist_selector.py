@@ -70,7 +70,7 @@ class PlaylistSelector:
         
         return set()
 
-    def _select_manual(self, manual_selection: List[str], allowed_names: set, excluded_names: set = None) -> List[Dict]:
+    def _select_manual(self, manual_selection: List[str], allowed_names: set, excluded_names: Optional[set] = None) -> List[Dict]:
         """
         Manually select specific playlists.
         
@@ -93,9 +93,11 @@ class PlaylistSelector:
         logger.info(f"Manual selection: {[p['name'] for p in selected]}")
         return selected
 
-    def _select_automatic(self, allowed_names: set, excluded_names: set = None) -> List[Dict]:
+    def _select_automatic(self, allowed_names: set, excluded_names: Optional[set] = None) -> List[Dict]:
         """
         Automatically select playlists based on rotation strategy.
+        Ensures at least 1-2 long (non-shorts) playlists are always included to prevent
+        scenarios where all shorts are selected (which would cause massive download times).
         Excludes playlists currently being prepared.
         
         Args:
@@ -103,7 +105,7 @@ class PlaylistSelector:
             excluded_names: Set of playlist names to exclude (currently preparing)
         
         Returns:
-            List of selected playlists
+            List of selected playlists balanced with long and shorts content
         """
         if excluded_names is None:
             excluded_names = set()
@@ -123,14 +125,38 @@ class PlaylistSelector:
             logger.error("No eligible playlists available! (all in preparation or disabled)")
             return []
 
-        # Sort by last_played (oldest first) and priority
-        # Playlists never played come first (NULLS FIRST is handled in SQL)
+        # Separate playlists into long-form and shorts
+        long_playlists = [p for p in all_playlists if not p.get('is_short', False)]
+        shorts_playlists = [p for p in all_playlists if p.get('is_short', False)]
+        
+        logger.debug(f"Available long playlists: {[p['name'] for p in long_playlists]}")
+        logger.debug(f"Available shorts playlists: {[p['name'] for p in shorts_playlists]}")
 
-        # Select between min and max playlists
+        # Determine number of playlists to select
         num_to_select = min(len(all_playlists), max_playlists)
         num_to_select = max(num_to_select, min_playlists)
+        
+        # Ensure at least 1-2 long playlists are included (don't let all shorts be selected)
+        # Use min_playlists as the minimum number of long playlists to include
+        min_long_playlists = max(1, min_playlists - 1) if min_playlists > 1 else 1
+        
+        # If we have fewer long playlists than required, use what we have
+        num_long_to_select = min(len(long_playlists), min_long_playlists)
+        
+        if num_long_to_select == 0 and len(long_playlists) > 0:
+            # Edge case: ensure at least 1 long playlist if any exist
+            num_long_to_select = 1
+        
+        # Calculate how many shorts we can add
+        num_shorts_to_select = num_to_select - num_long_to_select
+        num_shorts_to_select = min(num_shorts_to_select, len(shorts_playlists))
+        
+        # Select from each group (sorted by last_played and priority)
+        selected_long = long_playlists[:num_long_to_select]
+        selected_shorts = shorts_playlists[:num_shorts_to_select]
+        selected = selected_long + selected_shorts
 
-        selected = all_playlists[:num_to_select]
-
-        logger.info(f"Auto-selected {len(selected)} playlists: {[p['name'] for p in selected]} (excluded from preparation: {excluded_names})")
+        logger.info(f"Auto-selected {len(selected)} playlists: {[p['name'] for p in selected]} "
+                   f"({len(selected_long)} long, {len(selected_shorts)} shorts) "
+                   f"(excluded from preparation: {excluded_names})")
         return selected

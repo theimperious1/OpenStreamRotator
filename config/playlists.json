@@ -5,49 +5,56 @@
       "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyF6XOwb53qTmbyLa2xsSHR-",
       "category": "Just Chatting",
       "enabled": true,
-      "priority": 1
+      "priority": 1,
+      "is_short": false
     },
     {
       "name": "NARWHALS",
       "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyFkfqt3Oga1pab8ePbKFscB",
       "enabled": true,
       "category": "Just Chatting",
-      "priority": 1
+      "priority": 1,
+      "is_short": true
     },
     {
       "name": "CATS",
       "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyEKFKMuMWtiCWJGjwYsblck",
       "category": "Just Chatting",
       "enabled": true,
-      "priority": 2
+      "priority": 2,
+      "is_short": false
     },
     {
       "name": "MW2",
       "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjkZRMdYQ5cn5hUmaqyUVqYO",
       "category": "Call of Duty: Modern Warfare 2",
       "enabled": true,
-      "priority": 3
+      "priority": 3,
+      "is_short": false
     },
     {
       "name": "ASMONGOLD SHORTS",
       "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjnr40tReiGs84uifUAJtlRu",
       "category": "Just Chatting",
       "enabled": true,
-      "priority": 1
+      "priority": 1,
+      "is_short": true
     },
     {
       "name": "CAT MEMES",
       "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjlbzhcE-hePMPqPQ_B7YXNC",
       "category": "Just Chatting",
       "enabled": true,
-      "priority": 1
+      "priority": 1,
+      "is_short": true
     },
     {
       "name": "FF14",
       "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjkhpjL87dSagEcu1L1c2C3G",
       "category": "Final Fantasy XIV",
       "enabled": true,
-      "priority": 3
+      "priority": 3,
+      "is_short": false
     }
   ],
   "settings": {
