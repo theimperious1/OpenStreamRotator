@@ -5,6 +5,7 @@ import os
 import shutil
 import signal
 import asyncio
+import json
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -656,20 +657,26 @@ class AutomationController:
             not has_suspended_session):
             
             # Check if we have prepared playlists downloading but not completed yet
-            next_playlists = session.get('next_playlists', [])
-            has_prepared = len(next_playlists) > 0
+            next_playlists_raw = session.get('next_playlists', [])
+            next_playlists_status_raw = session.get('next_playlists_status', {})
+            
+            # Parse JSON if needed
+            next_playlists = json.loads(next_playlists_raw) if isinstance(next_playlists_raw, str) else (next_playlists_raw or [])
+            next_playlists_status = json.loads(next_playlists_status_raw) if isinstance(next_playlists_status_raw, str) else (next_playlists_status_raw or {})
             
             # Get pending folder status
-            pending_folder = os.path.join(self.video_storage_path, 'pending')
+            settings = self.config_manager.get_settings()
+            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
             pending_complete_files = self.playlist_manager.get_complete_video_files(pending_folder)
             pending_has_files = len(pending_complete_files) > 0
             
             # Check if prepared playlists are still downloading (not completed)
             pending_incomplete = False
             if next_playlists:
-                for playlist in next_playlists:
-                    playlist_status = self.db.get_playlist_status(session['session_id'], playlist['id'])
-                    if playlist_status and playlist_status[1] != 'COMPLETED':  # status = (name, status_str, ...)
+                for playlist_name in next_playlists:
+                    # Check status from the next_playlists_status dict
+                    playlist_is_complete = next_playlists_status.get(playlist_name) == 'COMPLETED'
+                    if not playlist_is_complete:
                         pending_incomplete = True
                         break
             
@@ -810,7 +817,8 @@ class AutomationController:
         # Get video folder from settings
         settings = self.config_manager.get_settings()
         video_folder = settings.get('video_folder', 'C:/stream_videos/')
-        self._temp_playback_folder = os.path.join(video_folder, 'temp_playback')
+        videos_parent_folder = os.path.dirname(video_folder)
+        self._temp_playback_folder = os.path.join(videos_parent_folder, 'temp_playback')
         
         # Switch to content-switch scene for folder operations
         if not self.obs_controller or not self.obs_controller.switch_scene('content-switch'):
@@ -824,16 +832,16 @@ class AutomationController:
             os.makedirs(self._temp_playback_folder, exist_ok=True)
             
             # Get complete video files from pending folder
-            pending_folder = os.path.join(video_folder, 'pending')
+            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
             complete_files = self.playlist_manager.get_complete_video_files(pending_folder)
             
             if not complete_files:
                 logger.error("No complete files found in pending folder, cannot activate temp playback")
                 return
             
-            # Move complete files to temp_playback folder
-            if not self.playlist_manager.move_files_to_folder(pending_folder, self._temp_playback_folder, complete_files):
-                logger.error("Failed to move files to temp_playback folder")
+            # Copy complete files to temp_playback folder (keep originals + .part files in pending)
+            if not self.playlist_manager.copy_files_to_folder(pending_folder, self._temp_playback_folder, complete_files):
+                logger.error("Failed to copy files to temp_playback folder")
                 return
             
             # Update OBS VLC source to stream from temp_playback
@@ -879,8 +887,7 @@ class AutomationController:
         """
         try:
             settings = self.config_manager.get_settings()
-            video_folder = settings.get('video_folder', 'C:/stream_videos/')
-            pending_folder = os.path.join(video_folder, 'pending')
+            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
             
             # Get complete files currently in pending folder
             new_complete_files = self.playlist_manager.get_complete_video_files(pending_folder)
@@ -897,13 +904,13 @@ class AutomationController:
             if new_files:
                 logger.info(f"Found {len(new_files)} new completed files in pending folder")
                 
-                # Move new files to temp_playback
-                if self.playlist_manager.move_files_to_folder(pending_folder, self._temp_playback_folder, new_files):
-                    logger.info(f"Moved {len(new_files)} new files to temp_playback")
+                # Copy new files to temp_playback (keep originals + .part files in pending)
+                if self.playlist_manager.copy_files_to_folder(pending_folder, self._temp_playback_folder, new_files):
+                    logger.info(f"Copied {len(new_files)} new files to temp_playback")
                     
                     # Update OBS VLC source to refresh playlist
                     if not self.obs_controller or not self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, self._temp_playback_folder):
-                        logger.warning("Failed to refresh VLC source after moving new files")
+                        logger.warning("Failed to refresh VLC source after copying new files")
                 else:
                     logger.error("Failed to move new files to temp_playback folder")
             
@@ -935,7 +942,6 @@ class AutomationController:
         
         try:
             settings = self.config_manager.get_settings()
-            video_folder = settings.get('video_folder', 'C:/stream_videos/')
             
             # Switch to content-switch scene for merge operation
             if not self.obs_controller or not self.obs_controller.switch_scene('content-switch'):
@@ -944,50 +950,66 @@ class AutomationController:
             
             await asyncio.sleep(1.5)
             
-            pending_folder = os.path.join(video_folder, 'pending')
-            live_folder = os.path.join(video_folder, 'live')
+            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            live_folder = settings.get('video_folder', 'C:/stream_videos/')
             
-            # Get files from both temp and pending folders
-            temp_files = []
-            pending_files = []
+            # Step 1: Delete all contents of /live folder
+            try:
+                if os.path.exists(live_folder):
+                    logger.info("Clearing live folder for consolidation")
+                    for filename in os.listdir(live_folder):
+                        file_path = os.path.join(live_folder, filename)
+                        try:
+                            if os.path.isfile(file_path):
+                                os.unlink(file_path)
+                            elif os.path.isdir(file_path):
+                                shutil.rmtree(file_path)
+                        except Exception as e:
+                            logger.warning(f"Could not delete {filename} from live folder: {e}")
+            except Exception as e:
+                logger.error(f"Error clearing live folder: {e}")
+                return
             
-            if os.path.exists(self._temp_playback_folder):
-                temp_files = [f for f in os.listdir(self._temp_playback_folder)
-                             if os.path.isfile(os.path.join(self._temp_playback_folder, f))]
-            
+            # Step 2: Get complete files from pending folder (exclude .part files)
+            complete_files_in_pending = []
             if os.path.exists(pending_folder):
-                pending_files = [f for f in os.listdir(pending_folder)
-                               if os.path.isfile(os.path.join(pending_folder, f))]
+                complete_files_in_pending = [f for f in os.listdir(pending_folder)
+                                            if os.path.isfile(os.path.join(pending_folder, f)) and not f.endswith('.part')]
             
-            logger.info(f"Merging temp_playback ({len(temp_files)} files) + pending ({len(pending_files)} files) → live")
-            
-            # Merge temp and pending into live folder
-            source_folders = []
-            if temp_files:
-                source_folders.append(self._temp_playback_folder)
-            if pending_files:
-                source_folders.append(pending_folder)
-            
-            if source_folders:
-                if not self.playlist_manager.merge_folders_to_destination(source_folders, live_folder):
-                    logger.error("Failed to merge folders during temp playback exit")
+            # Step 3: Move complete files from pending → /live
+            if complete_files_in_pending:
+                if not self.playlist_manager.move_files_to_folder(pending_folder, live_folder, complete_files_in_pending):
+                    logger.error("Failed to move complete files to live folder")
                     return
-            else:
-                logger.warning("No files found to merge during temp playback exit")
+                logger.info(f"Moved {len(complete_files_in_pending)} complete files to live folder")
             
-            # Update OBS to stream from live folder
+            # Step 4: Delete any remaining .part files from pending (cleanup orphaned incomplete downloads)
+            try:
+                if os.path.exists(pending_folder):
+                    for filename in os.listdir(pending_folder):
+                        if filename.endswith('.part'):
+                            file_path = os.path.join(pending_folder, filename)
+                            try:
+                                os.unlink(file_path)
+                                logger.info(f"Removed orphaned .part file: {filename}")
+                            except Exception as e:
+                                logger.warning(f"Could not delete .part file {filename}: {e}")
+            except Exception as e:
+                logger.error(f"Error cleaning up .part files: {e}")
+            
+            # Step 5: Update OBS to stream from live folder
             await asyncio.sleep(0.5)
             if not self.obs_controller or not self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, live_folder):
                 logger.error("Failed to update VLC source to live folder")
                 return
             
-            # Switch back to Stream scene
+            # Step 6: Switch back to Stream scene
             await asyncio.sleep(0.5)
             if not self.obs_controller or not self.obs_controller.switch_scene('Stream'):
                 logger.error("Failed to switch back to Stream scene after temp playback exit")
                 return
             
-            # Clean up temp_playback folder
+            # Step 7: Clean up temp_playback folder
             try:
                 if os.path.exists(self._temp_playback_folder):
                     shutil.rmtree(self._temp_playback_folder)
@@ -1000,7 +1022,6 @@ class AutomationController:
             
             # Update skip detector to track files back in live folder
             if self.playback_skip_detector:
-                live_folder = os.path.join(video_folder, 'live')
                 self.playback_skip_detector.video_folder = live_folder
                 logger.info(f"Updated skip detector to track live folder")
             
@@ -1191,8 +1212,10 @@ class AutomationController:
         override_playlists = selected_playlist_objs
         
         # Download to the temp override folder instead of normal pending folder
-        override_pending_folder = self._override_prep_data.get('override_pending_folder')
-        
+        override_pending_folder = self._override_prep_data.get('override_pending_folder') or os.path.join(
+            self.config_manager.get_settings().get('video_folder', 'C:/stream_videos/'),
+            'temp_override_pending'
+        )
         self._background_download_in_progress = True
         loop = asyncio.get_event_loop()
         
@@ -1225,6 +1248,60 @@ class AutomationController:
         # when background download completes AND rotation downloads are idle
         return False  # Return False because we haven't completed the override yet
 
+    async def _auto_resume_pending_downloads(self, session_id: int, pending_playlists: list, status_dict: dict) -> None:
+        """Auto-resume interrupted playlist downloads on startup.
+        
+        When a session resumes with PENDING playlists, automatically trigger their
+        downloads immediately instead of waiting for the next rotation trigger.
+        Uses yt-dlp's built-in --continue flag to resume from partial downloads.
+        
+        Args:
+            session_id: Database session ID
+            pending_playlists: List of playlist names with PENDING status
+            status_dict: Dictionary mapping playlist names to their status
+        """
+        try:
+            settings = self.config_manager.get_settings()
+            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            
+            # Ensure folder exists
+            os.makedirs(next_folder, exist_ok=True)
+            
+            # Get playlist objects from database with IDs
+            playlist_objects = self.db.get_playlists_with_ids_by_names(pending_playlists)
+            if not playlist_objects:
+                logger.warning(f"Could not fetch playlist objects for auto-resume: {pending_playlists}")
+                return
+            
+            logger.info(f"Auto-resuming {len(playlist_objects)} interrupted playlist downloads on startup")
+            
+            # Trigger downloads in background thread (non-blocking)
+            def resume_downloads():
+                try:
+                    # Download playlists with --continue flag (enabled by default in yt-dlp)
+                    # and --write-info-json for metadata-aware resumption
+                    verbose_download = settings.get('yt_dlp_verbose', False)
+                    result = self.playlist_manager.download_playlists(playlist_objects, next_folder, verbose=verbose_download)
+                    
+                    if result.get('success'):
+                        logger.info(f"Auto-resumed downloads completed for: {pending_playlists}")
+                        # Update status for completed playlists
+                        for playlist in pending_playlists:
+                            self.db.update_playlist_status(session_id, playlist, "COMPLETED")
+                    else:
+                        logger.warning(f"Auto-resumed downloads had failures for: {pending_playlists}")
+                        self.notification_service.notify_background_download_warning()
+                except Exception as e:
+                    logger.error(f"Error during auto-resume of downloads: {e}")
+                    self.notification_service.notify_background_download_error(str(e))
+            
+            # Run in background thread
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(self.executor, resume_downloads)
+            logger.info("Auto-resume background task started")
+            
+        except Exception as e:
+            logger.error(f"Failed to initiate auto-resume of pending downloads: {e}")
 
     async def run(self):
         """Main automation loop."""
@@ -1310,7 +1387,9 @@ class AutomationController:
                                 logger.warning(f"Prepared playlist files missing from pending folder, clearing and will download fresh on next rotation: {playlist_list}")
                                 self.db.set_next_playlists(session['id'], [])
                         else:
-                            logger.info(f"Prepared playlists not fully downloaded, will download on next trigger: {status_dict}")
+                            logger.info(f"Prepared playlists not fully downloaded, auto-resuming downloads now: {status_dict}")
+                            # Auto-resume interrupted downloads immediately on startup
+                            await self._auto_resume_pending_downloads(session['id'], playlist_list, status_dict)
                     except Exception as e:
                         logger.error(f"Failed to restore prepared playlists: {e}")
                 

@@ -332,6 +332,21 @@ class PlaylistManager:
             logger.error(f"Error moving files: {e}")
             return False
 
+    def copy_files_to_folder(self, source_folder: str, dest_folder: str, filenames: list) -> bool:
+        """Copy specific files from source to destination folder (do not move)."""
+        try:
+            os.makedirs(dest_folder, exist_ok=True)
+            for filename in filenames:
+                src = os.path.join(source_folder, filename)
+                dst = os.path.join(dest_folder, filename)
+                if os.path.exists(src):
+                    shutil.copy2(src, dst)
+                    logger.info(f"Copied: {filename} → {os.path.basename(dest_folder)}/")
+            return True
+        except Exception as e:
+            logger.error(f"Error copying files: {e}")
+            return False
+
     def merge_folders_to_destination(self, source_folders: list, dest_folder: str) -> bool:
         """Merge contents from multiple source folders into destination folder."""
         try:
