@@ -373,9 +373,33 @@ class DatabaseManager:
         self.close()
 
     def end_session(self, session_id: int):
-        """Mark a rotation session as ended."""
+        """Mark a rotation session as ended and update playlists' last_played timestamp."""
         conn = self.connect()
         cursor = conn.cursor()
+
+        # Get playlists used in this session
+        cursor.execute("""
+            SELECT playlists_selected FROM rotation_sessions WHERE id = ?
+        """, (session_id,))
+        result = cursor.fetchone()
+        
+        if result:
+            playlists_json = result[0]
+            if playlists_json:
+                try:
+                    playlist_ids = json.loads(playlists_json)
+                    # Update last_played for all playlists in this session
+                    now = datetime.now()
+                    for playlist_id in playlist_ids:
+                        cursor.execute("""
+                            UPDATE playlists 
+                            SET last_played = ?, 
+                                play_count = play_count + 1,
+                                updated_at = ?
+                            WHERE id = ?
+                        """, (now, now, playlist_id))
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"Failed to parse playlists for session {session_id}: {e}")
 
         cursor.execute("""
             UPDATE rotation_sessions 
@@ -639,7 +663,7 @@ class DatabaseManager:
                     priority=playlist.get('priority', 1)
                 )
         logger.info(f"Synced {len(config_playlists)} playlists from config")
-        
+
     def initialize_next_playlists(self, session_id: int, playlist_names: List[str]):
         """Initialize next_playlists tracking for a session.
         

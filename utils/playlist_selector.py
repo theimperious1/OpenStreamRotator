@@ -1,4 +1,5 @@
 import logging
+import json
 from typing import List, Dict, Optional
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
@@ -26,6 +27,7 @@ class PlaylistSelector:
         
         Uses manual selection if provided, otherwise automatic selection.
         Only selects playlists that are defined in the config file.
+        Excludes playlists currently in preparation (next_playlists).
         
         Args:
             manual_selection: Optional list of playlist names to manually select
@@ -37,48 +39,88 @@ class PlaylistSelector:
         config_playlists = self.config.get_playlists()
         allowed_names = {p['name'] for p in config_playlists if p.get('enabled', True)}
         
+        # Get playlists that are currently being prepared/downloaded
+        excluded_playlist_names = self._get_playlists_in_pipeline()
+        
         if manual_selection:
-            return self._select_manual(manual_selection, allowed_names)
+            return self._select_manual(manual_selection, allowed_names, excluded_playlist_names)
         else:
-            return self._select_automatic(allowed_names)
+            return self._select_automatic(allowed_names, excluded_playlist_names)
 
-    def _select_manual(self, manual_selection: List[str], allowed_names: set) -> List[Dict]:
+    def _get_playlists_in_pipeline(self) -> set:
+        """
+        Get playlists that are currently in the pipeline (preparing/downloading).
+        
+        Returns:
+            Set of playlist names currently being prepared
+        """
+        try:
+            session = self.db.get_current_session()
+            if not session:
+                return set()
+            
+            # Get next_playlists from current session (what's being prepared)
+            next_playlists_json = session.get('next_playlists')
+            if next_playlists_json:
+                next_playlist_names = json.loads(next_playlists_json) if isinstance(next_playlists_json, str) else next_playlists_json
+                logger.debug(f"Excluding from selection (currently preparing): {next_playlist_names}")
+                return set(next_playlist_names)
+        except (json.JSONDecodeError, TypeError, KeyError) as e:
+            logger.debug(f"Could not parse in-pipeline playlists: {e}")
+        
+        return set()
+
+    def _select_manual(self, manual_selection: List[str], allowed_names: set, excluded_names: set = None) -> List[Dict]:
         """
         Manually select specific playlists.
         
         Args:
             manual_selection: List of playlist names to select
             allowed_names: Set of playlist names allowed by config
+            excluded_names: Set of playlist names to exclude (currently preparing)
         
         Returns:
             List of selected playlists
         """
+        if excluded_names is None:
+            excluded_names = set()
+        
         all_playlists = self.db.get_enabled_playlists()
-        selected = [p for p in all_playlists if p['name'] in manual_selection and p['name'] in allowed_names]
+        selected = [p for p in all_playlists 
+                   if p['name'] in manual_selection 
+                   and p['name'] in allowed_names
+                   and p['name'] not in excluded_names]
         logger.info(f"Manual selection: {[p['name'] for p in selected]}")
         return selected
 
-    def _select_automatic(self, allowed_names: set) -> List[Dict]:
+    def _select_automatic(self, allowed_names: set, excluded_names: set = None) -> List[Dict]:
         """
         Automatically select playlists based on rotation strategy.
+        Excludes playlists currently being prepared.
         
         Args:
             allowed_names: Set of playlist names allowed by config
+            excluded_names: Set of playlist names to exclude (currently preparing)
         
         Returns:
             List of selected playlists
         """
+        if excluded_names is None:
+            excluded_names = set()
+        
         settings = self.config.get_settings()
         min_playlists = settings.get('min_playlists_per_rotation', 2)
         max_playlists = settings.get('max_playlists_per_rotation', 4)
 
         all_playlists = self.db.get_enabled_playlists()
         
-        # Filter to only include playlists in config
-        all_playlists = [p for p in all_playlists if p['name'] in allowed_names]
+        # Filter to only include playlists in config AND not currently preparing
+        all_playlists = [p for p in all_playlists 
+                        if p['name'] in allowed_names 
+                        and p['name'] not in excluded_names]
 
         if len(all_playlists) == 0:
-            logger.error("No enabled playlists available!")
+            logger.error("No eligible playlists available! (all in preparation or disabled)")
             return []
 
         # Sort by last_played (oldest first) and priority
@@ -90,5 +132,5 @@ class PlaylistSelector:
 
         selected = all_playlists[:num_to_select]
 
-        logger.info(f"Auto-selected {len(selected)} playlists: {[p['name'] for p in selected]}")
+        logger.info(f"Auto-selected {len(selected)} playlists: {[p['name'] for p in selected]} (excluded from preparation: {excluded_names})")
         return selected
