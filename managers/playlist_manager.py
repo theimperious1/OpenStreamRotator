@@ -300,3 +300,53 @@ class PlaylistManager:
 
         logger.info(f"Validated {len(video_files)} video files")
         return True
+
+    def get_complete_video_files(self, folder: str) -> list:
+        """
+        Get list of complete video files in a folder.
+        Filters out .part files (incomplete downloads).
+        """
+        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
+        if not os.path.exists(folder):
+            return []
+        complete_files = []
+        for filename in os.listdir(folder):
+            if filename.endswith('.part'):
+                continue
+            if filename.lower().endswith(video_extensions):
+                complete_files.append(filename)
+        return complete_files
+
+    def move_files_to_folder(self, source_folder: str, dest_folder: str, filenames: list) -> bool:
+        """Move specific files from source to destination folder."""
+        try:
+            os.makedirs(dest_folder, exist_ok=True)
+            for filename in filenames:
+                src = os.path.join(source_folder, filename)
+                dst = os.path.join(dest_folder, filename)
+                if os.path.exists(src):
+                    shutil.move(src, dst)
+                    logger.info(f"Moved: {filename} → {os.path.basename(dest_folder)}/")
+            return True
+        except Exception as e:
+            logger.error(f"Error moving files: {e}")
+            return False
+
+    def merge_folders_to_destination(self, source_folders: list, dest_folder: str) -> bool:
+        """Merge contents from multiple source folders into destination folder."""
+        try:
+            os.makedirs(dest_folder, exist_ok=True)
+            for source_folder in source_folders:
+                if not os.path.exists(source_folder):
+                    continue
+                for filename in os.listdir(source_folder):
+                    src = os.path.join(source_folder, filename)
+                    dst = os.path.join(dest_folder, filename)
+                    if os.path.isfile(src):
+                        shutil.move(src, dst)
+                        logger.info(f"Merged: {filename} → {os.path.basename(dest_folder)}/")
+            logger.info("Folder merge completed successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error merging folders: {e}")
+            return False

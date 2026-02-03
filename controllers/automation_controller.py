@@ -124,6 +124,11 @@ class AutomationController:
         self._override_prep_ready = False  # Background prep completed, ready for commit
         self._override_prep_data = {}  # Data from queue phase (override_pending_folder path, etc)
         self._background_download_in_progress = False  # Normal rotation download active
+        
+        # Temp playback state (for long playlist handling)
+        self._temp_playback_active = False  # Temp playback mode enabled
+        self._temp_playback_folder: str = ''  # Temp playback folder path (set dynamically from settings)
+        self._last_temp_folder_check = 0  # Track when we last checked for new files
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -644,6 +649,36 @@ class AutomationController:
         has_suspended_session = self.db.get_suspended_session() is not None
         should_rotate = False
         
+        # Check if temp playback should be activated (long playlist being downloaded)
+        if (self.playback_skip_detector is not None and 
+            self.playback_skip_detector._all_content_consumed and 
+            not self._temp_playback_active and
+            not has_suspended_session):
+            
+            # Check if we have prepared playlists downloading but not completed yet
+            next_playlists = session.get('next_playlists', [])
+            has_prepared = len(next_playlists) > 0
+            
+            # Get pending folder status
+            pending_folder = os.path.join(self.video_storage_path, 'pending')
+            pending_complete_files = self.playlist_manager.get_complete_video_files(pending_folder)
+            pending_has_files = len(pending_complete_files) > 0
+            
+            # Check if prepared playlists are still downloading (not completed)
+            pending_incomplete = False
+            if next_playlists:
+                for playlist in next_playlists:
+                    playlist_status = self.db.get_playlist_status(session['session_id'], playlist['id'])
+                    if playlist_status and playlist_status[1] != 'COMPLETED':  # status = (name, status_str, ...)
+                        pending_incomplete = True
+                        break
+            
+            # Trigger temp playback if all conditions met
+            if pending_has_files and pending_incomplete:
+                logger.info(f"Long playlist detected downloading ({len(pending_complete_files)} files ready in pending) - activating temp playback")
+                await self._activate_temp_playback(session)
+                return
+        
         if self.playback_skip_detector is not None and self.playback_skip_detector._all_content_consumed:
             # Only rotate on pending content if no background download is in progress
             # This prevents triggering rotation mid-download and auto-selecting same playlists
@@ -762,6 +797,223 @@ class AutomationController:
         # 2. _skip_rotation_check_delay: Wait before checking for rotation to prevent premature trigger
         self._skip_detector_init_delay = 5  # 5 iterations of ~0.5s each = ~2.5 seconds
         self._skip_rotation_check_delay = 10  # 10 iterations of ~0.5s each = ~5 seconds (longer buffer)
+
+    async def _activate_temp_playback(self, session: dict) -> None:
+        """Activate temporary playback while large playlist downloads complete.
+        
+        Scenario: Current rotation finished but next large playlist (e.g., 28 videos)
+        still downloading. Move completed files to temp_playback folder and stream those
+        while pending continues downloading. Once pending complete, merge and resume normal.
+        """
+        logger.info("===== TEMP PLAYBACK ACTIVATION =====")
+        
+        # Get video folder from settings
+        settings = self.config_manager.get_settings()
+        video_folder = settings.get('video_folder', 'C:/stream_videos/')
+        self._temp_playback_folder = os.path.join(video_folder, 'temp_playback')
+        
+        # Switch to content-switch scene for folder operations
+        if not self.obs_controller or not self.obs_controller.switch_scene('content-switch'):
+            logger.error("Failed to switch to content-switch scene for temp playback setup")
+            return
+        
+        await asyncio.sleep(1.5)  # Wait for scene switch
+        
+        try:
+            # Create temp_playback folder if it doesn't exist
+            os.makedirs(self._temp_playback_folder, exist_ok=True)
+            
+            # Get complete video files from pending folder
+            pending_folder = os.path.join(video_folder, 'pending')
+            complete_files = self.playlist_manager.get_complete_video_files(pending_folder)
+            
+            if not complete_files:
+                logger.error("No complete files found in pending folder, cannot activate temp playback")
+                return
+            
+            # Move complete files to temp_playback folder
+            if not self.playlist_manager.move_files_to_folder(pending_folder, self._temp_playback_folder, complete_files):
+                logger.error("Failed to move files to temp_playback folder")
+                return
+            
+            # Update OBS VLC source to stream from temp_playback
+            if not self.obs_controller or not self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, self._temp_playback_folder):
+                logger.error("Failed to update VLC source to temp_playback folder")
+                return
+            
+            # Switch back to Stream scene to resume streaming
+            await asyncio.sleep(0.5)
+            if not self.obs_controller or not self.obs_controller.switch_scene('Stream'):
+                logger.error("Failed to switch back to Stream scene after temp playback setup")
+                return
+            
+            # Mark temp playback as active
+            self._temp_playback_active = True
+            self._last_temp_folder_check = time.time()
+            
+            # Update skip detector to track files in temp_playback folder
+            if self.playback_skip_detector:
+                self.playback_skip_detector.video_folder = self._temp_playback_folder
+                logger.info(f"Updated skip detector to track temp_playback folder")
+            
+            logger.info(f"Temp playback activated with {len(complete_files)} files")
+            logger.info(f"Streaming from: {self._temp_playback_folder}")
+            logger.info("Continue monitoring pending folder for new downloads...")
+            
+        except Exception as e:
+            logger.error(f"Error during temp playback activation: {e}")
+            # Switch back to Stream scene on error
+            try:
+                await asyncio.sleep(0.5)
+                if self.obs_controller:
+                    self.obs_controller.switch_scene('Stream')
+            except Exception as scene_error:
+                logger.error(f"Failed to recover scene after temp playback error: {scene_error}")
+
+    async def _monitor_temp_playback(self) -> None:
+        """Monitor pending folder for new completed files during temp playback.
+        
+        Periodically check if new files are ready in pending folder and move them
+        to temp_playback folder. Once all pending files are downloaded, exit temp
+        playback and prepare for normal rotation.
+        """
+        try:
+            settings = self.config_manager.get_settings()
+            video_folder = settings.get('video_folder', 'C:/stream_videos/')
+            pending_folder = os.path.join(video_folder, 'pending')
+            
+            # Get complete files currently in pending folder
+            new_complete_files = self.playlist_manager.get_complete_video_files(pending_folder)
+            
+            # Get files already in temp_playback (to identify truly new ones)
+            temp_files = []
+            if os.path.exists(self._temp_playback_folder):
+                temp_files = [f for f in os.listdir(self._temp_playback_folder) 
+                             if os.path.isfile(os.path.join(self._temp_playback_folder, f))]
+            
+            # Find files that aren't already in temp_playback
+            new_files = [f for f in new_complete_files if f not in temp_files]
+            
+            if new_files:
+                logger.info(f"Found {len(new_files)} new completed files in pending folder")
+                
+                # Move new files to temp_playback
+                if self.playlist_manager.move_files_to_folder(pending_folder, self._temp_playback_folder, new_files):
+                    logger.info(f"Moved {len(new_files)} new files to temp_playback")
+                    
+                    # Update OBS VLC source to refresh playlist
+                    if not self.obs_controller or not self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, self._temp_playback_folder):
+                        logger.warning("Failed to refresh VLC source after moving new files")
+                else:
+                    logger.error("Failed to move new files to temp_playback folder")
+            
+            # Check if pending folder is now empty (all files downloaded)
+            remaining_files = self.playlist_manager.get_complete_video_files(pending_folder)
+            pending_empty = len(remaining_files) == 0
+            
+            # Also check if there are still .part files (incomplete downloads)
+            pending_has_incomplete = False
+            if os.path.exists(pending_folder):
+                for item in os.listdir(pending_folder):
+                    if item.endswith('.part'):
+                        pending_has_incomplete = True
+                        break
+            
+            if pending_empty and not pending_has_incomplete:
+                logger.info("Pending folder download complete, exiting temp playback")
+                await self._exit_temp_playback()
+                
+        except Exception as e:
+            logger.error(f"Error monitoring temp playback: {e}")
+
+    async def _exit_temp_playback(self) -> None:
+        """Exit temp playback mode and merge temp + pending folders into live.
+        
+        Switch back to normal rotation playback from temp_playback folder.
+        """
+        logger.info("===== TEMP PLAYBACK EXIT =====")
+        
+        try:
+            settings = self.config_manager.get_settings()
+            video_folder = settings.get('video_folder', 'C:/stream_videos/')
+            
+            # Switch to content-switch scene for merge operation
+            if not self.obs_controller or not self.obs_controller.switch_scene('content-switch'):
+                logger.error("Failed to switch to content-switch scene for temp playback exit")
+                return
+            
+            await asyncio.sleep(1.5)
+            
+            pending_folder = os.path.join(video_folder, 'pending')
+            live_folder = os.path.join(video_folder, 'live')
+            
+            # Get files from both temp and pending folders
+            temp_files = []
+            pending_files = []
+            
+            if os.path.exists(self._temp_playback_folder):
+                temp_files = [f for f in os.listdir(self._temp_playback_folder)
+                             if os.path.isfile(os.path.join(self._temp_playback_folder, f))]
+            
+            if os.path.exists(pending_folder):
+                pending_files = [f for f in os.listdir(pending_folder)
+                               if os.path.isfile(os.path.join(pending_folder, f))]
+            
+            logger.info(f"Merging temp_playback ({len(temp_files)} files) + pending ({len(pending_files)} files) → live")
+            
+            # Merge temp and pending into live folder
+            source_folders = []
+            if temp_files:
+                source_folders.append(self._temp_playback_folder)
+            if pending_files:
+                source_folders.append(pending_folder)
+            
+            if source_folders:
+                if not self.playlist_manager.merge_folders_to_destination(source_folders, live_folder):
+                    logger.error("Failed to merge folders during temp playback exit")
+                    return
+            else:
+                logger.warning("No files found to merge during temp playback exit")
+            
+            # Update OBS to stream from live folder
+            await asyncio.sleep(0.5)
+            if not self.obs_controller or not self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, live_folder):
+                logger.error("Failed to update VLC source to live folder")
+                return
+            
+            # Switch back to Stream scene
+            await asyncio.sleep(0.5)
+            if not self.obs_controller or not self.obs_controller.switch_scene('Stream'):
+                logger.error("Failed to switch back to Stream scene after temp playback exit")
+                return
+            
+            # Clean up temp_playback folder
+            try:
+                if os.path.exists(self._temp_playback_folder):
+                    shutil.rmtree(self._temp_playback_folder)
+                    logger.info("Cleaned up temp_playback folder")
+            except Exception as cleanup_error:
+                logger.error(f"Failed to clean up temp_playback folder: {cleanup_error}")
+            
+            # Clear temp playback state
+            self._temp_playback_active = False
+            
+            # Update skip detector to track files back in live folder
+            if self.playback_skip_detector:
+                live_folder = os.path.join(video_folder, 'live')
+                self.playback_skip_detector.video_folder = live_folder
+                logger.info(f"Updated skip detector to track live folder")
+            
+            logger.info("Temp playback successfully exited, resuming normal rotation cycle")
+            
+        except Exception as e:
+            logger.error(f"Error during temp playback exit: {e}")
+            try:
+                await asyncio.sleep(0.5)
+                if self.obs_controller:
+                    self.obs_controller.switch_scene('Stream')
+            except Exception as scene_error:
+                logger.error(f"Failed to recover scene after temp playback exit error: {scene_error}")
 
     async def _handle_normal_rotation(self):
         """Handle normal rotation completion."""
@@ -1136,6 +1388,13 @@ class AutomationController:
                 # Handle rotation check delay after override restoration
                 if self._skip_rotation_check_delay > 0:
                     self._skip_rotation_check_delay -= 1
+                
+                # Monitor temp playback for new files
+                if self._temp_playback_active:
+                    current_time = time.time()
+                    if current_time - self._last_temp_folder_check >= 2.0:  # Check every 2 seconds
+                        await self._monitor_temp_playback()
+                        self._last_temp_folder_check = current_time
                 
                 # Only check for rotation if not in skip delay period
                 if self._skip_rotation_check_delay == 0:
