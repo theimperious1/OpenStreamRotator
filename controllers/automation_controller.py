@@ -645,7 +645,10 @@ class AutomationController:
         should_rotate = False
         
         if self.playback_skip_detector is not None and self.playback_skip_detector._all_content_consumed:
-            should_rotate = self.next_prepared_playlists or has_pending_content or has_suspended_session
+            # Only rotate on pending content if no background download is in progress
+            # This prevents triggering rotation mid-download and auto-selecting same playlists
+            pending_content_ready = has_pending_content and not self._background_download_in_progress
+            should_rotate = self.next_prepared_playlists or pending_content_ready or has_suspended_session
         
         if should_rotate:
             if self.next_prepared_playlists:
