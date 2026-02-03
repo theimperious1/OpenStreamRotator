@@ -2,7 +2,6 @@ import os
 import json
 import shutil
 import logging
-from datetime import datetime
 from typing import Dict, Optional, List
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
@@ -200,3 +199,111 @@ class OverrideHandler:
         """Clear override after it's been processed."""
         self.config.clear_override()
         logger.info("Manual override cleared")
+
+    def queue_override_preparation(self, selected_playlists: List[str]) -> Dict:
+        """
+        Queue override preparation for background async download.
+        This is the Phase 3 Queue Phase - non-blocking, returns immediately.
+        
+        Returns:
+            Dictionary with override prep data needed by background thread and commit phase
+        """
+        logger.info(f"Queueing override preparation for: {selected_playlists}")
+        
+        # Get backup folder paths
+        settings = self.config.get_settings()
+        base_path = os.path.dirname(settings.get('video_folder', 'C:/stream_videos/'))
+        
+        # Create override temp download folder (separate from pending folder)
+        override_pending_folder = os.path.normpath(os.path.join(base_path, 'temp_override_pending'))
+        os.makedirs(override_pending_folder, exist_ok=True)
+        
+        prep_data = {
+            'selected_playlists': selected_playlists,
+            'override_pending_folder': override_pending_folder,
+            'ready': False  # Background thread will set to True when complete
+        }
+        
+        logger.info(f"Override prep queued - will download to: {override_pending_folder}")
+        return prep_data
+
+    def commit_override_preparation(self, current_session_id: Optional[int],
+                                    next_prepared_playlists: Optional[List],
+                                    override_prep_data: Dict,
+                                    override: Dict) -> bool:
+        """
+        Commit override preparation after background download completes.
+        This is the Phase 3 Commit Phase - happens only when safe.
+        
+        Performs:
+        1. Backup current live folder
+        2. Swap pending folders: current pending -> backup, override pending -> pending
+        3. Suspend session
+        
+        Args:
+            current_session_id: ID of current session
+            next_prepared_playlists: Pre-selected playlists (if any)
+            override_prep_data: Data from queue phase with override_pending_folder
+            override: Override configuration
+            
+        Returns:
+            True if commit successful, False otherwise
+        """
+        try:
+            logger.info("Committing override preparation (swapping pending folders)")
+            
+            settings = self.config.get_settings()
+            base_path = os.path.dirname(settings.get('video_folder', 'C:/stream_videos/'))
+            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            
+            # Backup current pending folder (if it has content)
+            pending_backup_folder = os.path.normpath(os.path.join(base_path, 'temp_pending_backup'))
+            if os.path.exists(next_folder) and os.listdir(next_folder):
+                logger.info(f"Backing up current pending folder: {next_folder} → {pending_backup_folder}")
+                os.makedirs(pending_backup_folder, exist_ok=True)
+                for filename in os.listdir(next_folder):
+                    src = os.path.join(next_folder, filename)
+                    dst = os.path.join(pending_backup_folder, filename)
+                    try:
+                        shutil.move(src, dst)
+                        logger.info(f"Backed up pending: {filename}")
+                    except Exception as e:
+                        logger.error(f"Error backing up {src}: {e}")
+                        return False
+            
+            # Move override pending into active pending folder
+            override_pending_folder = override_prep_data.get('override_pending_folder')
+            if override_pending_folder and os.path.exists(override_pending_folder):
+                logger.info(f"Moving override content to pending: {override_pending_folder} → {next_folder}")
+                os.makedirs(next_folder, exist_ok=True)
+                for filename in os.listdir(override_pending_folder):
+                    src = os.path.join(override_pending_folder, filename)
+                    dst = os.path.join(next_folder, filename)
+                    try:
+                        shutil.move(src, dst)
+                        logger.info(f"Moved override pending: {filename}")
+                    except Exception as e:
+                        logger.error(f"Error moving override pending {src}: {e}")
+                        return False
+                
+                # Clean up empty override pending folder
+                try:
+                    os.rmdir(override_pending_folder)
+                except Exception as e:
+                    logger.warning(f"Could not remove override pending folder: {e}")
+            
+            # Now that folders are swapped, suspend the session
+            if current_session_id:
+                self.suspend_current_session(
+                    current_session_id, next_prepared_playlists, 
+                    False,  # download_in_progress = False (we're past download now)
+                    override
+                )
+            
+            logger.info("Override preparation commit successful")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error committing override preparation: {e}")
+            return False
+

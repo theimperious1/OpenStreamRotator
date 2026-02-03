@@ -38,6 +38,10 @@ class RotationHandler:
         self.playback_tracker = playback_tracker
         
         self._rotation_duration_reached_logged = False
+        
+        # Validation failure tracking for hybrid exclusion approach
+        # Maps filename -> {failure_count, first_failure_time}
+        self._validation_failures: dict = {}
 
     def set_playback_skip_detector(self, detector: Optional[PlaybackSkipDetector]):
         """Update the skip detector reference (called after detector is initialized)."""
@@ -258,7 +262,51 @@ class RotationHandler:
             
             logger.info(f"Prepared rotation restore complete. Restored playlists: {[p['name'] for p in restored_playlists]}")
             return True, restored_playlists
-            
+        
         except Exception as e:
             logger.error(f"Failed to restore prepared rotation: {e}")
             return False, []
+        
+    def track_validation_failure(self, filename: str) -> Tuple[bool, str]:
+        """
+        Track video validation failures using hybrid approach (attempt count + time).
+        Excludes file after 3 failures OR 5 minutes old (whichever comes first).
+        
+        Args:
+            filename: Name of file that failed validation
+        
+        Returns:
+            Tuple of (should_exclude: bool, reason: str)
+        """
+        current_time = time.time()
+        
+        if filename not in self._validation_failures:
+            self._validation_failures[filename] = {
+                'failure_count': 1,
+                'first_failure_time': current_time
+            }
+            logger.debug(f"Validation failure tracked (1/3): {filename}")
+            return False, "Attempt 1 of 3"
+        
+        failure_record = self._validation_failures[filename]
+        failure_record['failure_count'] += 1
+        time_since_first = current_time - failure_record['first_failure_time']
+        
+        # Check hybrid conditions: 3 failures OR 5 minutes (300 seconds)
+        if failure_record['failure_count'] >= 3:
+            reason = f"Excluded after {failure_record['failure_count']} validation failures"
+            logger.warning(f"{reason}: {filename}")
+            return True, reason
+        
+        if time_since_first > 300:  # 5 minutes
+            reason = f"Excluded: file validation failing for > 5 minutes"
+            logger.warning(f"{reason}: {filename}")
+            return True, reason
+        
+        logger.debug(f"Validation failure tracked ({failure_record['failure_count']}/3): {filename}")
+        return False, f"Attempt {failure_record['failure_count']} of 3"
+
+    def clear_validation_failures(self):
+        """Clear all validation failure tracking (call at rotation start)."""
+        self._validation_failures.clear()
+        logger.debug("Cleared validation failure tracking for new rotation")

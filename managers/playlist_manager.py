@@ -1,5 +1,4 @@
 import os
-import re
 import logging
 import shutil
 from typing import List, Dict, Optional
@@ -8,7 +7,7 @@ from config.config_manager import ConfigManager
 from core.video_registration_queue import VideoRegistrationQueue
 from utils.playlist_selector import PlaylistSelector
 from utils.video_downloader import VideoDownloader
-from utils.video_processor import VideoProcessor
+import re
 
 logger = logging.getLogger(__name__)
 

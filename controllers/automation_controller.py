@@ -118,6 +118,12 @@ class AutomationController:
         # Background download state (thread-safe communication from background thread)
         self._pending_db_playlists_to_initialize = None  # Playlists to initialize in DB
         self._pending_db_playlists_to_complete = None    # Playlists to mark as COMPLETED in DB
+        
+        # Override preparation async coordination (Phase 1: New flags)
+        self._override_preparation_pending = False  # Override queued, background prep running
+        self._override_prep_ready = False  # Background prep completed, ready for commit
+        self._override_prep_data = {}  # Data from queue phase (override_pending_folder path, etc)
+        self._background_download_in_progress = False  # Normal rotation download active
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -512,6 +518,9 @@ class AutomationController:
         except Exception as e:
             logger.error(f"Background download error: {e}")
             self.notification_service.notify_background_download_error(str(e))
+        finally:
+            # Clear flag when download completes (success or failure)
+            self._background_download_in_progress = False
 
     def _process_video_registration_queue(self):
         """Process pending videos from background download registration queue.
@@ -553,8 +562,6 @@ class AutomationController:
         
         if registered_count > 0:
             logger.info(f"Registered {registered_count} queued videos from background download, total: {total_duration}s")
-            # Background download thread has finished, reset the flag
-            self.download_in_progress = False
 
     def _process_pending_database_operations(self):
         """Process database operations queued by background download thread.
@@ -613,6 +620,7 @@ class AutomationController:
             if playlists:
                 self._downloads_triggered_this_rotation = True
                 self.download_in_progress = True
+                self._background_download_in_progress = True  # Phase 2: Set flag when download starts
                 loop = asyncio.get_event_loop()
                 loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, playlists)
                 logger.debug("Download triggered (pending folder empty)")
@@ -802,9 +810,58 @@ class AutomationController:
             await self.execute_content_switch()
 
     async def check_manual_override(self) -> bool:
-        """Check for and process manual overrides."""
+        """
+        Check for and process manual overrides.
+        
+        Uses two-phase approach:
+        Phase 1 (Queue): Validate and queue override for background download - returns immediately
+        Phase 2 (Commit): Wait for background download + rotation download idle, then commit - blocks until safe
+        """
         assert self.override_handler is not None, "Override handler not initialized"
         
+        # Phase 2: Check if override prep is ready to commit
+        if self._override_prep_ready and not self._background_download_in_progress:
+            logger.info("Override preparation ready and rotation downloads idle - committing override")
+            
+            # Get the override data
+            override = self.override_handler.get_active_override()
+            if override:
+                # Commit the override (swap pending folders, suspend session)
+                commit_success = self.override_handler.commit_override_preparation(
+                    self.current_session_id,
+                    self.next_prepared_playlists,
+                    self._override_prep_data,
+                    override
+                )
+                
+                if commit_success:
+                    # Clear prepared playlists since we're doing override
+                    self.next_prepared_playlists = None
+                    self.download_in_progress = True  # Still downloading override content
+                    
+                    # Start override rotation
+                    settings = self.config_manager.get_settings()
+                    next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+                    selected = override.get('selected_playlists', [])
+                    
+                    if self.override_handler.start_override_rotation(selected, next_folder):
+                        if self.start_rotation_session(manual_playlists=selected):
+                            await self.execute_content_switch()
+                    
+                    self.download_in_progress = False
+                    self._override_prep_ready = False
+                    self._override_preparation_pending = False
+                    self.override_handler.clear_override()
+                    return True
+                else:
+                    logger.error("Override preparation commit failed")
+                    self._override_prep_ready = False
+                    self._override_preparation_pending = False
+                    return False
+            
+            return False
+        
+        # Phase 1: Check if new override triggered
         if not self.override_handler.check_override_triggered():
             return False
 
@@ -827,10 +884,9 @@ class AutomationController:
             self.override_handler.clear_override()
             return False
 
-        logger.info("Manual override triggered")
+        logger.info("Manual override triggered - queuing preparation phase")
         
         settings = self.config_manager.get_settings()
-        next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
         current_folder = settings.get('video_folder', 'C:/stream_videos/')
 
         # Check if we're already in an override (there's a suspended original session)
@@ -867,28 +923,53 @@ class AutomationController:
             session_to_suspend = suspended_session['id']
             logger.info(f"New override will return to original session {session_to_suspend}")
         
-        # Backup prepared rotation (only if we're not replacing an override)
-        self.override_handler.backup_prepared_rotation(next_folder)
+        # PHASE 1: QUEUE - Queue preparation for background async download
+        self._override_preparation_pending = True
+        self._override_prep_ready = False
+        self._override_prep_data = self.override_handler.queue_override_preparation(selected)
+        
+        # Queue the override download to happen in background thread
+        # (reuse the rotation download mechanism to download override playlists to temp folder)
+        logger.info("Queuing override content download to background thread...")
+        
+        # Get playlist objects for download
+        override_playlists = selected_playlist_objs
+        
+        # Download to the temp override folder instead of normal pending folder
+        override_pending_folder = self._override_prep_data.get('override_pending_folder')
+        
+        self._background_download_in_progress = True
+        loop = asyncio.get_event_loop()
+        
+        # Create a wrapper that downloads to override temp folder
+        def download_override_content():
+            try:
+                logger.info(f"Background override download starting: {selected}")
+                settings = self.config_manager.get_settings()
+                verbose_download = settings.get('yt_dlp_verbose', False)
+                
+                download_result = self.playlist_manager.download_playlists(
+                    override_playlists, override_pending_folder, verbose=verbose_download
+                )
+                
+                if download_result.get('success'):
+                    logger.info(f"Override download completed: {selected}")
+                    self._override_prep_ready = True
+                else:
+                    logger.warning("Override download had failures")
+                    self.notification_service.notify_background_download_warning()
+            except Exception as e:
+                logger.error(f"Override download error: {e}")
+                self.notification_service.notify_background_download_error(str(e))
+            finally:
+                self._background_download_in_progress = False
+        
+        loop.run_in_executor(self.executor, download_override_content)
+        
+        # Don't block - return immediately, commit will happen in future main loop iteration
+        # when background download completes AND rotation downloads are idle
+        return False  # Return False because we haven't completed the override yet
 
-        # Suspend current session (or the original if we're replacing an override)
-        if session_to_suspend:
-            self.override_handler.suspend_current_session(
-                session_to_suspend, self.next_prepared_playlists,
-                self.download_in_progress, override
-            )
-
-        # Clear prepared and block further background downloads
-        self.next_prepared_playlists = None
-        self.download_in_progress = True
-
-        # Start override rotation
-        if self.override_handler.start_override_rotation(selected, next_folder):
-            if self.start_rotation_session(manual_playlists=selected):
-                await self.execute_content_switch()
-
-        self.download_in_progress = False
-        self.override_handler.clear_override()
-        return True
 
     async def run(self):
         """Main automation loop."""

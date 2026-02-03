@@ -1,7 +1,7 @@
 """Thread-safe queue for video registration from background downloads."""
 import queue
 import logging
-from typing import Dict, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 

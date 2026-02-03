@@ -57,7 +57,7 @@ class VideoProcessor:
             return 0
         except subprocess.TimeoutExpired:
             logger.warning(f"Timeout getting duration for: {file_path}")
-            if proc and proc.poll() is None:  # Check if proc exists and is still running
+            if proc and proc.poll() is None:
                 proc.kill()
             return 0
         except FileNotFoundError:
@@ -66,6 +66,68 @@ class VideoProcessor:
         except Exception as e:
             logger.warning(f"Error getting duration for {file_path}: {e}")
             return 0
+
+    @staticmethod
+    def has_valid_video_stream(file_path: str) -> bool:
+        """
+        Validate that a video file has a complete video stream (not still being post-processed).
+        Uses ffprobe to check for a video codec in the file streams.
+        
+        Args:
+            file_path: Path to video file
+        
+        Returns:
+            True if file has a valid video codec, False if incomplete or corrupted
+        """
+        proc = None
+        try:
+            cmd = [
+                'ffprobe',
+                '-v', 'error',
+                '-show_entries', 'stream=codec_type,codec_name',
+                '-of', 'json',
+                file_path
+            ]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            _running_processes.append(proc)
+            
+            try:
+                stdout, stderr = proc.communicate(timeout=30)
+                result_returncode = proc.returncode
+            finally:
+                if proc in _running_processes:
+                    _running_processes.remove(proc)
+            
+            if result_returncode == 0:
+                data = json.loads(stdout)
+                streams = data.get('streams', [])
+                
+                # Check if there's a video stream with a valid codec
+                has_video = any(
+                    stream.get('codec_type') == 'video' and stream.get('codec_name')
+                    for stream in streams
+                )
+                
+                if has_video:
+                    logger.debug(f"Video stream validation passed: {os.path.basename(file_path)}")
+                    return True
+                else:
+                    logger.warning(f"Video stream validation failed (no video codec found): {os.path.basename(file_path)}")
+                    return False
+            else:
+                logger.warning(f"ffprobe stream validation returned {result_returncode} for {os.path.basename(file_path)}")
+                return False
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Timeout validating video stream for: {file_path}")
+            if proc and proc.poll() is None:
+                proc.kill()
+            return False
+        except FileNotFoundError:
+            logger.warning("ffprobe not found. Cannot validate video stream.")
+            return False
+        except Exception as e:
+            logger.warning(f"Error validating video stream for {file_path}: {e}")
+            return False
 
     @staticmethod
     def extract_title_from_filename(filename: str) -> str:
