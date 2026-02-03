@@ -724,3 +724,71 @@ class DatabaseManager:
             return []
         finally:
             self.close()
+    def validate_prepared_playlists_exist(self, session_id: int, pending_folder: str) -> bool:
+        """
+        Verify that all files for prepared playlists (next_playlists) actually exist in pending folder.
+        
+        Args:
+            session_id: Session ID to check
+            pending_folder: Path to pending/next rotation folder
+        
+        Returns:
+            True if all prepared playlist files exist, False otherwise
+        """
+        import os
+        import json
+        
+        conn = self.connect()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                SELECT next_playlists FROM rotation_sessions 
+                WHERE id = ?
+            """, (session_id,))
+            
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                # No prepared playlists, nothing to validate
+                return True
+            
+            next_playlists_json = row[0]
+            try:
+                next_playlists = json.loads(next_playlists_json) if isinstance(next_playlists_json, str) else next_playlists_json
+            except json.JSONDecodeError:
+                logger.warning("Could not parse next_playlists JSON")
+                return False
+            
+            # Get all video files for these playlists
+            # video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
+            expected_files = set()
+            
+            for playlist_name in next_playlists:
+                cursor.execute("""
+                    SELECT filename FROM videos 
+                    WHERE playlist_name = ?
+                """, (playlist_name,))
+                
+                for row in cursor.fetchall():
+                    expected_files.add(row[0])
+            
+            # Check if all files exist in pending folder
+            if not os.path.exists(pending_folder):
+                logger.warning(f"Pending folder does not exist: {pending_folder}")
+                return False
+            
+            actual_files = set(os.listdir(pending_folder))
+            
+            missing_files = expected_files - actual_files
+            if missing_files:
+                logger.warning(f"Prepared playlist files missing from pending folder: {list(missing_files)[:5]}")
+                return False
+            
+            logger.info(f"Validated {len(expected_files)} prepared playlist files exist in pending folder")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error validating prepared playlists: {e}")
+            return False
+        finally:
+            self.close()

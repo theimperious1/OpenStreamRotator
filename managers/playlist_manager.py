@@ -89,7 +89,7 @@ class PlaylistManager:
     def extract_playlists_from_folder(self, folder: str) -> List[str]:
         """Extract unique playlist names from files in folder."""
         playlists = set()
-        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
+        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
 
         if not os.path.exists(folder):
             return []
@@ -278,7 +278,7 @@ class PlaylistManager:
 
     def validate_downloads(self, folder: str) -> bool:
         """Validate that downloads completed successfully."""
-        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
+        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
 
         if not os.path.exists(folder):
             logger.error(f"Folder does not exist: {folder}")

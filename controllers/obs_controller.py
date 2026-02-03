@@ -55,7 +55,7 @@ class OBSController:
         """
         try:
             import os
-            video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
+            video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
             video_files = []
 
             if os.path.exists(video_folder):

@@ -49,22 +49,37 @@ class PlaylistSelector:
 
     def _get_playlists_in_pipeline(self) -> set:
         """
-        Get playlists that are currently in the pipeline (preparing/downloading).
+        Get playlists that are currently in the pipeline and actually being downloaded.
+        
+        Only returns playlists with COMPLETED status (ready to use).
+        Ignores PENDING playlists as they may be incomplete/corrupted from failed downloads.
         
         Returns:
-            Set of playlist names currently being prepared
+            Set of playlist names currently being prepared (COMPLETED status only)
         """
         try:
             session = self.db.get_current_session()
             if not session:
                 return set()
             
-            # Get next_playlists from current session (what's being prepared)
+            # Get next_playlists and their status from current session
             next_playlists_json = session.get('next_playlists')
-            if next_playlists_json:
-                next_playlist_names = json.loads(next_playlists_json) if isinstance(next_playlists_json, str) else next_playlists_json
-                logger.debug(f"Excluding from selection (currently preparing): {next_playlist_names}")
-                return set(next_playlist_names)
+            next_playlists_status_json = session.get('next_playlists_status')
+            
+            if not next_playlists_json:
+                return set()
+            
+            next_playlist_names = json.loads(next_playlists_json) if isinstance(next_playlists_json, str) else next_playlists_json
+            status_dict = json.loads(next_playlists_status_json) if isinstance(next_playlists_status_json, str) else (next_playlists_status_json or {})
+            
+            # Only exclude playlists that are COMPLETED (ready to use next rotation)
+            # PENDING playlists may be incomplete/corrupted and should be re-downloaded
+            completed_playlists = [pl for pl in next_playlist_names if status_dict.get(pl) == "COMPLETED"]
+            
+            if completed_playlists:
+                logger.debug(f"Excluding from selection (prepared and ready): {completed_playlists}")
+            
+            return set(completed_playlists)
         except (json.JSONDecodeError, TypeError, KeyError) as e:
             logger.debug(f"Could not parse in-pipeline playlists: {e}")
         
@@ -154,6 +169,11 @@ class PlaylistSelector:
         # Calculate how many shorts we can add
         num_shorts_to_select = num_to_select - num_long_to_select
         num_shorts_to_select = min(num_shorts_to_select, len(shorts_playlists))
+        
+        # If we don't have enough shorts, add more long playlists to reach minimum
+        if num_shorts_to_select == 0 and num_long_to_select < num_to_select:
+            # No shorts available, use more long playlists
+            num_long_to_select = min(len(long_playlists), num_to_select)
         
         # Select from each group (sorted by last_played and priority)
         selected_long = long_playlists[:num_long_to_select]

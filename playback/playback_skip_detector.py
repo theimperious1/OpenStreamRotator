@@ -124,7 +124,7 @@ class PlaybackSkipDetector:
         if not self.video_folder or not os.path.exists(self.video_folder):
             return []
         
-        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
+        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
         video_files = []
         
         try:

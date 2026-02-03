@@ -1041,13 +1041,22 @@ class AutomationController:
                         all_completed = all(status_dict.get(pl) == "COMPLETED" for pl in playlist_list)
                         
                         if all_completed:
-                            # Fetch playlist objects from database with IDs (needed for start_rotation_session)
-                            playlist_objects = self.db.get_playlists_with_ids_by_names(playlist_list)
-                            if playlist_objects:
-                                self.next_prepared_playlists = playlist_objects
-                                logger.info(f"Restored prepared playlists from database: {playlist_list}")
+                            # Validate that prepared playlist files actually exist in pending folder
+                            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+                            files_exist = self.db.validate_prepared_playlists_exist(session['id'], next_folder)
+                            
+                            if files_exist:
+                                # Fetch playlist objects from database with IDs (needed for start_rotation_session)
+                                playlist_objects = self.db.get_playlists_with_ids_by_names(playlist_list)
+                                if playlist_objects:
+                                    self.next_prepared_playlists = playlist_objects
+                                    logger.info(f"Restored prepared playlists from database: {playlist_list}")
+                                else:
+                                    logger.warning(f"Could not fetch playlist objects for: {playlist_list}")
                             else:
-                                logger.warning(f"Could not fetch playlist objects for: {playlist_list}")
+                                # Files don't exist in pending folder, clear prepared playlists
+                                logger.warning(f"Prepared playlist files missing from pending folder, clearing and will download fresh on next rotation: {playlist_list}")
+                                self.db.set_next_playlists(session['id'], [])
                         else:
                             logger.info(f"Prepared playlists not fully downloaded, will download on next trigger: {status_dict}")
                     except Exception as e:

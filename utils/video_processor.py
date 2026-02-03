@@ -155,7 +155,7 @@ class VideoProcessor:
     @staticmethod
     def get_supported_extensions() -> tuple:
         """Get tuple of supported video extensions."""
-        return ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
+        return ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
 
     @staticmethod
     def is_video_file(filename: str) -> bool:
