@@ -308,7 +308,6 @@ class ContentSwitchHandler:
             try:
                 if category:  # Only create task if category is valid
                     # Throttle category updates to prevent spam (only allow one per 3 seconds)
-                    import time
                     current_time = time.time()
                     if current_time - self._last_category_update_time >= 3:
                         asyncio.create_task(stream_manager.update_stream_info(None, category))  # Only update category, not title
