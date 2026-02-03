@@ -116,6 +116,10 @@ class PlaylistSelector:
 
         all_playlists = self.db.get_enabled_playlists()
         
+        # Create a lookup map of is_short flag from config
+        config_playlists = self.config.get_playlists()
+        is_short_map = {p['name']: p.get('is_short', False) for p in config_playlists}
+        
         # Filter to only include playlists in config AND not currently preparing
         all_playlists = [p for p in all_playlists 
                         if p['name'] in allowed_names 
@@ -125,9 +129,9 @@ class PlaylistSelector:
             logger.error("No eligible playlists available! (all in preparation or disabled)")
             return []
 
-        # Separate playlists into long-form and shorts
-        long_playlists = [p for p in all_playlists if not p.get('is_short', False)]
-        shorts_playlists = [p for p in all_playlists if p.get('is_short', False)]
+        # Separate playlists into long-form and shorts (using is_short flag from config)
+        long_playlists = [p for p in all_playlists if not is_short_map.get(p['name'], False)]
+        shorts_playlists = [p for p in all_playlists if is_short_map.get(p['name'], False)]
         
         logger.debug(f"Available long playlists: {[p['name'] for p in long_playlists]}")
         logger.debug(f"Available shorts playlists: {[p['name'] for p in shorts_playlists]}")
