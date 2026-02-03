@@ -103,14 +103,15 @@ class VideoDownloader:
                     'no_warnings': not verbose,
                     'extract_flat': False,  # Extract video URLs
                     'fragment_retries': 3,
-                    'http_chunk_size': 10485760,  # 10MB chunks
+                    'concurrent_fragment_downloads': 8,  # Download 8 fragments in parallel
+                    'http_chunk_size': 52428800,  # 50MB chunks
                     'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
                     # Request throttling to avoid YouTube IP-based blocking
                     'socket_timeout': 30,
                     'sleep_interval': 2,  # Sleep 2 seconds between requests
                     'max_sleep_interval': 5,  # Randomize sleep up to 5 seconds
                     'sleep_interval_requests': 1,  # Sleep after every request
-                    'ratelimit': 5000000,  # 5MB/s rate limit to appear human
+                    # 'ratelimit': 5000000,  # 5MB/s rate limit - commented out for faster downloads
                     'extractor_args': {
                         'youtube': {
                             # Use ios_downgraded to avoid YouTube's aggressive IP-based blocking
