@@ -109,7 +109,21 @@ class AutomationController:
         self._seek_retry_count = 0
         self._last_playback_save_time = 0
         self._rotation_postpone_logged = False
+        self._downloads_triggered_this_rotation = False  # Track if downloads already triggered after rotation
+        self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
+        self._skip_detector_init_delay = 0  # Delay skip detector initialization after override to let VLC reload
+        self._skip_rotation_check_delay = 0  # Delay rotation checks after override restoration to let VLC stabilize
         self.shutdown_event = False
+        
+        # Background download state (thread-safe communication from background thread)
+        self._pending_db_playlists_to_initialize = None  # Playlists to initialize in DB
+        self._pending_db_playlists_to_complete = None    # Playlists to mark as COMPLETED in DB
+        
+        # Override preparation async coordination (Phase 1: New flags)
+        self._override_preparation_pending = False  # Override queued, background prep running
+        self._override_prep_ready = False  # Background prep completed, ready for commit
+        self._override_prep_data = {}  # Data from queue phase (override_pending_folder path, etc)
+        self._background_download_in_progress = False  # Normal rotation download active
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -120,6 +134,22 @@ class AutomationController:
         kill_processor_processes()
         logger.info("Cleanup complete. Setting shutdown flag...")
         self.shutdown_event = True
+
+    def _is_pending_folder_empty(self) -> bool:
+        """Check if the pending folder is empty or doesn't exist."""
+        try:
+            settings = self.config_manager.get_settings()
+            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_pending/')
+            
+            if not os.path.exists(pending_folder):
+                return True
+            
+            # Check if folder is empty (excluding hidden files)
+            items = [f for f in os.listdir(pending_folder) if not f.startswith('.')]
+            return len(items) == 0
+        except Exception as e:
+            logger.warning(f"Error checking pending folder: {e}")
+            return False  # Conservative: assume not empty if we can't check
 
     def _initialize_handlers(self):
         """Initialize all handler objects after OBS and services are ready."""
@@ -234,6 +264,7 @@ class AutomationController:
     def start_rotation_session(self, manual_playlists=None) -> bool:
         """Start a new rotation session."""
         assert self.rotation_handler is not None, "Rotation handler not initialized"
+        
         logger.info("Starting new rotation session...")
         self.rotation_handler.reset_rotation_log_flag()
 
@@ -323,7 +354,7 @@ class AutomationController:
         if not self.obs_controller:
             logger.error("OBS controller not initialized")
             return False
-        
+
         logger.info(f"Executing content switch (override_resumption={is_override_resumption})")
         self.is_rotating = True
 
@@ -368,7 +399,23 @@ class AutomationController:
                 self.is_rotating = False
                 return False
 
-            # Update stream metadata
+            # Mark playlists as played
+            try:
+                session = self.db.get_current_session()
+                if session:
+                    self.content_switch_handler.mark_playlists_as_played(session.get('id'))
+            except Exception as e:
+                logger.warning(f"Failed to mark playlists as played: {e}")
+
+            # Initialize skip detector
+            # This will handle category updates on the first video transition
+            self._initialize_skip_detector()
+            
+            # Update category for the currently playing first video
+            if self.playback_skip_detector:
+                self.playback_skip_detector._update_category_for_current_video()
+            
+            # Update stream title and category
             try:
                 session = self.db.get_current_session()
                 if session:
@@ -384,14 +431,8 @@ class AutomationController:
                     
                     await self.stream_manager.update_stream_info(stream_title, category)
                     logger.info(f"Updated stream: title='{stream_title}', category='{category}'")
-                    
-                    # Mark playlists as played
-                    self.content_switch_handler.mark_playlists_as_played(session.get('id'))
             except Exception as e:
                 logger.warning(f"Failed to update stream metadata: {e}")
-
-            # Initialize skip detector
-            self._initialize_skip_detector()
 
             self.is_rotating = False
             self.override_already_cleaned = False
@@ -413,7 +454,8 @@ class AutomationController:
         
         if self.playback_skip_detector is None:
             self.playback_skip_detector = PlaybackSkipDetector(
-                self.db, self.obs_controller, VLC_SOURCE_NAME, video_folder
+                self.db, self.obs_controller, VLC_SOURCE_NAME, video_folder,
+                self.content_switch_handler, self.stream_manager
             )
             # Update rotation handler's reference to the newly created detector
             assert self.rotation_handler is not None, "Rotation handler must be initialized"
@@ -443,11 +485,19 @@ class AutomationController:
         )
 
     def _sync_background_download_next_rotation(self, playlists):
-        """Synchronous wrapper for executor."""
+        """Synchronous wrapper for executor.
+        
+        NOTE: This runs in a background thread and must NOT call database methods directly
+        due to SQLite's thread safety requirements. Instead, set flags that the main thread
+        will process.
+        """
         try:
             logger.info(f"Downloading next rotation in thread: {[p['name'] for p in playlists]}")
             settings = self.config_manager.get_settings()
             next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            
+            # Queue database initialization to be done in main thread
+            self._pending_db_playlists_to_initialize = [p['name'] for p in playlists]
             
             # Check for verbose yt-dlp logging
             verbose_download = settings.get('yt_dlp_verbose', False)
@@ -457,6 +507,10 @@ class AutomationController:
             if download_result.get('success'):
                 self.next_prepared_playlists = playlists
                 logger.info(f"Background download completed: {[p['name'] for p in playlists]}")
+                
+                # Queue database status update to be done in main thread
+                self._pending_db_playlists_to_complete = [p['name'] for p in playlists]
+                
                 self.notification_service.notify_next_rotation_ready([p['name'] for p in playlists])
             else:
                 logger.warning("Background download had failures")
@@ -464,6 +518,9 @@ class AutomationController:
         except Exception as e:
             logger.error(f"Background download error: {e}")
             self.notification_service.notify_background_download_error(str(e))
+        finally:
+            # Clear flag when download completes (success or failure)
+            self._background_download_in_progress = False
 
     def _process_video_registration_queue(self):
         """Process pending videos from background download registration queue.
@@ -505,8 +562,23 @@ class AutomationController:
         
         if registered_count > 0:
             logger.info(f"Registered {registered_count} queued videos from background download, total: {total_duration}s")
-            # Background download thread has finished, reset the flag
-            self.download_in_progress = False
+
+    def _process_pending_database_operations(self):
+        """Process database operations queued by background download thread.
+        
+        This method runs in the main thread and safely applies database changes
+        that were set as flags by the background download thread (which cannot
+        directly access the database due to SQLite thread safety).
+        """
+        # Initialize next_playlists if background thread queued it
+        if self._pending_db_playlists_to_initialize is not None and self.current_session_id:
+            self.db.initialize_next_playlists(self.current_session_id, self._pending_db_playlists_to_initialize)
+            self._pending_db_playlists_to_initialize = None
+        
+        # Mark playlists as COMPLETED if background thread queued it
+        if self._pending_db_playlists_to_complete is not None and self.current_session_id:
+            self.db.complete_next_playlists(self.current_session_id, self._pending_db_playlists_to_complete)
+            self._pending_db_playlists_to_complete = None
 
     async def check_for_rotation(self):
         """Check if rotation is needed and handle it."""
@@ -535,14 +607,67 @@ class AutomationController:
                 except Exception as e:
                     logger.warning(f"Failed to update category on video transition: {e}")
 
-        # Trigger background download
-        playlists = self.rotation_handler.trigger_background_download(
-            self.next_prepared_playlists, self.download_in_progress
-        )
-        if playlists:
-            self.download_in_progress = True
-            loop = asyncio.get_event_loop()
-            loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, playlists)
+        # Trigger background download only if pending folder is empty and not already triggered
+        # Skip on first loop after resume to avoid downloading when resuming into existing rotation
+        if (not self._downloads_triggered_this_rotation and 
+            self._is_pending_folder_empty() and 
+            not self.download_in_progress and
+            not self._just_resumed_session):
+            
+            playlists = self.rotation_handler.trigger_background_download(
+                self.next_prepared_playlists, self.download_in_progress
+            )
+            if playlists:
+                self._downloads_triggered_this_rotation = True
+                self.download_in_progress = True
+                self._background_download_in_progress = True  # Phase 2: Set flag when download starts
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, playlists)
+                logger.debug("Download triggered (pending folder empty)")
+        """ else:
+            if not self._is_pending_folder_empty():
+                logger.debug("Pending folder not empty, deferring downloads")
+            if self.download_in_progress:
+                logger.debug("Download already in progress")
+            elif self._just_resumed_session:
+                logger.debug("Just resumed session, skipping initial download trigger")
+        """
+        
+        # Clear the resume flag after first loop iteration
+        if self._just_resumed_session:
+            self._just_resumed_session = False
+
+        # Check if all content is consumed and prepared playlists are ready for immediate rotation
+        # Also trigger rotation if there's pending content even if prepared_playlists flag is empty (covers restart scenario)
+        # Also trigger rotation if there's a suspended session waiting to be restored (override completion)
+        has_pending_content = not self._is_pending_folder_empty()
+        has_suspended_session = self.db.get_suspended_session() is not None
+        should_rotate = False
+        
+        if self.playback_skip_detector is not None and self.playback_skip_detector._all_content_consumed:
+            should_rotate = self.next_prepared_playlists or has_pending_content or has_suspended_session
+        
+        if should_rotate:
+            if self.next_prepared_playlists:
+                logger.info("All content consumed and prepared playlists ready - triggering immediate rotation")
+            elif has_suspended_session:
+                logger.info("All content consumed and suspended session exists - triggering override completion/restoration")
+            else:
+                logger.info("All content consumed and pending content exists - triggering rotation (prepared from previous run)")
+            
+            total_seconds, has_suspended = self.rotation_handler.get_rotation_completion_info(session)
+            self.rotation_handler.log_rotation_completion(total_seconds)
+            
+            # Reset flag before handling rotation
+            assert self.playback_skip_detector is not None, "playback_skip_detector must be initialized"
+            self.playback_skip_detector._all_content_consumed = False
+            
+            # Handle rotation immediately
+            if has_suspended:
+                await self._handle_override_completion(session)
+            else:
+                await self._handle_normal_rotation()
+            return
 
         # Check rotation duration
         if not self.rotation_handler.check_rotation_duration(session):
@@ -627,7 +752,13 @@ class AutomationController:
             logger.info(f"Switched back to {target_scene} scene after override completion")
         
         self.download_in_progress = False
-        self._initialize_skip_detector()
+        self._downloads_triggered_this_rotation = False  # Reset flag when resuming original rotation
+        
+        # Set delays after override restoration:
+        # 1. _skip_detector_init_delay: Wait for VLC to reload playlist and seek to resume position
+        # 2. _skip_rotation_check_delay: Wait before checking for rotation to prevent premature trigger
+        self._skip_detector_init_delay = 5  # 5 iterations of ~0.5s each = ~2.5 seconds
+        self._skip_rotation_check_delay = 10  # 10 iterations of ~0.5s each = ~5 seconds (longer buffer)
 
     async def _handle_normal_rotation(self):
         """Handle normal rotation completion."""
@@ -639,17 +770,98 @@ class AutomationController:
             return
 
         if self.current_session_id:
+            # Before ending session, get the current playlist info for audit trail
+            session = self.db.get_current_session()
+            current_playlist_names = []
+            
+            if session:
+                try:
+                    import json
+                    playlists_selected = session.get('playlists_selected', '')
+                    if playlists_selected:
+                        playlist_ids = json.loads(playlists_selected)
+                        playlists = self.playlist_manager.get_playlists_by_ids(playlist_ids)
+                        if playlists:
+                            current_playlist_names = [p['name'] for p in playlists]
+                            # Record what was just played
+                            self.db.set_current_playlists(self.current_session_id, current_playlist_names)
+                            logger.info(f"Recorded current playlists: {current_playlist_names}")
+                except Exception as e:
+                    logger.warning(f"Failed to record current playlists: {e}")
+            
             total_seconds = self.playback_tracker.get_total_seconds()
             self.db.update_session_playback(self.current_session_id, total_seconds)
             self.db.end_session(self.current_session_id)
 
         if self.start_rotation_session():
+            # Record the new playlists being prepared
+            try:
+                session = self.db.get_current_session()
+                if session and self.next_prepared_playlists:
+                    next_playlist_names = [p['name'] for p in self.next_prepared_playlists]
+                    self.db.set_next_playlists(session['id'], next_playlist_names)
+                    logger.info(f"Recorded next playlists for session {session['id']}: {next_playlist_names}")
+            except Exception as e:
+                logger.warning(f"Failed to record next playlists: {e}")
+            
+            # Reset download flag when starting new rotation
+            self._downloads_triggered_this_rotation = False
+            self.download_in_progress = False
             await self.execute_content_switch()
 
     async def check_manual_override(self) -> bool:
-        """Check for and process manual overrides."""
+        """
+        Check for and process manual overrides.
+        
+        Uses two-phase approach:
+        Phase 1 (Queue): Validate and queue override for background download - returns immediately
+        Phase 2 (Commit): Wait for background download + rotation download idle, then commit - blocks until safe
+        """
         assert self.override_handler is not None, "Override handler not initialized"
         
+        # Phase 2: Check if override prep is ready to commit
+        if self._override_prep_ready and not self._background_download_in_progress:
+            logger.info("Override preparation ready and rotation downloads idle - committing override")
+            
+            # Get the override data
+            override = self.override_handler.get_active_override()
+            if override:
+                # Commit the override (swap pending folders, suspend session)
+                commit_success = self.override_handler.commit_override_preparation(
+                    self.current_session_id,
+                    self.next_prepared_playlists,
+                    self._override_prep_data,
+                    override
+                )
+                
+                if commit_success:
+                    # Clear prepared playlists since we're doing override
+                    self.next_prepared_playlists = None
+                    self.download_in_progress = True  # Still downloading override content
+                    
+                    # Start override rotation
+                    settings = self.config_manager.get_settings()
+                    next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+                    selected = override.get('selected_playlists', [])
+                    
+                    if self.override_handler.start_override_rotation(selected, next_folder):
+                        if self.start_rotation_session(manual_playlists=selected):
+                            await self.execute_content_switch()
+                    
+                    self.download_in_progress = False
+                    self._override_prep_ready = False
+                    self._override_preparation_pending = False
+                    self.override_handler.clear_override()
+                    return True
+                else:
+                    logger.error("Override preparation commit failed")
+                    self._override_prep_ready = False
+                    self._override_preparation_pending = False
+                    return False
+            
+            return False
+        
+        # Phase 1: Check if new override triggered
         if not self.override_handler.check_override_triggered():
             return False
 
@@ -660,13 +872,21 @@ class AutomationController:
         if not self.override_handler.validate_override(override):
             return False
 
-        logger.info("Manual override triggered")
-        
-        self.override_handler.sync_config_playlists()
-        
+        # VALIDATE SELECTED PLAYLISTS EARLY, BEFORE ANY FILE OPERATIONS
         selected = override.get('selected_playlists', [])
+        self.override_handler.sync_config_playlists()
+        all_playlists = self.db.get_enabled_playlists()
+        selected_playlist_objs = [p for p in all_playlists if p['name'] in selected]
+        
+        if not selected_playlist_objs:
+            logger.error(f"Override playlists invalid or not found in database: {selected}")
+            logger.info("Clearing invalid override without making any changes")
+            self.override_handler.clear_override()
+            return False
+
+        logger.info("Manual override triggered - queuing preparation phase")
+        
         settings = self.config_manager.get_settings()
-        next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
         current_folder = settings.get('video_folder', 'C:/stream_videos/')
 
         # Check if we're already in an override (there's a suspended original session)
@@ -703,28 +923,53 @@ class AutomationController:
             session_to_suspend = suspended_session['id']
             logger.info(f"New override will return to original session {session_to_suspend}")
         
-        # Backup prepared rotation (only if we're not replacing an override)
-        self.override_handler.backup_prepared_rotation(next_folder)
+        # PHASE 1: QUEUE - Queue preparation for background async download
+        self._override_preparation_pending = True
+        self._override_prep_ready = False
+        self._override_prep_data = self.override_handler.queue_override_preparation(selected)
+        
+        # Queue the override download to happen in background thread
+        # (reuse the rotation download mechanism to download override playlists to temp folder)
+        logger.info("Queuing override content download to background thread...")
+        
+        # Get playlist objects for download
+        override_playlists = selected_playlist_objs
+        
+        # Download to the temp override folder instead of normal pending folder
+        override_pending_folder = self._override_prep_data.get('override_pending_folder')
+        
+        self._background_download_in_progress = True
+        loop = asyncio.get_event_loop()
+        
+        # Create a wrapper that downloads to override temp folder
+        def download_override_content():
+            try:
+                logger.info(f"Background override download starting: {selected}")
+                settings = self.config_manager.get_settings()
+                verbose_download = settings.get('yt_dlp_verbose', False)
+                
+                download_result = self.playlist_manager.download_playlists(
+                    override_playlists, override_pending_folder, verbose=verbose_download
+                )
+                
+                if download_result.get('success'):
+                    logger.info(f"Override download completed: {selected}")
+                    self._override_prep_ready = True
+                else:
+                    logger.warning("Override download had failures")
+                    self.notification_service.notify_background_download_warning()
+            except Exception as e:
+                logger.error(f"Override download error: {e}")
+                self.notification_service.notify_background_download_error(str(e))
+            finally:
+                self._background_download_in_progress = False
+        
+        loop.run_in_executor(self.executor, download_override_content)
+        
+        # Don't block - return immediately, commit will happen in future main loop iteration
+        # when background download completes AND rotation downloads are idle
+        return False  # Return False because we haven't completed the override yet
 
-        # Suspend current session (or the original if we're replacing an override)
-        if session_to_suspend:
-            self.override_handler.suspend_current_session(
-                session_to_suspend, self.next_prepared_playlists,
-                self.download_in_progress, override
-            )
-
-        # Clear prepared and block further background downloads
-        self.next_prepared_playlists = None
-        self.download_in_progress = True
-
-        # Start override rotation
-        if self.override_handler.start_override_rotation(selected, next_folder):
-            if self.start_rotation_session(manual_playlists=selected):
-                await self.execute_content_switch()
-
-        self.download_in_progress = False
-        self.override_handler.clear_override()
-        return True
 
     async def run(self):
         """Main automation loop."""
@@ -774,6 +1019,36 @@ class AutomationController:
                 playback_seconds = session.get('playback_seconds', 0)
                 self.playback_tracker.total_playback_seconds = playback_seconds
                 logger.info(f"Resuming session {self.current_session_id}, playback: {playback_seconds}s")
+                
+                # Reset download flag but mark as just resumed to skip initial download trigger
+                self._downloads_triggered_this_rotation = False
+                self._just_resumed_session = True
+                
+                # Restore prepared playlists from database
+                next_playlists = session.get('next_playlists')
+                next_playlists_status = session.get('next_playlists_status')
+                
+                if next_playlists:
+                    import json
+                    try:
+                        playlist_list = json.loads(next_playlists) if isinstance(next_playlists, str) else next_playlists
+                        status_dict = json.loads(next_playlists_status) if isinstance(next_playlists_status, str) else (next_playlists_status or {})
+                        
+                        # Check if all playlists are COMPLETED
+                        all_completed = all(status_dict.get(pl) == "COMPLETED" for pl in playlist_list)
+                        
+                        if all_completed:
+                            # Fetch playlist objects from database with IDs (needed for start_rotation_session)
+                            playlist_objects = self.db.get_playlists_with_ids_by_names(playlist_list)
+                            if playlist_objects:
+                                self.next_prepared_playlists = playlist_objects
+                                logger.info(f"Restored prepared playlists from database: {playlist_list}")
+                            else:
+                                logger.warning(f"Could not fetch playlist objects for: {playlist_list}")
+                        else:
+                            logger.info(f"Prepared playlists not fully downloaded, will download on next trigger: {status_dict}")
+                    except Exception as e:
+                        logger.error(f"Failed to restore prepared playlists: {e}")
                 
                 if session.get('stream_title'):
                     assert self.stream_manager is not None, "Stream manager not initialized"
@@ -837,7 +1112,22 @@ class AutomationController:
 
                 self.auto_save_playback_position()
                 self._process_video_registration_queue()
-                await self.check_for_rotation()
+                self._process_pending_database_operations()
+                
+                # Handle skip detector initialization delay after override restoration
+                if self._skip_detector_init_delay > 0:
+                    self._skip_detector_init_delay -= 1
+                    if self._skip_detector_init_delay == 0:
+                        logger.info("Initialization delay complete, initializing skip detector after override restoration")
+                        self._initialize_skip_detector()
+                
+                # Handle rotation check delay after override restoration
+                if self._skip_rotation_check_delay > 0:
+                    self._skip_rotation_check_delay -= 1
+                
+                # Only check for rotation if not in skip delay period
+                if self._skip_rotation_check_delay == 0:
+                    await self.check_for_rotation()
                 
                 # Handle pending seek
                 if self._pending_seek_position_ms > 0:
@@ -867,6 +1157,17 @@ class AutomationController:
                 if self.shutdown_event:
                     logger.info("Shutdown event detected, cleaning up...")
                     self.save_playback_on_exit()
+                    
+                    # Cancel all pending asyncio tasks to prevent orphaned tasks from executing with torn-down state
+                    try:
+                        pending = asyncio.all_tasks()
+                        for task in pending:
+                            if not task.done():
+                                task.cancel()
+                        logger.debug(f"Cancelled {len(pending)} pending asyncio tasks")
+                    except Exception as e:
+                        logger.debug(f"Error cancelling tasks (non-critical): {e}")
+                    
                     try:
                         self.platform_manager.cleanup()
                     except Exception as e:

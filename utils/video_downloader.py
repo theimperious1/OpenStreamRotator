@@ -173,6 +173,11 @@ class VideoDownloader:
         for video_path in video_files:
             filename = os.path.basename(video_path)
 
+            # Validate video stream before processing (ensures file is complete, not still post-processing)
+            if not VideoProcessor.has_valid_video_stream(video_path):
+                logger.warning(f"Video stream validation failed for {filename}, skipping registration")
+                continue
+
             # Get video metadata
             title = VideoProcessor.extract_title_from_filename(filename)
             duration = VideoProcessor.get_video_duration(video_path)

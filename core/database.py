@@ -100,9 +100,31 @@ class DatabaseManager:
                 download_trigger_time TIMESTAMP,
                 stream_title TEXT,
                 playback_seconds INTEGER DEFAULT 0,
-                is_current BOOLEAN DEFAULT 0
+                is_current BOOLEAN DEFAULT 0,
+                current_playlists TEXT,
+                next_playlists TEXT,
+                next_playlists_status TEXT
             )
         """)
+        
+        # Add new columns to existing table if they don't exist
+        try:
+            cursor.execute("ALTER TABLE rotation_sessions ADD COLUMN current_playlists TEXT")
+            logger.info("Added current_playlists column to rotation_sessions table")
+        except sqlite3.OperationalError:
+            logger.debug("current_playlists column already exists")
+        
+        try:
+            cursor.execute("ALTER TABLE rotation_sessions ADD COLUMN next_playlists TEXT")
+            logger.info("Added next_playlists column to rotation_sessions table")
+        except sqlite3.OperationalError:
+            logger.debug("next_playlists column already exists")
+        
+        try:
+            cursor.execute("ALTER TABLE rotation_sessions ADD COLUMN next_playlists_status TEXT")
+            logger.info("Added next_playlists_status column to rotation_sessions table")
+        except sqlite3.OperationalError:
+            logger.debug("next_playlists_status column already exists")
 
         # Playback log table
         cursor.execute("""
@@ -351,9 +373,33 @@ class DatabaseManager:
         self.close()
 
     def end_session(self, session_id: int):
-        """Mark a rotation session as ended."""
+        """Mark a rotation session as ended and update playlists' last_played timestamp."""
         conn = self.connect()
         cursor = conn.cursor()
+
+        # Get playlists used in this session
+        cursor.execute("""
+            SELECT playlists_selected FROM rotation_sessions WHERE id = ?
+        """, (session_id,))
+        result = cursor.fetchone()
+        
+        if result:
+            playlists_json = result[0]
+            if playlists_json:
+                try:
+                    playlist_ids = json.loads(playlists_json)
+                    # Update last_played for all playlists in this session
+                    now = datetime.now()
+                    for playlist_id in playlist_ids:
+                        cursor.execute("""
+                            UPDATE playlists 
+                            SET last_played = ?, 
+                                play_count = play_count + 1,
+                                updated_at = ?
+                            WHERE id = ?
+                        """, (now, now, playlist_id))
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.warning(f"Failed to parse playlists for session {session_id}: {e}")
 
         cursor.execute("""
             UPDATE rotation_sessions 
@@ -450,6 +496,162 @@ class DatabaseManager:
         finally:
             self.close()
 
+    def update_playlist_status(self, session_id: int, playlist_name: str, status: str = "PENDING") -> bool:
+        """Update the status of a specific playlist in next_playlists_status.
+        
+        Args:
+            session_id: Session ID
+            playlist_name: Name of the playlist
+            status: Status value (e.g., "PENDING", "COMPLETED")
+        
+        Returns:
+            True if updated successfully
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            # Get current status
+            cursor.execute("SELECT next_playlists_status FROM rotation_sessions WHERE id = ?", (session_id,))
+            row = cursor.fetchone()
+            
+            if row and row[0]:
+                status_dict = json.loads(row[0])
+            else:
+                status_dict = {}
+            
+            # Update the status for this playlist
+            status_dict[playlist_name] = status
+            
+            # Save back to database
+            cursor.execute(
+                "UPDATE rotation_sessions SET next_playlists_status = ? WHERE id = ?",
+                (json.dumps(status_dict), session_id)
+            )
+            conn.commit()
+            logger.debug(f"Updated playlist '{playlist_name}' to {status} in session {session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update playlist status: {e}")
+            return False
+        finally:
+            self.close()
+
+    def set_next_playlists(self, session_id: int, playlists: List[str]) -> bool:
+        """Set the list of next playlists and initialize their status to PENDING.
+        
+        Args:
+            session_id: Session ID
+            playlists: List of playlist names
+        
+        Returns:
+            True if updated successfully
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            # Store playlist names
+            cursor.execute(
+                "UPDATE rotation_sessions SET next_playlists = ? WHERE id = ?",
+                (json.dumps(playlists), session_id)
+            )
+            
+            # Initialize all playlists as PENDING
+            status_dict = {pl: "PENDING" for pl in playlists}
+            cursor.execute(
+                "UPDATE rotation_sessions SET next_playlists_status = ? WHERE id = ?",
+                (json.dumps(status_dict), session_id)
+            )
+            
+            conn.commit()
+            logger.debug(f"Set next_playlists to {playlists} in session {session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set next playlists: {e}")
+            return False
+        finally:
+            self.close()
+
+    def set_current_playlists(self, session_id: int, playlists: List[str]) -> bool:
+        """Set the list of current playlists for this session.
+        
+        Args:
+            session_id: Session ID
+            playlists: List of playlist names currently playing
+        
+        Returns:
+            True if updated successfully
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                "UPDATE rotation_sessions SET current_playlists = ? WHERE id = ?",
+                (json.dumps(playlists), session_id)
+            )
+            conn.commit()
+            logger.debug(f"Set current_playlists to {playlists} in session {session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set current playlists: {e}")
+            return False
+        finally:
+            self.close()
+
+    def get_playlist_status(self, session_id: int, playlist_name: str) -> Optional[str]:
+        """Get the status of a specific playlist.
+        
+        Args:
+            session_id: Session ID
+            playlist_name: Name of the playlist
+        
+        Returns:
+            Status string ("PENDING", "COMPLETED", etc.) or None
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("SELECT next_playlists_status FROM rotation_sessions WHERE id = ?", (session_id,))
+            row = cursor.fetchone()
+            
+            if row and row[0]:
+                status_dict = json.loads(row[0])
+                return status_dict.get(playlist_name)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get playlist status: {e}")
+            return None
+        finally:
+            self.close()
+
+    def get_next_playlists_status(self, session_id: int) -> Dict[str, str]:
+        """Get all next playlist statuses for a session.
+        
+        Args:
+            session_id: Session ID
+        
+        Returns:
+            Dictionary mapping playlist names to their status
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("SELECT next_playlists_status FROM rotation_sessions WHERE id = ?", (session_id,))
+            row = cursor.fetchone()
+            
+            if row and row[0]:
+                return json.loads(row[0])
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to get next playlists status: {e}")
+            return {}
+        finally:
+            self.close()
+
     def sync_playlists_from_config(self, config_playlists: List[Dict]):
         """Sync playlists from config file to database."""
         for playlist in config_playlists:
@@ -461,3 +663,64 @@ class DatabaseManager:
                     priority=playlist.get('priority', 1)
                 )
         logger.info(f"Synced {len(config_playlists)} playlists from config")
+
+    def initialize_next_playlists(self, session_id: int, playlist_names: List[str]):
+        """Initialize next_playlists tracking for a session.
+        
+        Sets all playlists to PENDING status at download start.
+        Thread-safe: runs in main thread after background thread queues the request.
+        """
+        if not session_id or not playlist_names:
+            return False
+        
+        try:
+            self.set_next_playlists(session_id, playlist_names)
+            logger.info(f"Initialized next_playlists tracking in session {session_id}: {playlist_names}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to initialize next_playlists tracking: {e}")
+            return False
+
+    def complete_next_playlists(self, session_id: int, playlist_names: List[str]):
+        """Mark all next_playlists as COMPLETED after successful download.
+        
+        Called in main thread after background download thread finishes.
+        Thread-safe: runs in main thread.
+        """
+        if not session_id or not playlist_names:
+            return False
+        
+        try:
+            for playlist_name in playlist_names:
+                self.update_playlist_status(session_id, playlist_name, "COMPLETED")
+            logger.info(f"Updated database: marked {playlist_names} as COMPLETED in session {session_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to update playlist status in database: {e}")
+            return False
+
+    def get_playlists_with_ids_by_names(self, playlist_names: List[str]) -> List[Dict]:
+        """Get full playlist data with database IDs by their names.
+        
+        Used when restoring prepared playlists - ensures we have both config data and DB IDs.
+        Returns playlists with ''id'', ''name'', ''youtube_url'', and other database fields.
+        """
+        if not playlist_names:
+            return []
+        
+        conn = self.connect()
+        cursor = conn.cursor()
+        
+        try:
+            playlists = []
+            for name in playlist_names:
+                cursor.execute("SELECT * FROM playlists WHERE name = ?", (name,))
+                row = cursor.fetchone()
+                if row:
+                    playlists.append(dict(row))
+            return playlists
+        except Exception as e:
+            logger.error(f"Failed to get playlists with IDs by names: {e}")
+            return []
+        finally:
+            self.close()
