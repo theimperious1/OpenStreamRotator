@@ -143,7 +143,7 @@ class AutomationController:
         self.shutdown_event = True
 
     def _is_pending_folder_empty(self) -> bool:
-        """Check if the pending folder is empty or doesn't exist."""
+        """Check if the pending folder is empty or doesn't exist (only counts video files, not subdirectories)."""
         try:
             settings = self.config_manager.get_settings()
             pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_pending/')
@@ -151,8 +151,9 @@ class AutomationController:
             if not os.path.exists(pending_folder):
                 return True
             
-            # Check if folder is empty (excluding hidden files)
-            items = [f for f in os.listdir(pending_folder) if not f.startswith('.')]
+            # Check if folder has any files (ignore subdirectories)
+            directory = os.scandir(pending_folder)
+            items = [entry.name for entry in directory if entry.is_file()]
             return len(items) == 0
         except Exception as e:
             logger.warning(f"Error checking pending folder: {e}")
