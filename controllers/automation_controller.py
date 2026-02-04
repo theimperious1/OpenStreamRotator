@@ -128,6 +128,7 @@ class AutomationController:
         
         # Temp playback state (for long playlist handling)
         self._temp_playback_active = False  # Temp playback mode enabled
+        self._override_queued = False  # Override queued to run after temp playback finishes
         self._temp_playback_folder: str = ''  # Temp playback folder path (set dynamically from settings)
         self._last_temp_folder_check = 0  # Track when we last checked for new files
 
@@ -440,6 +441,17 @@ class AutomationController:
             except Exception as e:
                 logger.warning(f"Failed to update stream metadata: {e}")
 
+            # If temp playback was active, the normal rotation has completed the consolidation
+            # Complete temp playback cleanup properly
+            if self._temp_playback_active:
+                await self._cleanup_temp_playback_after_rotation()
+            
+            # Clean up temporary download files from the previous rotation
+            # Safe to do now that content switch is complete
+            settings = self.config_manager.get_settings()
+            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            self.playlist_manager.cleanup_temp_downloads(pending_folder)
+            
             self.is_rotating = False
             self.override_already_cleaned = False
             logger.info("Content switch completed successfully")
@@ -449,6 +461,50 @@ class AutomationController:
             logger.error(f"Content switch failed: {e}", exc_info=True)
             self.is_rotating = False
             return False
+
+    async def _cleanup_temp_playback_after_rotation(self) -> None:
+        """Clean up temp playback after normal rotation completes.
+        
+        When a normal rotation completes while temp playback is active, the rotation
+        has already consolidated files from pending → live. This method handles:
+        1. Update skip detector back to live folder (from temp_playback)
+        2. Execute any queued overrides
+        3. Clean up temp_playback folder
+        4. Clear temp playback flag
+        """
+        logger.info("Cleaning up temp playback after normal rotation")
+        
+        try:
+            settings = self.config_manager.get_settings()
+            video_folder = settings.get('video_folder', 'C:/stream_videos/')
+            
+            # Step 1: Update skip detector to track live folder (not temp_playback)
+            if self.playback_skip_detector:
+                self.playback_skip_detector.video_folder = video_folder
+                logger.info("Updated skip detector to track live folder")
+            
+            # Step 2: Execute queued override if one was triggered during temp playback
+            if self._override_queued:
+                logger.info("Override was queued during temp playback - executing it now")
+                self._override_queued = False
+                await self.check_manual_override()
+            
+            # Step 3: Clean up temp_playback folder
+            if os.path.exists(self._temp_playback_folder):
+                try:
+                    shutil.rmtree(self._temp_playback_folder)
+                    logger.info("Cleaned up temp_playback folder")
+                except Exception as cleanup_error:
+                    logger.error(f"Failed to clean up temp_playback folder: {cleanup_error}")
+            
+            # Step 4: Clear temp playback flag
+            self._temp_playback_active = False
+            logger.info("Temp playback cleanup completed")
+            
+        except Exception as e:
+            logger.error(f"Error during temp playback cleanup: {e}")
+            # Ensure flag is cleared even on error
+            self._temp_playback_active = False
 
     def _initialize_skip_detector(self):
         """Initialize skip detector for current session."""
@@ -862,6 +918,9 @@ class AutomationController:
             # Update skip detector to track files in temp_playback folder
             if self.playback_skip_detector:
                 self.playback_skip_detector.video_folder = self._temp_playback_folder
+                # Reset skip detector state so it doesn't try to delete currently playing video
+                # from the old live folder tracking
+                self.playback_skip_detector.reset()
                 logger.info(f"Updated skip detector to track temp_playback folder")
             
             logger.info(f"Temp playback activated with {len(complete_files)} files")
@@ -884,7 +943,15 @@ class AutomationController:
         Periodically check if new files are ready in pending folder and move them
         to temp_playback folder. Once all pending files are downloaded, exit temp
         playback and prepare for normal rotation.
+        
+        NOTE: Guard check ensures this doesn't trigger if flag is already cleared
+        (e.g., by execute_content_switch() completing a normal rotation).
         """
+        # Guard: Don't process if temp playback is no longer active
+        # (normal rotation may have completed and cleared the flag)
+        if not self._temp_playback_active:
+            return
+        
         try:
             settings = self.config_manager.get_settings()
             pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
@@ -1025,6 +1092,12 @@ class AutomationController:
                 self.playback_skip_detector.video_folder = live_folder
                 logger.info(f"Updated skip detector to track live folder")
             
+            # Check if override was queued during temp playback
+            if self._override_queued:
+                logger.info("Override was queued during temp playback - executing it now")
+                self._override_queued = False
+                await self.check_manual_override()
+            
             logger.info("Temp playback successfully exited, resuming normal rotation cycle")
             
         except Exception as e:
@@ -1127,6 +1200,7 @@ class AutomationController:
                     self.download_in_progress = False
                     self._override_prep_ready = False
                     self._override_preparation_pending = False
+                    self._override_queued = False  # Clear queue flag when override executes
                     self.override_handler.clear_override()
                     return True
                 else:
@@ -1157,7 +1231,15 @@ class AutomationController:
         if not selected_playlist_objs:
             logger.error(f"Override playlists invalid or not found in database: {selected}")
             logger.info("Clearing invalid override without making any changes")
+            self._override_queued = False  # Clear queue flag when override is invalid
             self.override_handler.clear_override()
+            return False
+
+        # CHECK: If temp playback is active, queue the override instead of executing it
+        if self._temp_playback_active:
+            logger.info("Temp playback is active - queueing override to execute after temp playback finishes")
+            self._override_queued = True
+            # Don't clear override - user may cancel it before temp playback finishes
             return False
 
         logger.info("Manual override triggered - queuing preparation phase")

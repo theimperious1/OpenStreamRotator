@@ -136,6 +136,9 @@ class PlaylistManager:
             # Move next folder contents to current folder
             if os.path.exists(next_folder):
                 for filename in os.listdir(next_folder):
+                    # Skip the temp folder - it's for yt-dlp downloads, not for live playback
+                    if filename == 'temp':
+                        continue
                     src = os.path.join(next_folder, filename)
                     dst = os.path.join(current_folder, filename)
                     try:
@@ -304,18 +307,46 @@ class PlaylistManager:
     def get_complete_video_files(self, folder: str) -> list:
         """
         Get list of complete video files in a folder.
-        Filters out .part files (incomplete downloads).
+        
+        Note: yt-dlp is configured to separate temp files (fragments, .part, .ytdl)
+        into a 'temp' subfolder, so this only needs to check for video extensions.
         """
-        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
+        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
         if not os.path.exists(folder):
             return []
         complete_files = []
         for filename in os.listdir(folder):
-            if filename.endswith('.part'):
+            # Skip subdirectories (including 'temp' folder)
+            if os.path.isdir(os.path.join(folder, filename)):
                 continue
+            # Include files with video extensions
             if filename.lower().endswith(video_extensions):
                 complete_files.append(filename)
         return complete_files
+
+    def cleanup_temp_downloads(self, folder: str) -> bool:
+        """
+        Clean up temporary download files in the temp subfolder.
+        
+        yt-dlp stores all temporary files (fragments, .part, .ytdl) in folder/temp/.
+        This should be called after each successful rotation to clean up old metadata.
+        """
+        temp_folder = os.path.join(folder, 'temp')
+        if not os.path.exists(temp_folder):
+            return True  # Nothing to clean
+        
+        try:
+            for filename in os.listdir(temp_folder):
+                filepath = os.path.join(temp_folder, filename)
+                if os.path.isfile(filepath):
+                    os.remove(filepath)
+                elif os.path.isdir(filepath):
+                    shutil.rmtree(filepath)
+            logger.info(f"Cleaned up temp downloads folder: {temp_folder}")
+            return True
+        except Exception as e:
+            logger.error(f"Error cleaning up temp downloads folder: {e}")
+            return False
 
     def move_files_to_folder(self, source_folder: str, dest_folder: str, filenames: list) -> bool:
         """Move specific files from source to destination folder."""

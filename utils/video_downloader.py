@@ -53,6 +53,11 @@ class VideoDownloader:
         """
         # Ensure output folder exists
         os.makedirs(output_folder, exist_ok=True)
+        
+        # Explicitly create temp folder for yt-dlp's temporary files
+        # yt-dlp will use this with 'paths' config for fragments, .part, and .ytdl files
+        temp_folder = os.path.join(output_folder, 'temp')
+        os.makedirs(temp_folder, exist_ok=True)
 
         settings = self.config.get_settings()
         max_retries = settings.get('download_retry_attempts', 3)
@@ -105,7 +110,13 @@ class VideoDownloader:
                     'fragment_retries': 6,
                     'concurrent_fragment_downloads': 5,  # Download 4 fragments in parallel
                     'http_chunk_size': 10485760,  # 10MB chunks - I tried raising this higher, doesn't work
-                    'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
+                    'outtmpl': '%(title)s.%(ext)s',
+                    # Separate temp files (fragments, .part, .ytdl) into temp/ subfolder
+                    # Final completed videos stay in output_folder, temps in output_folder/temp/
+                    'paths': {
+                        'home': output_folder,
+                        'temp': os.path.join(output_folder, 'temp'),
+                    },
                     # Request throttling to avoid YouTube IP-based blocking
                     'socket_timeout': 30,
                     'sleep_interval': 2,  # Sleep 2 seconds between requests
