@@ -98,6 +98,10 @@ class RotationHandler:
         Returns:
             True if rotation duration reached, False otherwise
         """
+        # Skip rotation check during temp playback - wait for exit to recalculate finish time
+        if self.playback_skip_detector and self.playback_skip_detector._temp_playback_mode:
+            return False
+        
         if not session.get('estimated_finish_time'):
             return False
         

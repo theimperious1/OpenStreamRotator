@@ -174,7 +174,8 @@ class ContentSwitchHandler:
             True if successful
         """
         # Update VLC source
-        if not self.obs_controller.update_vlc_source(vlc_source_name, current_folder):
+        success, _ = self.obs_controller.update_vlc_source(vlc_source_name, current_folder)
+        if not success:
             logger.error("Failed to update VLC source with new videos")
             return False
         

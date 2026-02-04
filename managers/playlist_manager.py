@@ -1,6 +1,7 @@
 import os
 import logging
 import shutil
+import time
 from typing import List, Dict, Optional
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
@@ -119,6 +120,7 @@ class PlaylistManager:
     def switch_content_folders(self, current_folder: str, next_folder: str) -> bool:
         """
         Switch content: delete current folder contents, move next folder contents to current.
+        Excludes archive.txt from move (used by yt-dlp to track downloads) and deletes it after.
         """
         try:
             # Delete current folder contents
@@ -139,12 +141,25 @@ class PlaylistManager:
                     # Skip the temp folder - it's for yt-dlp downloads, not for live playback
                     if filename == 'temp':
                         continue
+                    # Skip archive.txt - it's used by yt-dlp to track downloaded videos
+                    # and should not be moved to live folder
+                    if filename == 'archive.txt':
+                        continue
                     src = os.path.join(next_folder, filename)
                     dst = os.path.join(current_folder, filename)
                     try:
                         shutil.move(src, dst)
                     except Exception as e:
                         logger.error(f"Error moving {src} to {dst}: {e}")
+
+            # Delete archive.txt after rotation completes so next rotation starts fresh
+            archive_path = os.path.join(next_folder, 'archive.txt')
+            if os.path.exists(archive_path):
+                try:
+                    os.unlink(archive_path)
+                    logger.info("Deleted archive.txt after rotation")
+                except Exception as e:
+                    logger.warning(f"Could not delete archive.txt: {e}")
 
             logger.info("Content folders switched successfully")
             return True
@@ -191,7 +206,6 @@ class PlaylistManager:
         Cleans up override content and restores original.
         """
         try:
-            import time
             
             # Normalize paths to avoid Windows path issues
             current_folder = os.path.normpath(current_folder)

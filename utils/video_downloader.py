@@ -103,6 +103,7 @@ class VideoDownloader:
                 logger.info(f"Downloading playlist (attempt {attempt + 1}/{max_retries}): {playlist_url}")
                 
                 # Configure yt-dlp options
+                
                 ydl_opts = {
                     'quiet': not verbose,
                     'no_warnings': not verbose,
@@ -111,6 +112,11 @@ class VideoDownloader:
                     'concurrent_fragment_downloads': 5,  # Download 4 fragments in parallel
                     'http_chunk_size': 10485760,  # 10MB chunks - I tried raising this higher, doesn't work
                     'outtmpl': '%(title)s.%(ext)s',
+                    # Archive file to track downloaded videos - prevents re-downloading
+                    # videos that were deleted during temp playback
+                    # Archive file tracks downloaded video IDs to prevent re-downloading
+                    # during temp playback when videos are deleted after being played
+                    'download_archive': os.path.join(output_folder, 'archive.txt'),
                     # Separate temp files (fragments, .part, .ytdl) into temp/ subfolder
                     # Final completed videos stay in output_folder, temps in output_folder/temp/
                     'paths': {

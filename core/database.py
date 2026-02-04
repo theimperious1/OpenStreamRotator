@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import os
+import json
 from datetime import datetime
 from typing import List, Dict, Optional
 import logging
@@ -735,8 +736,6 @@ class DatabaseManager:
         Returns:
             True if all prepared playlist files exist, False otherwise
         """
-        import os
-        import json
         
         conn = self.connect()
         cursor = conn.cursor()
