@@ -317,6 +317,28 @@ class PlaylistManager:
         logger.info(f"Validated {len(video_files)} video files")
         return True
 
+    def is_folder_empty(self, folder: str) -> bool:
+        """Check if a folder is empty or doesn't exist (only counts video files, not metadata).
+        
+        Args:
+            folder: Path to folder to check
+            
+        Returns:
+            True if folder is empty/missing or contains no video files, False otherwise
+        """
+        try:
+            if not os.path.exists(folder):
+                return True
+            
+            # Check if folder has any files (ignore subdirectories, archive.txt, and temp folder)
+            # archive.txt is yt-dlp's download tracking file, not actual content
+            items = [entry.name for entry in os.scandir(folder) 
+                     if entry.is_file() and entry.name != 'archive.txt']
+            return len(items) == 0
+        except Exception as e:
+            logger.warning(f"Error checking folder {folder}: {e}")
+            return False  # Conservative: assume not empty if we can't check
+
     def get_complete_video_files(self, folder: str) -> list:
         """
         Get list of complete video files in a folder.

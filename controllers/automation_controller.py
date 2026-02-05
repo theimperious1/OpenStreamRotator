@@ -125,25 +125,6 @@ class AutomationController:
         logger.info("Cleanup complete. Setting shutdown flag...")
         self.shutdown_event = True
 
-    def _is_pending_folder_empty(self) -> bool:
-        """Check if the pending folder is empty or doesn't exist (only counts video files, not metadata)."""
-        try:
-            settings = self.config_manager.get_settings()
-            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_pending/')
-            
-            if not os.path.exists(pending_folder):
-                return True
-            
-            # Check if folder has any files (ignore subdirectories, archive.txt, and temp folder)
-            # archive.txt is yt-dlp's download tracking file, not actual content
-            directory = os.scandir(pending_folder)
-            items = [entry.name for entry in directory 
-                     if entry.is_file() and entry.name != 'archive.txt']
-            return len(items) == 0
-        except Exception as e:
-            logger.warning(f"Error checking pending folder: {e}")
-            return False  # Conservative: assume not empty if we can't check
-
     def _initialize_handlers(self):
         """Initialize all handler objects after OBS and services are ready."""
         assert self.obs_controller is not None, "OBS controller must be initialized before handlers"
@@ -576,8 +557,10 @@ class AutomationController:
 
         # Trigger background download only if pending folder is empty and not already triggered
         # Skip on first loop after resume to avoid downloading when resuming into existing rotation
+        settings = self.config_manager.get_settings()
+        pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
         if (not self._downloads_triggered_this_rotation and 
-            self._is_pending_folder_empty() and 
+            self.playlist_manager.is_folder_empty(pending_folder) and 
             not self._background_download_in_progress and
             not self._just_resumed_session):
             
@@ -598,7 +581,7 @@ class AutomationController:
         # Check if all content is consumed and prepared playlists are ready for immediate rotation
         # Also trigger rotation if there's pending content even if prepared_playlists flag is empty (covers restart scenario)
         # Also trigger rotation if there's a suspended session waiting to be restored (override completion)
-        has_pending_content = not self._is_pending_folder_empty()
+        has_pending_content = not self.playlist_manager.is_folder_empty(pending_folder)
         has_suspended_session = self.db.get_suspended_session() is not None
         should_rotate = False
         
