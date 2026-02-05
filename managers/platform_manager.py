@@ -118,11 +118,15 @@ class PlatformManager:
             results[platform.platform_name] = await platform.update_title(title)
         return results
 
-    def update_category_all(self, category: str) -> dict[str, bool]:
+    async def update_category_all(self, category: str) -> dict[str, bool]:
         """Update category on all enabled platforms."""
         results = {}
         for platform in self.platforms:
-            results[platform.platform_name] = platform.update_category(category)
+            # Use async version if available, otherwise fallback to sync
+            if hasattr(platform, 'update_category_async'):
+                results[platform.platform_name] = await platform.update_category_async(category)
+            else:
+                results[platform.platform_name] = platform.update_category(category)
         return results
 
     async def update_stream_info_all(self, title: str, category: Optional[str] = None) -> dict[str, bool]:

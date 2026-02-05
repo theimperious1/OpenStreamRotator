@@ -54,7 +54,7 @@ class StreamManager:
             logger.debug("No category provided for update")
             return True
         
-        results = self.platform_manager.update_category_all(category)
+        results = await self.platform_manager.update_category_all(category)
         if not results:
             logger.debug("No platforms configured for category update")
             return True

@@ -164,17 +164,6 @@ class PlaybackSkipDetector:
             return False
         return self._playlist_position >= len(self._vlc_playlist) - 1
 
-    def _update_category_for_current_video(self):
-        """Update stream category based on currently playing video."""
-        if not self.content_switch_handler or not self.stream_manager:
-            return
-        
-        try:
-            current_video = self.get_current_video_filename()
-            if current_video:
-                self.content_switch_handler.update_category_by_video(current_video, self.stream_manager)
-        except Exception as e:
-            logger.debug(f"Could not update category on video transition: {e}")
 
     def get_current_video_filename(self) -> Optional[str]:
         """Get the filename of the currently playing video.
@@ -190,14 +179,14 @@ class PlaybackSkipDetector:
             return self.get_current_video_from_playlist()
         
         # Fallback to folder scanning (legacy behavior)
-        video_files = self._get_video_files_in_order()
+        video_files = self.get_video_files_in_order()
         if not video_files:
             return None
         
         # The first file is the current one being played
         return video_files[0]
 
-    def _get_video_files_in_order(self) -> list[str]:
+    def get_video_files_in_order(self) -> list[str]:
         """Get list of video files in folder, sorted alphabetically."""
         if not self.video_folder or not os.path.exists(self.video_folder):
             return []
@@ -321,7 +310,7 @@ class PlaybackSkipDetector:
                         logger.info(f"Playlist tracking: position {self._playlist_position}, video: {video_to_delete}, remaining: {remaining_in_playlist}")
                 else:
                     # Fallback to folder scanning (legacy, less reliable)
-                    video_files = self._get_video_files_in_order()
+                    video_files = self.get_video_files_in_order()
                     if video_files:
                         video_to_delete = video_files[0]
                         remaining_in_playlist = len(video_files) - 1
@@ -359,8 +348,18 @@ class PlaybackSkipDetector:
                         if success:
                             logger.info(f"Updated OBS VLC source to remove {video_to_delete}")
                     
-                    # Update category for newly playing video
-                    self._update_category_for_current_video()
+                    # Video transition detected and handled - return transition info for category update
+                    self.last_known_playback_position_ms = current_position_ms
+                    self.last_playback_check_time = time.time()
+                    
+                    skip_info = {
+                        "time_skipped_seconds": 0,  # Natural transition, no skip
+                        "new_finish_time": self.original_finish_time,
+                        "new_finish_time_str": self.original_finish_time.strftime('%H:%M:%S') if self.original_finish_time else "N/A",
+                        "current_video_filename": self.get_current_video_filename()
+                    }
+                    logger.info(f"Video transition handled - returning for category update: {skip_info.get('current_video_filename')}")
+                    return True, skip_info
                     
                 elif video_to_delete:
                     # This is the last video in the tracked playlist
@@ -369,7 +368,7 @@ class PlaybackSkipDetector:
                     # Check if we're in temp playback mode and there are new files available
                     if self._temp_playback_mode and self._vlc_refresh_callback:
                         # Check if there are new files in the folder that aren't in our playlist
-                        current_folder_files = self._get_video_files_in_order()
+                        current_folder_files = self.get_video_files_in_order()
                         new_files_available = len(current_folder_files) > 1  # More than just the current video
                         
                         if new_files_available:
@@ -380,6 +379,19 @@ class PlaybackSkipDetector:
                             # Set flag for automation controller to handle the async refresh callback
                             # This allows the callback to execute in the proper async context
                             self._vlc_refresh_needed = True
+                            
+                            # Video transition detected with new content available - return for category update
+                            self.last_known_playback_position_ms = current_position_ms
+                            self.last_playback_check_time = time.time()
+                            
+                            skip_info = {
+                                "time_skipped_seconds": 0,
+                                "new_finish_time": self.original_finish_time,
+                                "new_finish_time_str": self.original_finish_time.strftime('%H:%M:%S') if self.original_finish_time else "N/A",
+                                "current_video_filename": self.get_current_video_filename()
+                            }
+                            logger.info(f"Video transition with new content - returning for category update: {skip_info.get('current_video_filename')}")
+                            return True, skip_info
                         else:
                             # No new files, set all content consumed flag
                             logger.info(f"Not deleting {video_to_delete} - it's the last video and no new files available")
@@ -415,7 +427,7 @@ class PlaybackSkipDetector:
             
             # Don't recalculate finish time if we're on the last video (looping)
             # Skip detection on the final video doesn't change rotation timing
-            video_files = self._get_video_files_in_order()
+            video_files = self.get_video_files_in_order()
             new_finish_time = self.original_finish_time  # Default to original
             
             if not (video_files and len(video_files) <= 1):

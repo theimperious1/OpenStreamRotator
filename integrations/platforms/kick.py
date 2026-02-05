@@ -269,6 +269,35 @@ class KickUpdater(StreamPlatform):
             self.log_error("Update category", e)
             return False
 
+    async def update_category_async(self, category: str) -> bool:
+        """
+        Asynchronously update stream category only.
+        
+        Args:
+            category: Category name to set
+            
+        Returns:
+            True if successful
+        """
+        try:
+            category_id = await self._get_category_id(category)
+            if category_id:
+                await self._update_channel(category_id=category_id)
+                self.log_success("Updated category", category)
+                return True
+            else:
+                logger.warning(f"[{self.platform_name}] Could not find category ID for: {category}")
+                return False
+        except Exception as e:
+            error_str = str(e)
+            # 204 No Content is actually a success
+            if "204" in error_str and "ContentTypeError" in type(e).__name__:
+                logger.info(f"[{self.platform_name}] Update successful (API returned 204 No Content)")
+                return True
+            logger.error(f"[{self.platform_name}] Update category failed with error: {type(e).__name__}: {e}", exc_info=True)
+            self.log_error("Update category", e)
+            return False
+
     async def update_stream_info(self, title: str, category: Optional[str] = None) -> bool:
         try:
             params = {"stream_title": title}

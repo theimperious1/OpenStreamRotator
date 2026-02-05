@@ -190,8 +190,48 @@ class TempPlaybackHandler:
                         if self.stream_manager:
                             await self.stream_manager.update_title(new_title)
                         logger.info(f"Updated stream title for temp playback: {new_title}")
+                        
+                        # Also update category for temp playback based on first video or first playlist
+                        category = None
+                        try:
+                            # Get category from first video in pending folder
+                            if complete_files:
+                                first_video = complete_files[0]
+                                from handlers.content_switch_handler import ContentSwitchHandler
+                                # We need a content_switch_handler instance, but we might not have it here
+                                # Check if we can get category from database
+                                video_data = self.db.get_video_by_filename(first_video)
+                                if video_data:
+                                    playlist_name = video_data.get('playlist_name')
+                                    if playlist_name:
+                                        # Get category for this playlist
+                                        playlists_config = self.config.get_playlists()
+                                        for p in playlists_config:
+                                            if p.get('name') == playlist_name:
+                                                category = p.get('category') or p.get('name')
+                                                logger.info(f"Got category from first temp playback video: {first_video} -> {category}")
+                                                break
+                        except Exception as e:
+                            logger.warning(f"Failed to get category from first video: {e}")
+                        
+                        # Fallback to first next_playlist category
+                        if not category and next_playlist_names:
+                            try:
+                                playlists_config = self.config.get_playlists()
+                                for p in playlists_config:
+                                    if p.get('name') == next_playlist_names[0]:
+                                        category = p.get('category') or p.get('name')
+                                        logger.info(f"Using fallback category from first next_playlist: {category}")
+                                        break
+                            except Exception as e:
+                                logger.warning(f"Failed to get fallback category: {e}")
+                        
+                        # Update category if determined
+                        if category and self.stream_manager:
+                            await self.stream_manager.update_stream_info(new_title, category)
+                            logger.info(f"Updated stream category for temp playback: {category}")
                 except Exception as e:
-                    logger.warning(f"Failed to update stream title during temp playback: {e}")
+                    logger.warning(f"Failed to update stream title/category during temp playback: {e}")
             
             # Save temp playback state for crash recovery
             if self.current_session_id:

@@ -37,6 +37,130 @@ class ContentSwitchHandler:
         self.notification_service = notification_service
         self._last_category_update_time = 0  # Track last category update to throttle spam
 
+    def get_category_for_video(self, video_filename: str) -> Optional[str]:
+        """
+        Get the stream category for a specific video based on its source playlist.
+        
+        Args:
+            video_filename: Filename of the video to look up
+            
+        Returns:
+            Category name, or None if not found
+        """
+        if not video_filename:
+            return None
+        
+        try:
+            # Look up the video in database to find its source playlist
+            video = self.db.get_video_by_filename(video_filename)
+            if not video:
+                logger.debug(f"Video not found in database: {video_filename}")
+                return None
+            
+            playlist_name = video.get('playlist_name')
+            if not playlist_name:
+                logger.debug(f"No playlist_name for video: {video_filename}")
+                return None
+            
+            # Get the category for this playlist from playlists config
+            playlists_config = self.config.get_playlists()
+            for p in playlists_config:
+                if p.get('name') == playlist_name:
+                    return p.get('category') or p.get('name')
+            
+            logger.warning(f"Playlist '{playlist_name}' not found in config for video: {video_filename}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting category for video {video_filename}: {e}")
+            return None
+
+    async def update_category_for_video_async(self, video_filename: str, stream_manager) -> bool:
+        """
+        Asynchronously update stream category based on video filename.
+        
+        Args:
+            video_filename: Filename of the currently playing video
+            stream_manager: StreamManager instance for updates
+            
+        Returns:
+            True if successful or no update needed, False if error
+        """
+        if not video_filename:
+            return True
+        
+        try:
+            category = self.get_category_for_video(video_filename)
+            if not category:
+                return True
+            
+            # Throttle category updates to prevent spam (only allow one per 3 seconds)
+            current_time = time.time()
+            if current_time - self._last_category_update_time >= 3:
+                # Get current session title to pass with category update
+                # Some platforms (like Kick) require title even for category-only updates
+                session = self.db.get_current_session()
+                stream_title = session.get('stream_title', '') if session else ''
+                
+                # Use update_stream_info with current title to ensure compatibility
+                # This way we update category without changing the title
+                await stream_manager.update_stream_info(stream_title, category)
+                self._last_category_update_time = current_time
+                logger.info(f"Updated category to '{category}' (from video: {video_filename})")
+                return True
+            else:
+                logger.debug(f"Skipping category update for '{category}' - throttled (from video: {video_filename})")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to update category for video {video_filename}: {e}")
+            return False
+
+    def get_initial_rotation_category(self, skip_detector, playlist_manager) -> Optional[str]:
+        """
+        Get the category for the first video in rotation, with fallback to first playlist.
+        
+        Used during rotation startup to set the correct category for the video about to play.
+        
+        Args:
+            skip_detector: PlaybackSkipDetector instance to get ordered video files
+            playlist_manager: PlaylistManager instance to get first playlist as fallback
+            
+        Returns:
+            Category name, or None if unable to determine
+        """
+        category = None
+        
+        try:
+            # Get first video from the folder
+            if skip_detector:
+                video_files = skip_detector.get_video_files_in_order()
+                if video_files:
+                    first_video_filename = video_files[0]
+                    # Get category for this specific video
+                    category = self.get_category_for_video(first_video_filename)
+                    if category:
+                        logger.info(f"Got initial rotation category from first video: {first_video_filename} -> {category}")
+                        return category
+        except Exception as e:
+            logger.warning(f"Failed to get category from first video: {e}")
+        
+        # Fallback: get category from first selected playlist in current session
+        try:
+            session = self.db.get_current_session()
+            if session:
+                playlists_selected = session.get('playlists_selected', '')
+                if playlists_selected:
+                    import json
+                    playlist_ids = json.loads(playlists_selected)
+                    playlists = playlist_manager.get_playlists_by_ids(playlist_ids)
+                    if playlists:
+                        category = playlists[0].get('category') or playlists[0].get('name')
+                        logger.info(f"Using fallback category from first selected playlist: {category}")
+                        return category
+        except Exception as e:
+            logger.warning(f"Failed to get fallback category from playlist: {e}")
+        
+        return None
+
     def truncate_stream_title(self, title: str) -> str:
         """
         Truncate stream title to fit character limit while preserving template.
@@ -311,7 +435,7 @@ class ContentSwitchHandler:
                     # Throttle category updates to prevent spam (only allow one per 3 seconds)
                     current_time = time.time()
                     if current_time - self._last_category_update_time >= 3:
-                        asyncio.create_task(stream_manager.update_stream_info(None, category))  # Only update category, not title
+                        asyncio.create_task(stream_manager.update_category(category))  # Use update_category instead of update_stream_info with None title
                         self._last_category_update_time = current_time
                         logger.info(f"Updated category to '{category}' (from video: {video_filename})")
                     else:

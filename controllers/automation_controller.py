@@ -331,25 +331,25 @@ class AutomationController:
                 logger.warning(f"Failed to mark playlists as played: {e}")
 
             # Initialize skip detector
-            # This will handle category updates on the first video transition
+            # This will handle category updates on video transitions
             self._initialize_skip_detector()
             
-            # Update category for the currently playing first video
-            if self.playback_skip_detector:
-                self.playback_skip_detector._update_category_for_current_video()
+            # Process any queued videos from downloads so they're in database before category lookup
+            self._process_video_registration_queue()
             
             # Update stream title and category
             try:
                 session = self.db.get_current_session()
                 if session:
                     stream_title = session.get('stream_title', '')
+                    
+                    # Get category from first video in rotation (with fallback to first playlist)
                     category = None
-                    playlists_selected = session.get('playlists_selected', '')
-                    if playlists_selected:
-                        playlist_ids = json.loads(playlists_selected)
-                        playlists = self.playlist_manager.get_playlists_by_ids(playlist_ids)
-                        if playlists:
-                            category = playlists[0].get('category') or playlists[0].get('name')
+                    if self.content_switch_handler:
+                        category = self.content_switch_handler.get_initial_rotation_category(
+                            self.playback_skip_detector, 
+                            self.playlist_manager
+                        )
                     
                     await self.stream_manager.update_stream_info(stream_title, category)
                     logger.info(f"Updated stream: title='{stream_title}', category='{category}'")
@@ -534,11 +534,11 @@ class AutomationController:
                 skip_info["new_finish_time_str"]
             )
             
-            # Update stream category based on current video
+            # Update stream category based on current video (with proper async/await)
             current_video = skip_info.get("current_video_filename")
             if current_video and self.content_switch_handler and self.stream_manager:
                 try:
-                    self.content_switch_handler.update_category_by_video(current_video, self.stream_manager)
+                    await self.content_switch_handler.update_category_for_video_async(current_video, self.stream_manager)
                 except Exception as e:
                     logger.warning(f"Failed to update category on video transition: {e}")
         
