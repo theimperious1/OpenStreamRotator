@@ -948,7 +948,6 @@ class DatabaseManager:
                 return False
             
             # Get all video files for these playlists
-            # video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
             expected_files = set()
             
             for playlist_name in next_playlists:

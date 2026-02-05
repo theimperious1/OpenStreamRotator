@@ -3,6 +3,7 @@ import time
 import obsws_python as obs
 from typing import Optional
 import os
+from config.constants import VIDEO_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,6 @@ class OBSController:
             Tuple of (success, playlist) where playlist is list of filenames in order
         """
         try:
-            video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
             video_files = []  # Full paths for OBS
             video_filenames = []  # Just filenames for playlist tracking
 
@@ -76,7 +76,7 @@ class OBSController:
             elif os.path.exists(video_folder):
                 # Scan folder for all video files
                 for filename in sorted(os.listdir(video_folder)):
-                    if filename.lower().endswith(video_extensions):
+                    if filename.lower().endswith(VIDEO_EXTENSIONS):
                         full_path = os.path.abspath(os.path.join(video_folder, filename))
                         video_files.append(full_path)
                         video_filenames.append(filename)

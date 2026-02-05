@@ -3,6 +3,7 @@ import logging
 import shutil
 import time
 from typing import List, Dict, Optional
+from config.constants import VIDEO_EXTENSIONS
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 from core.video_registration_queue import VideoRegistrationQueue
@@ -90,13 +91,12 @@ class PlaylistManager:
     def extract_playlists_from_folder(self, folder: str) -> List[str]:
         """Extract unique playlist names from files in folder."""
         playlists = set()
-        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
 
         if not os.path.exists(folder):
             return []
 
         for filename in os.listdir(folder):
-            if filename.lower().endswith(video_extensions):
+            if filename.lower().endswith(VIDEO_EXTENSIONS):
                 # Extract playlist name (everything before _NUMBER_)
                 match = re.match(r'^(.+?)_\d+_', filename)
                 if match:
@@ -295,14 +295,13 @@ class PlaylistManager:
 
     def validate_downloads(self, folder: str) -> bool:
         """Validate that downloads completed successfully."""
-        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
 
         if not os.path.exists(folder):
             logger.error(f"Folder does not exist: {folder}")
             return False
 
         video_files = [f for f in os.listdir(folder)
-                       if f.lower().endswith(video_extensions)]
+                       if f.lower().endswith(VIDEO_EXTENSIONS)]
 
         if len(video_files) == 0:
             logger.error("No video files found in download folder")
@@ -325,7 +324,6 @@ class PlaylistManager:
         Note: yt-dlp is configured to separate temp files (fragments, .part, .ytdl)
         into a 'temp' subfolder, so this only needs to check for video extensions.
         """
-        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
         if not os.path.exists(folder):
             return []
         complete_files = []
@@ -334,7 +332,7 @@ class PlaylistManager:
             if os.path.isdir(os.path.join(folder, filename)):
                 continue
             # Include files with video extensions
-            if filename.lower().endswith(video_extensions):
+            if filename.lower().endswith(VIDEO_EXTENSIONS):
                 complete_files.append(filename)
         return complete_files
 

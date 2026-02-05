@@ -3,6 +3,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from typing import Optional
+from config.constants import VIDEO_EXTENSIONS
 from core.database import DatabaseManager
 from controllers.obs_controller import OBSController
 
@@ -201,12 +202,11 @@ class PlaybackSkipDetector:
         if not self.video_folder or not os.path.exists(self.video_folder):
             return []
         
-        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
         video_files = []
         
         try:
             for filename in sorted(os.listdir(self.video_folder)):
-                if filename.lower().endswith(video_extensions):
+                if filename.lower().endswith(VIDEO_EXTENSIONS):
                     video_files.append(filename)
         except Exception as e:
             logger.warning(f"Failed to list video files: {e}")
