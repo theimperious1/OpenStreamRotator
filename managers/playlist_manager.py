@@ -1,7 +1,9 @@
 import os
 import logging
 import shutil
+import time
 from typing import List, Dict, Optional
+from config.constants import VIDEO_EXTENSIONS
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 from core.video_registration_queue import VideoRegistrationQueue
@@ -89,13 +91,12 @@ class PlaylistManager:
     def extract_playlists_from_folder(self, folder: str) -> List[str]:
         """Extract unique playlist names from files in folder."""
         playlists = set()
-        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
 
         if not os.path.exists(folder):
             return []
 
         for filename in os.listdir(folder):
-            if filename.lower().endswith(video_extensions):
+            if filename.lower().endswith(VIDEO_EXTENSIONS):
                 # Extract playlist name (everything before _NUMBER_)
                 match = re.match(r'^(.+?)_\d+_', filename)
                 if match:
@@ -119,6 +120,7 @@ class PlaylistManager:
     def switch_content_folders(self, current_folder: str, next_folder: str) -> bool:
         """
         Switch content: delete current folder contents, move next folder contents to current.
+        Excludes archive.txt from move (used by yt-dlp to track downloads) and deletes it after.
         """
         try:
             # Delete current folder contents
@@ -136,12 +138,28 @@ class PlaylistManager:
             # Move next folder contents to current folder
             if os.path.exists(next_folder):
                 for filename in os.listdir(next_folder):
+                    # Skip the temp folder - it's for yt-dlp downloads, not for live playback
+                    if filename == 'temp':
+                        continue
+                    # Skip archive.txt - it's used by yt-dlp to track downloaded videos
+                    # and should not be moved to live folder
+                    if filename == 'archive.txt':
+                        continue
                     src = os.path.join(next_folder, filename)
                     dst = os.path.join(current_folder, filename)
                     try:
                         shutil.move(src, dst)
                     except Exception as e:
                         logger.error(f"Error moving {src} to {dst}: {e}")
+
+            # Delete archive.txt after rotation completes so next rotation starts fresh
+            archive_path = os.path.join(next_folder, 'archive.txt')
+            if os.path.exists(archive_path):
+                try:
+                    os.unlink(archive_path)
+                    logger.info("Deleted archive.txt after rotation")
+                except Exception as e:
+                    logger.warning(f"Could not delete archive.txt: {e}")
 
             logger.info("Content folders switched successfully")
             return True
@@ -188,7 +206,6 @@ class PlaylistManager:
         Cleans up override content and restores original.
         """
         try:
-            import time
             
             # Normalize paths to avoid Windows path issues
             current_folder = os.path.normpath(current_folder)
@@ -278,14 +295,13 @@ class PlaylistManager:
 
     def validate_downloads(self, folder: str) -> bool:
         """Validate that downloads completed successfully."""
-        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
 
         if not os.path.exists(folder):
             logger.error(f"Folder does not exist: {folder}")
             return False
 
         video_files = [f for f in os.listdir(folder)
-                       if f.lower().endswith(video_extensions)]
+                       if f.lower().endswith(VIDEO_EXTENSIONS)]
 
         if len(video_files) == 0:
             logger.error("No video files found in download folder")
@@ -300,3 +316,95 @@ class PlaylistManager:
 
         logger.info(f"Validated {len(video_files)} video files")
         return True
+
+    def get_complete_video_files(self, folder: str) -> list:
+        """
+        Get list of complete video files in a folder.
+        
+        Note: yt-dlp is configured to separate temp files (fragments, .part, .ytdl)
+        into a 'temp' subfolder, so this only needs to check for video extensions.
+        """
+        if not os.path.exists(folder):
+            return []
+        complete_files = []
+        for filename in os.listdir(folder):
+            # Skip subdirectories (including 'temp' folder)
+            if os.path.isdir(os.path.join(folder, filename)):
+                continue
+            # Include files with video extensions
+            if filename.lower().endswith(VIDEO_EXTENSIONS):
+                complete_files.append(filename)
+        return complete_files
+
+    def cleanup_temp_downloads(self, folder: str) -> bool:
+        """
+        Clean up temporary download files in the temp subfolder.
+        
+        yt-dlp stores all temporary files (fragments, .part, .ytdl) in folder/temp/.
+        This should be called after each successful rotation to clean up old metadata.
+        """
+        temp_folder = os.path.join(folder, 'temp')
+        if not os.path.exists(temp_folder):
+            return True  # Nothing to clean
+        
+        try:
+            for filename in os.listdir(temp_folder):
+                filepath = os.path.join(temp_folder, filename)
+                if os.path.isfile(filepath):
+                    os.remove(filepath)
+                elif os.path.isdir(filepath):
+                    shutil.rmtree(filepath)
+            logger.info(f"Cleaned up temp downloads folder: {temp_folder}")
+            return True
+        except Exception as e:
+            logger.error(f"Error cleaning up temp downloads folder: {e}")
+            return False
+
+    def move_files_to_folder(self, source_folder: str, dest_folder: str, filenames: list) -> bool:
+        """Move specific files from source to destination folder."""
+        try:
+            os.makedirs(dest_folder, exist_ok=True)
+            for filename in filenames:
+                src = os.path.join(source_folder, filename)
+                dst = os.path.join(dest_folder, filename)
+                if os.path.exists(src):
+                    shutil.move(src, dst)
+                    logger.info(f"Moved: {filename} → {os.path.basename(dest_folder)}/")
+            return True
+        except Exception as e:
+            logger.error(f"Error moving files: {e}")
+            return False
+
+    def copy_files_to_folder(self, source_folder: str, dest_folder: str, filenames: list) -> bool:
+        """Copy specific files from source to destination folder (do not move)."""
+        try:
+            os.makedirs(dest_folder, exist_ok=True)
+            for filename in filenames:
+                src = os.path.join(source_folder, filename)
+                dst = os.path.join(dest_folder, filename)
+                if os.path.exists(src):
+                    shutil.copy2(src, dst)
+                    logger.info(f"Copied: {filename} → {os.path.basename(dest_folder)}/")
+            return True
+        except Exception as e:
+            logger.error(f"Error copying files: {e}")
+            return False
+
+    def merge_folders_to_destination(self, source_folders: list, dest_folder: str) -> bool:
+        """Merge contents from multiple source folders into destination folder."""
+        try:
+            os.makedirs(dest_folder, exist_ok=True)
+            for source_folder in source_folders:
+                if not os.path.exists(source_folder):
+                    continue
+                for filename in os.listdir(source_folder):
+                    src = os.path.join(source_folder, filename)
+                    dst = os.path.join(dest_folder, filename)
+                    if os.path.isfile(src):
+                        shutil.move(src, dst)
+                        logger.info(f"Merged: {filename} → {os.path.basename(dest_folder)}/")
+            logger.info("Folder merge completed successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error merging folders: {e}")
+            return False

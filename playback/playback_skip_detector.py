@@ -3,6 +3,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from typing import Optional
+from config.constants import VIDEO_EXTENSIONS
 from core.database import DatabaseManager
 from controllers.obs_controller import OBSController
 
@@ -41,6 +42,15 @@ class PlaybackSkipDetector:
         self._all_content_consumed = False  # Flag set when final video transitions
         self._resume_seek_pending = False  # Flag to skip cumulative increment on first position check after resume
         self._grace_period_checks = 0  # Grace period to allow VLC to stabilize after initialization
+        
+        # Playlist tracking for reliable video deletion
+        # These track the actual playlist sent to VLC, not folder contents
+        self._vlc_playlist: list[str] = []  # List of video filenames in the order VLC received them
+        self._playlist_position: int = 0  # Current position in the playlist (0-indexed)
+        self._temp_playback_mode: bool = False  # Whether we're in temp playback mode (enables VLC refresh)
+        self._vlc_refresh_callback = None  # Callback to refresh VLC when playlist exhausted during temp playback
+        self._vlc_refresh_needed = False  # Flag set when VLC refresh is needed (checked by automation controller)
+        self._position_change_callback = None  # Callback to notify when playlist position changes (for persistence)
 
     def initialize(self, total_duration_seconds: int = 0, original_finish_time: Optional[datetime] = None, resume_position_ms: int = 0):
         """Initialize detector with current VLC position and rotation duration.
@@ -82,6 +92,11 @@ class PlaybackSkipDetector:
         self._all_content_consumed = False
         self._resume_seek_pending = False
         self._grace_period_checks = 0
+        # Reset playlist tracking
+        self._vlc_playlist = []
+        self._playlist_position = 0
+        self._temp_playback_mode = False
+        self._position_change_callback = None
         logger.debug("Playback skip detector reset")
 
     def set_handlers(self, content_switch_handler, stream_manager):
@@ -93,6 +108,61 @@ class PlaybackSkipDetector:
         """
         self.content_switch_handler = content_switch_handler
         self.stream_manager = stream_manager
+
+    def set_vlc_playlist(self, playlist: list[str], reset_position: bool = True):
+        """Set the VLC playlist for tracking which video is playing.
+        
+        This should be called whenever update_vlc_source is called, with the same
+        list of filenames (not full paths, just filenames) in the same order.
+        
+        Args:
+            playlist: List of video filenames in the order they were sent to VLC
+            reset_position: Whether to reset position to 0 (True for new playlist, False for resume)
+        """
+        self._vlc_playlist = playlist.copy()
+        if reset_position:
+            self._playlist_position = 0
+        logger.info(f"Skip detector playlist set: {len(playlist)} videos, position={self._playlist_position}")
+
+    def set_temp_playback_mode(self, enabled: bool, refresh_callback=None):
+        """Enable or disable temp playback mode.
+        
+        In temp playback mode, when the playlist is exhausted and new files are
+        available in the folder, the refresh_callback will be called to update VLC.
+        
+        Args:
+            enabled: Whether temp playback mode is active
+            refresh_callback: Async callback to refresh VLC source when playlist exhausted
+        """
+        self._temp_playback_mode = enabled
+        self._vlc_refresh_callback = refresh_callback
+        logger.info(f"Temp playback mode: {'enabled' if enabled else 'disabled'}")
+
+    def set_position_change_callback(self, callback):
+        """Set callback to be called when playlist position changes.
+        
+        Used for persisting temp playback position to database for crash recovery.
+        
+        Args:
+            callback: Function that takes new_position (int) as argument
+        """
+        self._position_change_callback = callback
+
+    def get_current_video_from_playlist(self) -> Optional[str]:
+        """Get the filename of the current video based on playlist tracking.
+        
+        Returns:
+            Filename of current video, or None if playlist not set or position invalid
+        """
+        if not self._vlc_playlist or self._playlist_position >= len(self._vlc_playlist):
+            return None
+        return self._vlc_playlist[self._playlist_position]
+
+    def is_on_last_known_video(self) -> bool:
+        """Check if we're on the last video in the tracked VLC playlist."""
+        if not self._vlc_playlist:
+            return False
+        return self._playlist_position >= len(self._vlc_playlist) - 1
 
     def _update_category_for_current_video(self):
         """Update stream category based on currently playing video."""
@@ -107,11 +177,19 @@ class PlaybackSkipDetector:
             logger.debug(f"Could not update category on video transition: {e}")
 
     def get_current_video_filename(self) -> Optional[str]:
-        """Get the filename of the currently playing video in the folder.
+        """Get the filename of the currently playing video.
+        
+        Uses playlist tracking if available (more reliable), otherwise falls back
+        to folder scanning (less reliable during active downloads).
         
         Returns:
             Filename of current video, or None if unable to determine
         """
+        # Prefer playlist tracking if available
+        if self._vlc_playlist:
+            return self.get_current_video_from_playlist()
+        
+        # Fallback to folder scanning (legacy behavior)
         video_files = self._get_video_files_in_order()
         if not video_files:
             return None
@@ -124,23 +202,24 @@ class PlaybackSkipDetector:
         if not self.video_folder or not os.path.exists(self.video_folder):
             return []
         
-        video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
         video_files = []
         
         try:
             for filename in sorted(os.listdir(self.video_folder)):
-                if filename.lower().endswith(video_extensions):
+                if filename.lower().endswith(VIDEO_EXTENSIONS):
                     video_files.append(filename)
         except Exception as e:
             logger.warning(f"Failed to list video files: {e}")
         
         return video_files
 
-    def _delete_completed_video(self, video_filename: str) -> bool:
+    def _delete_completed_video(self, video_filename: str, update_vlc: bool = False) -> bool:
         """Delete a completed video file from the video folder.
         
         Args:
             video_filename: Name of the video file to delete
+            update_vlc: Whether to update OBS VLC source after deletion (usually False
+                       since we track playlist position instead of rescanning folder)
         
         Returns:
             True if deleted successfully, False otherwise
@@ -154,11 +233,12 @@ class PlaybackSkipDetector:
                 os.remove(video_path)
                 logger.info(f"Deleted completed video: {video_filename}")
                 
-                # Update OBS VLC source to remove the deleted video from its playlist
-                # This prevents VLC from trying to play a non-existent file
-                if self.obs_controller:
-                    self.obs_controller.update_vlc_source(self.vlc_source_name, self.video_folder)
-                    logger.info(f"Updated OBS VLC source to remove {video_filename}")
+                # Only update OBS VLC source if explicitly requested
+                # Normally we don't do this because it restarts the playlist
+                if update_vlc and self.obs_controller:
+                    success, _ = self.obs_controller.update_vlc_source(self.vlc_source_name, self.video_folder)
+                    if success:
+                        logger.info(f"Updated OBS VLC source to remove {video_filename}")
                 
                 return True
             else:
@@ -229,28 +309,93 @@ class PlaybackSkipDetector:
                 # Position near 0 = video transition
                 logger.info(f"Video transition detected: position went from {self.last_known_playback_position_ms}ms to {current_position_ms}ms")
                 
-                # Delete the completed video (except if it's the last one in playlist)
-                video_files = self._get_video_files_in_order()
-                if video_files and len(video_files) > 1:
-                    # Only add to cumulative when transitioning to a NEW video (not looping the last one)
-                    # Previous video ended, so add its duration to cumulative
+                # Determine which video just finished using playlist tracking
+                video_to_delete = None
+                remaining_in_playlist = 0
+                
+                if self._vlc_playlist:
+                    # Use playlist tracking (reliable)
+                    if self._playlist_position < len(self._vlc_playlist):
+                        video_to_delete = self._vlc_playlist[self._playlist_position]
+                        remaining_in_playlist = len(self._vlc_playlist) - self._playlist_position - 1
+                        logger.info(f"Playlist tracking: position {self._playlist_position}, video: {video_to_delete}, remaining: {remaining_in_playlist}")
+                else:
+                    # Fallback to folder scanning (legacy, less reliable)
+                    video_files = self._get_video_files_in_order()
+                    if video_files:
+                        video_to_delete = video_files[0]
+                        remaining_in_playlist = len(video_files) - 1
+                
+                if video_to_delete and remaining_in_playlist > 0:
+                    # Not the last video - delete and advance position
                     self.cumulative_playback_ms += self.last_known_playback_position_ms
                     logger.info(f"Cumulative playback now: {self.cumulative_playback_ms}ms ({self.cumulative_playback_ms/1000:.1f}s)")
                     
-                    # Delete the first video (current one being transitioned away from)
-                    self._delete_completed_video(video_files[0])
+                    # Delete the video that just finished and update VLC source
+                    self._delete_completed_video(video_to_delete, update_vlc=False)
+                    
+                    # Advance playlist position BEFORE updating VLC
+                    if self._vlc_playlist:
+                        self._playlist_position += 1
+                        logger.info(f"Advanced playlist position to {self._playlist_position}")
+                        
+                        # Notify callback for persistence (crash recovery)
+                        if self._position_change_callback:
+                            try:
+                                self._position_change_callback(self._playlist_position)
+                            except Exception as e:
+                                logger.error(f"Error in position change callback: {e}")
+                    
+                    # Update VLC with current tracked playlist (excluding deleted video)
+                    # In temp playback, always use tracked playlist to avoid adding new files mid-playback
+                    if self._temp_playback_mode and self.obs_controller and self._vlc_playlist:
+                        remaining_playlist = self._vlc_playlist[self._playlist_position:]
+                        success, _ = self.obs_controller.update_vlc_source(self.vlc_source_name, self.video_folder, playlist=remaining_playlist)
+                        if success:
+                            logger.info(f"Updated VLC with tracked playlist ({len(remaining_playlist)} videos remaining)")
+                    elif self.obs_controller:
+                        # Normal playback: scan folder
+                        success, _ = self.obs_controller.update_vlc_source(self.vlc_source_name, self.video_folder)
+                        if success:
+                            logger.info(f"Updated OBS VLC source to remove {video_to_delete}")
                     
                     # Update category for newly playing video
                     self._update_category_for_current_video()
-                elif video_files:
-                    logger.info(f"Not deleting {video_files[0]} - it's the last video in playlist")
-                    # Flag that all content has been consumed - ready for immediate rotation if prepared playlists exist
-                    # Only set this flag after grace period expires (allows VLC to stabilize after resume/seek)
-                    if self._grace_period_checks <= 0:
-                        self._all_content_consumed = True
+                    
+                elif video_to_delete:
+                    # This is the last video in the tracked playlist
+                    logger.info(f"On last video in playlist: {video_to_delete}")
+                    
+                    # Check if we're in temp playback mode and there are new files available
+                    if self._temp_playback_mode and self._vlc_refresh_callback:
+                        # Check if there are new files in the folder that aren't in our playlist
+                        current_folder_files = self._get_video_files_in_order()
+                        new_files_available = len(current_folder_files) > 1  # More than just the current video
+                        
+                        if new_files_available:
+                            logger.info(f"New files available in folder ({len(current_folder_files)} files), triggering VLC refresh")
+                            # Delete the current video first
+                            self.cumulative_playback_ms += self.last_known_playback_position_ms
+                            self._delete_completed_video(video_to_delete, update_vlc=False)
+                            # Set flag for automation controller to handle the async refresh callback
+                            # This allows the callback to execute in the proper async context
+                            self._vlc_refresh_needed = True
+                        else:
+                            # No new files, set all content consumed flag
+                            logger.info(f"Not deleting {video_to_delete} - it's the last video and no new files available")
+                            if self._grace_period_checks <= 0:
+                                self._all_content_consumed = True
+                            else:
+                                self._grace_period_checks -= 1
+                                logger.info(f"Grace period active: {self._grace_period_checks} checks remaining")
                     else:
-                        self._grace_period_checks -= 1
-                        logger.info(f"Grace period active: {self._grace_period_checks} checks remaining before allowing rotation trigger")
+                        # Not in temp playback mode, normal behavior
+                        logger.info(f"Not deleting {video_to_delete} - it's the last video in playlist")
+                        if self._grace_period_checks <= 0:
+                            self._all_content_consumed = True
+                        else:
+                            self._grace_period_checks -= 1
+                            logger.info(f"Grace period active: {self._grace_period_checks} checks remaining before allowing rotation trigger")
                 
                 position_delta_ms = current_position_ms  # Current position in new video
         

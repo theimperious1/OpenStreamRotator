@@ -2,6 +2,8 @@ import logging
 import time
 import obsws_python as obs
 from typing import Optional
+import os
+from config.constants import VIDEO_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -48,25 +50,40 @@ class OBSController:
             logger.error(f"Failed to stop VLC source: {e}")
             return False
 
-    def update_vlc_source(self, source_name: str, video_folder: str) -> bool:
+    def update_vlc_source(self, source_name: str, video_folder: str, playlist: Optional[list[str]] = None) -> tuple[bool, list[str]]:
         """
         Update VLC source playlist in OBS.
         Updates the existing source without removing/recreating it.
+        
+        Args:
+            source_name: Name of the VLC source in OBS
+            video_folder: Path to video folder (for full paths)
+            playlist: Optional list of filenames to use instead of scanning folder
+                     Useful during temp playback to avoid adding newly downloaded files
+        
+        Returns:
+            Tuple of (success, playlist) where playlist is list of filenames in order
         """
         try:
-            import os
-            video_extensions = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
-            video_files = []
+            video_files = []  # Full paths for OBS
+            video_filenames = []  # Just filenames for playlist tracking
 
-            if os.path.exists(video_folder):
+            if playlist:
+                # Use provided playlist instead of scanning folder
+                # This is used in temp playback to maintain consistent playlist
+                video_filenames = playlist
+                video_files = [os.path.abspath(os.path.join(video_folder, filename)) for filename in playlist]
+            elif os.path.exists(video_folder):
+                # Scan folder for all video files
                 for filename in sorted(os.listdir(video_folder)):
-                    if filename.lower().endswith(video_extensions):
+                    if filename.lower().endswith(VIDEO_EXTENSIONS):
                         full_path = os.path.abspath(os.path.join(video_folder, filename))
                         video_files.append(full_path)
+                        video_filenames.append(filename)
 
             if not video_files:
                 logger.error("No video files found to add to VLC source")
-                return False
+                return False, []
 
             self.obs_client.set_input_settings(
                 name=source_name,
@@ -79,11 +96,11 @@ class OBSController:
             )
 
             logger.info(f"Updated VLC source with {len(video_files)} videos")
-            return True
+            return True, video_filenames
 
         except Exception as e:
             logger.error(f"Failed to update VLC source: {e}")
-            return False
+            return False, []
 
     def verify_scenes(self, required_scenes: list[str]) -> bool:
         """Verify that required scenes exist in OBS."""
@@ -217,7 +234,8 @@ class OBSController:
             True if successful
         """
         # Update VLC source with new content
-        if not self.update_vlc_source(vlc_source_name, video_folder):
+        success, _ = self.update_vlc_source(vlc_source_name, video_folder)
+        if not success:
             logger.error("Failed to update VLC source during finalization")
             return False
         

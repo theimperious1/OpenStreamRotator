@@ -77,15 +77,45 @@ echo.
 REM Delete backup folders (if they exist)
 echo Cleaning backup folders...
 
-REM Get parent directory of video folder for temp_pending_backup
+REM Get parent directory of video folder for temp backup folders
 for %%A in ("!VIDEO_FOLDER!") do set "VIDEO_PARENT=%%~dpA"
 set "VIDEO_PARENT=!VIDEO_PARENT:~0,-1!"
 
+REM Delete temp_pending_backup (prepared rotation backup)
 if exist "!VIDEO_PARENT!\temp_pending_backup" (
     echo Deleting !VIDEO_PARENT!\temp_pending_backup\*...
     del /f /q "!VIDEO_PARENT!\temp_pending_backup\*" 2>nul
     for /d %%x in ("!VIDEO_PARENT!\temp_pending_backup\*") do @rmdir /s /q "%%x" 2>nul
     rmdir /q "!VIDEO_PARENT!\temp_pending_backup" 2>nul
+)
+
+REM Delete temp_override_pending (override content download folder)
+if exist "!VIDEO_PARENT!\temp_override_pending" (
+    echo Deleting !VIDEO_PARENT!\temp_override_pending\*...
+    del /f /q "!VIDEO_PARENT!\temp_override_pending\*" 2>nul
+    for /d %%x in ("!VIDEO_PARENT!\temp_override_pending\*") do @rmdir /s /q "%%x" 2>nul
+    rmdir /q "!VIDEO_PARENT!\temp_override_pending" 2>nul
+)
+
+REM Delete temp_backup_override (live content backup during override)
+if exist "!VIDEO_PARENT!\temp_backup_override" (
+    echo Deleting !VIDEO_PARENT!\temp_backup_override\*...
+    del /f /q "!VIDEO_PARENT!\temp_backup_override\*" 2>nul
+    for /d %%x in ("!VIDEO_PARENT!\temp_backup_override\*") do @rmdir /s /q "%%x" 2>nul
+    rmdir /q "!VIDEO_PARENT!\temp_backup_override" 2>nul
+)
+
+echo.
+
+REM Delete temp_playback folder (created during large playlist downloads)
+if exist "!VIDEO_PARENT!\temp_playback" (
+    echo Deleting !VIDEO_PARENT!\temp_playback\*...
+    del /f /q "!VIDEO_PARENT!\temp_playback\*" 2>nul
+    for /d %%x in ("!VIDEO_PARENT!\temp_playback\*") do @rmdir /s /q "%%x" 2>nul
+    rmdir /q "!VIDEO_PARENT!\temp_playback" 2>nul
+    echo Deleted temp_playback folder
+) else (
+    echo temp_playback folder not found
 )
 
 echo.

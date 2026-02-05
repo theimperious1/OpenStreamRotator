@@ -49,22 +49,40 @@ class PlaylistSelector:
 
     def _get_playlists_in_pipeline(self) -> set:
         """
-        Get playlists that are currently in the pipeline (preparing/downloading).
+        Get playlists that are currently in the pipeline (currently playing or preparing/downloading).
         
         Returns:
-            Set of playlist names currently being prepared
+            Set of playlist names currently being played or prepared
         """
         try:
             session = self.db.get_current_session()
             if not session:
                 return set()
             
+            excluded = set()
+            
+            # Exclude playlists_selected (currently playing in live/ folder)
+            playlists_selected_json = session.get('playlists_selected')
+            if playlists_selected_json:
+                try:
+                    playlists_selected_ids = json.loads(playlists_selected_json) if isinstance(playlists_selected_json, str) else playlists_selected_json
+                    for playlist_id in playlists_selected_ids:
+                        playlist = self.db.get_playlist(playlist_id)
+                        if playlist:
+                            excluded.add(playlist['name'])
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    pass
+            
             # Get next_playlists from current session (what's being prepared)
             next_playlists_json = session.get('next_playlists')
             if next_playlists_json:
                 next_playlist_names = json.loads(next_playlists_json) if isinstance(next_playlists_json, str) else next_playlists_json
-                logger.debug(f"Excluding from selection (currently preparing): {next_playlist_names}")
-                return set(next_playlist_names)
+                excluded.update(next_playlist_names)
+            
+            if excluded:
+                logger.debug(f"Excluding from selection (currently playing or preparing): {excluded}")
+            
+            return excluded
         except (json.JSONDecodeError, TypeError, KeyError) as e:
             logger.debug(f"Could not parse in-pipeline playlists: {e}")
         
@@ -96,8 +114,6 @@ class PlaylistSelector:
     def _select_automatic(self, allowed_names: set, excluded_names: Optional[set] = None) -> List[Dict]:
         """
         Automatically select playlists based on rotation strategy.
-        Ensures at least 1-2 long (non-shorts) playlists are always included to prevent
-        scenarios where all shorts are selected (which would cause massive download times).
         Excludes playlists currently being prepared.
         
         Args:
@@ -105,7 +121,7 @@ class PlaylistSelector:
             excluded_names: Set of playlist names to exclude (currently preparing)
         
         Returns:
-            List of selected playlists balanced with long and shorts content
+            List of selected playlists
         """
         if excluded_names is None:
             excluded_names = set()
@@ -116,10 +132,6 @@ class PlaylistSelector:
 
         all_playlists = self.db.get_enabled_playlists()
         
-        # Create a lookup map of is_short flag from config
-        config_playlists = self.config.get_playlists()
-        is_short_map = {p['name']: p.get('is_short', False) for p in config_playlists}
-        
         # Filter to only include playlists in config AND not currently preparing
         all_playlists = [p for p in all_playlists 
                         if p['name'] in allowed_names 
@@ -129,38 +141,15 @@ class PlaylistSelector:
             logger.error("No eligible playlists available! (all in preparation or disabled)")
             return []
 
-        # Separate playlists into long-form and shorts (using is_short flag from config)
-        long_playlists = [p for p in all_playlists if not is_short_map.get(p['name'], False)]
-        shorts_playlists = [p for p in all_playlists if is_short_map.get(p['name'], False)]
-        
-        logger.debug(f"Available long playlists: {[p['name'] for p in long_playlists]}")
-        logger.debug(f"Available shorts playlists: {[p['name'] for p in shorts_playlists]}")
+        # Sort by last_played (oldest first) and priority
+        # Playlists never played come first (NULLS FIRST is handled in SQL)
 
-        # Determine number of playlists to select
+        # Select between min and max playlists
         num_to_select = min(len(all_playlists), max_playlists)
         num_to_select = max(num_to_select, min_playlists)
-        
-        # Ensure at least 1-2 long playlists are included (don't let all shorts be selected)
-        # Use min_playlists as the minimum number of long playlists to include
-        min_long_playlists = max(1, min_playlists - 1) if min_playlists > 1 else 1
-        
-        # If we have fewer long playlists than required, use what we have
-        num_long_to_select = min(len(long_playlists), min_long_playlists)
-        
-        if num_long_to_select == 0 and len(long_playlists) > 0:
-            # Edge case: ensure at least 1 long playlist if any exist
-            num_long_to_select = 1
-        
-        # Calculate how many shorts we can add
-        num_shorts_to_select = num_to_select - num_long_to_select
-        num_shorts_to_select = min(num_shorts_to_select, len(shorts_playlists))
-        
-        # Select from each group (sorted by last_played and priority)
-        selected_long = long_playlists[:num_long_to_select]
-        selected_shorts = shorts_playlists[:num_shorts_to_select]
-        selected = selected_long + selected_shorts
 
-        logger.info(f"Auto-selected {len(selected)} playlists: {[p['name'] for p in selected]} "
-                   f"({len(selected_long)} long, {len(selected_shorts)} shorts) "
-                   f"(excluded from preparation: {excluded_names})")
+        selected = all_playlists[:num_to_select]
+
+        logger.info(f"Auto-selected {len(selected)} playlists: {[p['name'] for p in selected]} (excluded from preparation: {excluded_names})")
         return selected
+    

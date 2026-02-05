@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import os
+import json
 from datetime import datetime
 from typing import List, Dict, Optional
 import logging
@@ -125,6 +126,37 @@ class DatabaseManager:
             logger.info("Added next_playlists_status column to rotation_sessions table")
         except sqlite3.OperationalError:
             logger.debug("next_playlists_status column already exists")
+        
+        # Temp playback state columns for crash recovery
+        try:
+            cursor.execute("ALTER TABLE rotation_sessions ADD COLUMN temp_playback_active BOOLEAN DEFAULT 0")
+            logger.info("Added temp_playback_active column to rotation_sessions table")
+        except sqlite3.OperationalError:
+            logger.debug("temp_playback_active column already exists")
+        
+        try:
+            cursor.execute("ALTER TABLE rotation_sessions ADD COLUMN temp_playback_playlist TEXT")
+            logger.info("Added temp_playback_playlist column to rotation_sessions table")
+        except sqlite3.OperationalError:
+            logger.debug("temp_playback_playlist column already exists")
+        
+        try:
+            cursor.execute("ALTER TABLE rotation_sessions ADD COLUMN temp_playback_position INTEGER DEFAULT 0")
+            logger.info("Added temp_playback_position column to rotation_sessions table")
+        except sqlite3.OperationalError:
+            logger.debug("temp_playback_position column already exists")
+        
+        try:
+            cursor.execute("ALTER TABLE rotation_sessions ADD COLUMN temp_playback_folder TEXT")
+            logger.info("Added temp_playback_folder column to rotation_sessions table")
+        except sqlite3.OperationalError:
+            logger.debug("temp_playback_folder column already exists")
+        
+        try:
+            cursor.execute("ALTER TABLE rotation_sessions ADD COLUMN temp_playback_cursor_ms INTEGER DEFAULT 0")
+            logger.info("Added temp_playback_cursor_ms column to rotation_sessions table")
+        except sqlite3.OperationalError:
+            logger.debug("temp_playback_cursor_ms column already exists")
 
         # Playback log table
         cursor.execute("""
@@ -722,5 +754,228 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to get playlists with IDs by names: {e}")
             return []
+        finally:
+            self.close()
+    def save_temp_playback_state(self, session_id: int, playlist: List[str], position: int, folder: str, cursor_ms: int = 0) -> bool:
+        """Save temp playback state for crash recovery.
+        
+        Args:
+            session_id: Session ID
+            playlist: List of video filenames in the VLC playlist
+            position: Current position in the playlist (which video)
+            folder: Path to the temp playback folder (pending folder)
+            cursor_ms: Current playback position within the video in milliseconds
+        
+        Returns:
+            True if saved successfully
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("""
+                UPDATE rotation_sessions 
+                SET temp_playback_active = 1,
+                    temp_playback_playlist = ?,
+                    temp_playback_position = ?,
+                    temp_playback_folder = ?,
+                    temp_playback_cursor_ms = ?
+                WHERE id = ?
+            """, (json.dumps(playlist), position, folder, cursor_ms, session_id))
+            conn.commit()
+            logger.info(f"Saved temp playback state: {len(playlist)} videos, position={position}, cursor={cursor_ms}ms")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save temp playback state: {e}")
+            return False
+        finally:
+            self.close()
+
+    def update_temp_playback_position(self, session_id: int, position: int) -> bool:
+        """Update only the temp playback position (called on video transitions).
+        
+        Args:
+            session_id: Session ID
+            position: New position in the playlist
+        
+        Returns:
+            True if updated successfully
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("""
+                UPDATE rotation_sessions 
+                SET temp_playback_position = ?,
+                    temp_playback_cursor_ms = 0
+                WHERE id = ?
+            """, (position, session_id))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update temp playback position: {e}")
+            return False
+        finally:
+            self.close()
+
+    def update_temp_playback_cursor(self, session_id: int, cursor_ms: int) -> bool:
+        """Update the playback cursor position within current video (called periodically).
+        
+        Args:
+            session_id: Session ID
+            cursor_ms: Current playback position in milliseconds
+        
+        Returns:
+            True if updated successfully
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("""
+                UPDATE rotation_sessions 
+                SET temp_playback_cursor_ms = ?
+                WHERE id = ?
+            """, (cursor_ms, session_id))
+            conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update temp playback cursor: {e}")
+            return False
+        finally:
+            self.close()
+
+    def clear_temp_playback_state(self, session_id: int) -> bool:
+        """Clear temp playback state when exiting temp playback normally.
+        
+        Args:
+            session_id: Session ID
+        
+        Returns:
+            True if cleared successfully
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("""
+                UPDATE rotation_sessions 
+                SET temp_playback_active = 0,
+                    temp_playback_playlist = NULL,
+                    temp_playback_position = NULL,
+                    temp_playback_folder = NULL,
+                    temp_playback_cursor_ms = NULL
+                WHERE id = ?
+            """, (session_id,))
+            conn.commit()
+            logger.info(f"Cleared temp playback state for session {session_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to clear temp playback state: {e}")
+            return False
+        finally:
+            self.close()
+
+    def get_temp_playback_state(self, session_id: int) -> Optional[Dict]:
+        """Get temp playback state for recovery.
+        
+        Args:
+            session_id: Session ID
+        
+        Returns:
+            Dict with active, playlist, position, folder, cursor_ms
+            or None if no temp playback was active
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("""
+                SELECT temp_playback_active, temp_playback_playlist, temp_playback_position, temp_playback_folder, temp_playback_cursor_ms
+                FROM rotation_sessions 
+                WHERE id = ?
+            """, (session_id,))
+            row = cursor.fetchone()
+            
+            if row and row[0]:  # temp_playback_active is True
+                playlist = json.loads(row[1]) if row[1] else []
+                return {
+                    'active': True,
+                    'playlist': playlist,
+                    'position': row[2] or 0,
+                    'folder': row[3],
+                    'cursor_ms': row[4] or 0
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get temp playback state: {e}")
+            return None
+        finally:
+            self.close()
+
+    def validate_prepared_playlists_exist(self, session_id: int, pending_folder: str) -> bool:
+        """
+        Verify that all files for prepared playlists (next_playlists) actually exist in pending folder.
+        
+        Args:
+            session_id: Session ID to check
+            pending_folder: Path to pending/next rotation folder
+        
+        Returns:
+            True if all prepared playlist files exist, False otherwise
+        """
+        
+        conn = self.connect()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                SELECT next_playlists FROM rotation_sessions 
+                WHERE id = ?
+            """, (session_id,))
+            
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                # No prepared playlists, nothing to validate
+                return True
+            
+            next_playlists_json = row[0]
+            try:
+                next_playlists = json.loads(next_playlists_json) if isinstance(next_playlists_json, str) else next_playlists_json
+            except json.JSONDecodeError:
+                logger.warning("Could not parse next_playlists JSON")
+                return False
+            
+            # Get all video files for these playlists
+            expected_files = set()
+            
+            for playlist_name in next_playlists:
+                cursor.execute("""
+                    SELECT filename FROM videos 
+                    WHERE playlist_name = ?
+                """, (playlist_name,))
+                
+                for row in cursor.fetchall():
+                    expected_files.add(row[0])
+            
+            # Check if all files exist in pending folder
+            if not os.path.exists(pending_folder):
+                logger.warning(f"Pending folder does not exist: {pending_folder}")
+                return False
+            
+            actual_files = set(os.listdir(pending_folder))
+            
+            missing_files = expected_files - actual_files
+            if missing_files:
+                logger.warning(f"Prepared playlist files missing from pending folder: {list(missing_files)[:5]}")
+                return False
+            
+            logger.info(f"Validated {len(expected_files)} prepared playlist files exist in pending folder")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error validating prepared playlists: {e}")
+            return False
         finally:
             self.close()

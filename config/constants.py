@@ -18,7 +18,7 @@ CHECK_INTERVAL_TWITCH_API = 60  # Twitch live status checks
 SKIP_DETECTION_MARGIN_MS = 5000  # 5 second margin for VLC/OBS reporting variations
 
 # Video File Extensions
-VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
+VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
 
 # Default Paths (can be overridden in config)
 DEFAULT_VIDEO_FOLDER = 'C:/stream_videos/'

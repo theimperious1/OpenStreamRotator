@@ -53,6 +53,11 @@ class VideoDownloader:
         """
         # Ensure output folder exists
         os.makedirs(output_folder, exist_ok=True)
+        
+        # Explicitly create temp folder for yt-dlp's temporary files
+        # yt-dlp will use this with 'paths' config for fragments, .part, and .ytdl files
+        temp_folder = os.path.join(output_folder, 'temp')
+        os.makedirs(temp_folder, exist_ok=True)
 
         settings = self.config.get_settings()
         max_retries = settings.get('download_retry_attempts', 3)
@@ -98,20 +103,34 @@ class VideoDownloader:
                 logger.info(f"Downloading playlist (attempt {attempt + 1}/{max_retries}): {playlist_url}")
                 
                 # Configure yt-dlp options
+                
                 ydl_opts = {
                     'quiet': not verbose,
                     'no_warnings': not verbose,
                     'extract_flat': False,  # Extract video URLs
-                    'fragment_retries': 3,
-                    'concurrent_fragment_downloads': 8,  # Download 8 fragments in parallel
-                    'http_chunk_size': 52428800,  # 50MB chunks
-                    'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
+                    'fragment_retries': 6,
+                    'concurrent_fragment_downloads': 5,  # Download 4 fragments in parallel
+                    'http_chunk_size': 10485760,  # 10MB chunks - I tried raising this higher, doesn't work
+                    'outtmpl': '%(title)s.%(ext)s',
+                    # Archive file to track downloaded videos - prevents re-downloading
+                    # videos that were deleted during temp playback
+                    # Archive file tracks downloaded video IDs to prevent re-downloading
+                    # during temp playback when videos are deleted after being played
+                    'download_archive': os.path.join(output_folder, 'archive.txt'),
+                    # Separate temp files (fragments, .part, .ytdl) into temp/ subfolder
+                    # Final completed videos stay in output_folder, temps in output_folder/temp/
+                    'paths': {
+                        'home': output_folder,
+                        'temp': os.path.join(output_folder, 'temp'),
+                    },
                     # Request throttling to avoid YouTube IP-based blocking
                     'socket_timeout': 30,
                     'sleep_interval': 2,  # Sleep 2 seconds between requests
                     'max_sleep_interval': 5,  # Randomize sleep up to 5 seconds
                     'sleep_interval_requests': 1,  # Sleep after every request
-                    # 'ratelimit': 5000000,  # 5MB/s rate limit - commented out for faster downloads
+                    # 'ratelimit': 50000000,  # 50MB/s rate limit for balanced speed
+                    # Write info.json for metadata-aware resumption of interrupted downloads
+                    'write_info_json': True,
                     'extractor_args': {
                         'youtube': {
                             # Use ios_downgraded to avoid YouTube's aggressive IP-based blocking
@@ -120,6 +139,13 @@ class VideoDownloader:
                         }
                     },
                 }
+                
+                # Add cookie support for age-restricted videos if enabled
+                use_cookies = os.getenv('YT_DLP_USE_COOKIES', 'false').lower() == 'true'
+                if use_cookies:
+                    browser = os.getenv('YT_DLP_BROWSER_FOR_COOKIES', 'firefox').lower()
+                    ydl_opts['cookiesfrombrowser'] = (browser,)
+                    logger.debug(f"Using cookies from browser: {browser}")
                 
                 if verbose:
                     logger.debug(f"yt-dlp options (attempt {attempt + 1}): {ydl_opts}")
