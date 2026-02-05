@@ -98,7 +98,6 @@ class AutomationController:
         self.override_already_cleaned = False
         self._pending_seek_position_ms = 0
         self._seek_retry_count = 0
-        self._last_playback_save_time = 0
         self._rotation_postpone_logged = False
         self._downloads_triggered_this_rotation = False  # Track if downloads already triggered after rotation
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
@@ -182,43 +181,11 @@ class AutomationController:
 
     def save_playback_on_exit(self):
         """Save current playback position when program exits."""
-        if not self.current_session_id:
-            logger.debug("No active session, skipping playback save")
-            return
-        
-        try:
-            if not self.obs_controller:
-                logger.warning("No OBS controller available, skipping playback save")
-                return
-            
-            current_position_ms = self.obs_controller.get_playback_position_ms(VLC_SOURCE_NAME)
-            if current_position_ms is None:
-                logger.warning("VLC position is None, skipping save")
-                return
-            
-            playback_seconds = current_position_ms / 1000
-            self.db.update_session_playback(self.current_session_id, int(playback_seconds))
-            logger.info(f"Saved playback position: {playback_seconds:.1f}s")
-            
-            if self.obs_controller.switch_scene(SCENE_LIVE):
-                logger.info("Switched to pause scene on exit")
-            
-        except Exception as e:
-            logger.error(f"Failed to save playback on exit: {e}")
+        self.playback_tracker.save_on_exit(self.current_session_id, self.obs_controller)
 
     def auto_save_playback_position(self):
-        """Auto-save playback position every second for power loss resilience."""
-        if not self.current_session_id or not self.obs_controller:
-            return
-        
-        try:
-            current_position_ms = self.obs_controller.get_playback_position_ms(VLC_SOURCE_NAME)
-            if current_position_ms is not None:
-                playback_seconds = current_position_ms / 1000
-                self.db.update_session_playback(self.current_session_id, int(playback_seconds))
-                self._last_playback_save_time = time.time()
-        except Exception as e:
-            logger.debug(f"Auto-save playback failed (non-critical): {e}")
+        """Auto-save playback position for power loss resilience."""
+        self.playback_tracker.auto_save_position(self.current_session_id, self.obs_controller)
 
     def connect_obs(self) -> bool:
         """Connect to OBS WebSocket."""
