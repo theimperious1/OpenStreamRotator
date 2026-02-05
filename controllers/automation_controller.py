@@ -105,7 +105,6 @@ class AutomationController:
         self.next_prepared_playlists = None
         self.last_stream_status = None
         self.is_rotating = False
-        self.download_in_progress = False
         self.override_already_cleaned = False
         self._pending_seek_position_ms = 0
         self._seek_retry_count = 0
@@ -125,7 +124,7 @@ class AutomationController:
         self._override_preparation_pending = False  # Override queued, background prep running
         self._override_prep_ready = False  # Background prep completed, ready for commit
         self._override_prep_data = {}  # Data from queue phase (override_pending_folder path, etc)
-        self._background_download_in_progress = False  # Normal rotation download active
+        self._background_download_in_progress = False  # Any background download active (rotation, override, auto-resume)
         
         # Temp playback state (for long playlist handling)
         # When downloads take longer than current content, we stream directly from pending folder
@@ -679,16 +678,15 @@ class AutomationController:
         # Skip on first loop after resume to avoid downloading when resuming into existing rotation
         if (not self._downloads_triggered_this_rotation and 
             self._is_pending_folder_empty() and 
-            not self.download_in_progress and
+            not self._background_download_in_progress and
             not self._just_resumed_session):
             
             playlists = self.rotation_handler.trigger_background_download(
-                self.next_prepared_playlists, self.download_in_progress
+                self.next_prepared_playlists, self._background_download_in_progress
             )
             if playlists:
                 self._downloads_triggered_this_rotation = True
-                self.download_in_progress = True
-                self._background_download_in_progress = True  # Phase 2: Set flag when download starts
+                self._background_download_in_progress = True
                 loop = asyncio.get_event_loop()
                 loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, playlists)
                 logger.debug("Download triggered (pending folder empty)")
@@ -856,7 +854,7 @@ class AutomationController:
             self.obs_controller.switch_scene(target_scene)
             logger.info(f"Switched back to {target_scene} scene after override completion")
         
-        self.download_in_progress = False
+        self._background_download_in_progress = False
         self._downloads_triggered_this_rotation = False  # Reset flag when resuming original rotation
         
         # Set delays after override restoration:
@@ -926,6 +924,11 @@ class AutomationController:
                 self.playback_skip_detector.set_vlc_playlist(playlist)
                 # Enable temp playback mode with refresh callback
                 self.playback_skip_detector.set_temp_playback_mode(True, self._refresh_vlc_during_temp_playback)
+                # Set position change callback for crash recovery persistence
+                session_id = self.current_session_id
+                self.playback_skip_detector.set_position_change_callback(
+                    lambda pos, sid=session_id: self.db.update_temp_playback_position(sid, pos) if sid else None
+                )
                 logger.info(f"Updated skip detector with {len(playlist)} video playlist")
             
             # Update stream title to reflect temp playback content
@@ -941,6 +944,15 @@ class AutomationController:
                 except Exception as e:
                     logger.warning(f"Failed to update stream title during temp playback: {e}")
             
+            # Save temp playback state for crash recovery
+            if self.current_session_id:
+                self.db.save_temp_playback_state(
+                    self.current_session_id,
+                    playlist,
+                    0,  # Starting at position 0
+                    pending_folder
+                )
+            
             logger.info(f"Temp playback activated with {len(complete_files)} files")
             logger.info(f"Streaming directly from pending folder: {pending_folder}")
             logger.info("Videos will be deleted after playing, archive.txt prevents re-download")
@@ -954,6 +966,153 @@ class AutomationController:
                     self.obs_controller.switch_scene('Stream')
             except Exception as scene_error:
                 logger.error(f"Failed to recover scene after temp playback error: {scene_error}")
+
+    async def _restore_temp_playback(self, session: dict, temp_state: dict) -> bool:
+        """Restore temp playback after a crash/restart.
+        
+        Args:
+            session: The current session from database
+            temp_state: Temp playback state dict with 'playlist', 'position', 'folder', 'cursor_ms'
+        
+        Returns:
+            True if successfully restored, False otherwise
+        """
+        logger.info("===== RESTORING TEMP PLAYBACK FROM CRASH =====")
+        
+        try:
+            saved_playlist = temp_state.get('playlist', [])
+            saved_position = temp_state.get('position', 0)
+            pending_folder = temp_state.get('folder')
+            saved_cursor_ms = temp_state.get('cursor_ms', 0)
+            
+            if not pending_folder or not saved_playlist:
+                logger.error("Invalid temp playback state - missing folder or playlist")
+                return False
+            
+            # Validate that remaining files actually exist
+            remaining_playlist = saved_playlist[saved_position:]
+            valid_playlist = []
+            
+            for filename in remaining_playlist:
+                file_path = os.path.join(pending_folder, filename)
+                if os.path.exists(file_path):
+                    valid_playlist.append(filename)
+                else:
+                    logger.warning(f"Skipping missing file during temp playback restore: {filename}")
+            
+            if not valid_playlist:
+                logger.error("No valid files remaining for temp playback restore")
+                return False
+            
+            logger.info(f"Restoring temp playback: {len(valid_playlist)} valid files from position {saved_position}")
+            
+            # Switch to content-switch scene briefly for VLC source update
+            if not self.obs_controller or not self.obs_controller.switch_scene('content-switch'):
+                logger.error("Failed to switch to content-switch scene for temp playback restore")
+                return False
+            
+            await asyncio.sleep(1.5)
+            
+            # Update OBS VLC source with valid remaining playlist
+            success, playlist = self.obs_controller.update_vlc_source(
+                VLC_SOURCE_NAME, 
+                pending_folder, 
+                playlist=valid_playlist
+            )
+            if not success:
+                logger.error("Failed to update VLC source during temp playback restore")
+                return False
+            
+            # Switch back to Stream scene
+            await asyncio.sleep(0.5)
+            if not self.obs_controller.switch_scene('Stream'):
+                logger.error("Failed to switch back to Stream scene after temp playback restore")
+                return False
+            
+            # Seek to saved cursor position if we have one
+            if saved_cursor_ms > 0 and self.obs_controller:
+                await asyncio.sleep(0.5)  # Give VLC time to start playing
+                seek_success = self.obs_controller.seek_media(VLC_SOURCE_NAME, saved_cursor_ms)
+                if seek_success:
+                    logger.info(f"Seeked to saved cursor position: {saved_cursor_ms}ms ({saved_cursor_ms/1000:.1f}s)")
+                else:
+                    logger.warning(f"Failed to seek to saved cursor position: {saved_cursor_ms}ms")
+            
+            # Mark temp playback as active
+            self._temp_playback_active = True
+            self._last_temp_folder_check = time.time()
+            # Set background download flag - if we're in temp playback, downloads haven't finished
+            self._background_download_in_progress = True
+            
+            # Initialize the skip detector (creates it if None, initializes state)
+            self._initialize_skip_detector()
+            
+            # Configure skip detector for temp playback mode
+            if self.playback_skip_detector:
+                self.playback_skip_detector.video_folder = pending_folder
+                self.playback_skip_detector.reset()
+                # Set playlist but position starts at 0 since we rebuilt the valid playlist
+                self.playback_skip_detector.set_vlc_playlist(valid_playlist)
+                self.playback_skip_detector.set_temp_playback_mode(True, self._refresh_vlc_during_temp_playback)
+                # Set position change callback for crash recovery persistence
+                session_id = self.current_session_id
+                self.playback_skip_detector.set_position_change_callback(
+                    lambda pos, sid=session_id: self.db.update_temp_playback_position(sid, pos) if sid else None
+                )
+                logger.info(f"Configured skip detector for temp playback with {len(valid_playlist)} videos")
+            
+            # Update database with corrected state
+            if self.current_session_id:
+                self.db.save_temp_playback_state(
+                    self.current_session_id,
+                    valid_playlist,
+                    0,  # Reset to 0 since we rebuilt playlist from remaining files
+                    pending_folder
+                )
+            
+            # Update stream title from next_playlists
+            if session and session.get('next_playlists'):
+                try:
+                    next_playlist_names = json.loads(session.get('next_playlists', '[]'))
+                    if next_playlist_names:
+                        new_title = self.playlist_manager.generate_stream_title(next_playlist_names)
+                        if self.stream_manager:
+                            await self.stream_manager.update_title(new_title)
+                        logger.info(f"Restored stream title for temp playback: {new_title}")
+                except Exception as e:
+                    logger.warning(f"Failed to restore stream title during temp playback restore: {e}")
+            
+            logger.info(f"Temp playback restored with {len(valid_playlist)} files")
+            logger.info(f"Streaming from pending folder: {pending_folder}")
+            
+            # Resume pending downloads in background
+            if session and session.get('next_playlists_status') and self.current_session_id:
+                try:
+                    status_dict = json.loads(session.get('next_playlists_status', '{}'))
+                    # Find playlists with PENDING status
+                    pending_playlists = [name for name, status in status_dict.items() if status == "PENDING"]
+                    if pending_playlists:
+                        logger.info(f"Resuming {len(pending_playlists)} pending downloads after temp playback restore")
+                        await self._auto_resume_pending_downloads(self.current_session_id, pending_playlists, status_dict)
+                    else:
+                        logger.info("All playlists already downloaded (no PENDING status found)")
+                        # All downloads complete - let monitor exit temp playback normally
+                        self._background_download_in_progress = False
+                except Exception as e:
+                    logger.warning(f"Failed to resume pending downloads after temp playback restore: {e}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error during temp playback restore: {e}")
+            # Try to switch back to Stream scene
+            try:
+                await asyncio.sleep(0.5)
+                if self.obs_controller:
+                    self.obs_controller.switch_scene('Stream')
+            except Exception as scene_error:
+                logger.error(f"Failed to recover scene after temp playback restore error: {scene_error}")
+            return False
 
     async def _refresh_vlc_during_temp_playback(self) -> None:
         """Refresh VLC source during temp playback when playlist is exhausted but new files available.
@@ -1080,6 +1239,10 @@ class AutomationController:
             # Clear temp playback state
             self._temp_playback_active = False
             
+            # Clear temp playback state from database (crash recovery no longer needed)
+            if self.current_session_id:
+                self.db.clear_temp_playback_state(self.current_session_id)
+            
             # Update skip detector to track files in live folder
             if self.playback_skip_detector:
                 self.playback_skip_detector.video_folder = live_folder
@@ -1196,7 +1359,7 @@ class AutomationController:
             
             # Reset download flag when starting new rotation
             self._downloads_triggered_this_rotation = False
-            self.download_in_progress = False
+            self._background_download_in_progress = False
             await self.execute_content_switch()
 
     async def check_manual_override(self) -> bool:
@@ -1227,7 +1390,7 @@ class AutomationController:
                 if commit_success:
                     # Clear prepared playlists since we're doing override
                     self.next_prepared_playlists = None
-                    self.download_in_progress = True  # Still downloading override content
+                    self._background_download_in_progress = True  # Still downloading override content
                     
                     # Start override rotation
                     settings = self.config_manager.get_settings()
@@ -1238,7 +1401,7 @@ class AutomationController:
                         if self.start_rotation_session(manual_playlists=selected):
                             await self.execute_content_switch()
                     
-                    self.download_in_progress = False
+                    self._background_download_in_progress = False
                     self._override_prep_ready = False
                     self._override_preparation_pending = False
                     self._override_queued = False  # Clear queue flag when override executes
@@ -1411,12 +1574,18 @@ class AutomationController:
                         # Update status for completed playlists
                         for playlist in pending_playlists:
                             self.db.update_playlist_status(session_id, playlist, "COMPLETED")
+                        # Signal that background downloads are complete
+                        self._background_download_in_progress = False
                     else:
                         logger.warning(f"Auto-resumed downloads had failures for: {pending_playlists}")
                         self.notification_service.notify_background_download_warning()
+                        # Still mark as complete even if there were failures, so we don't get stuck
+                        self._background_download_in_progress = False
                 except Exception as e:
                     logger.error(f"Error during auto-resume of downloads: {e}")
                     self.notification_service.notify_background_download_error(str(e))
+                    # Still mark as complete on error so we don't get stuck
+                    self._background_download_in_progress = False
             
             # Run in background thread
             loop = asyncio.get_event_loop()
@@ -1475,55 +1644,72 @@ class AutomationController:
                 self.playback_tracker.total_playback_seconds = playback_seconds
                 logger.info(f"Resuming session {self.current_session_id}, playback: {playback_seconds}s")
                 
-                # Reset download flag but mark as just resumed to skip initial download trigger
-                self._downloads_triggered_this_rotation = False
-                self._just_resumed_session = True
+                # Check for temp playback state that needs to be restored (crash recovery)
+                temp_state = self.db.get_temp_playback_state(session['id'])
+                temp_playback_restored = False
+                if temp_state and temp_state.get('active'):
+                    logger.info("Detected interrupted temp playback session, attempting recovery...")
+                    restored = await self._restore_temp_playback(session, temp_state)
+                    if restored:
+                        logger.info("Successfully restored temp playback state")
+                        temp_playback_restored = True
+                        # Skip normal session resume - temp playback handles its own state
+                    else:
+                        logger.warning("Failed to restore temp playback, continuing with normal session resume")
+                        # Clear the invalid temp playback state
+                        self.db.clear_temp_playback_state(session['id'])
                 
-                # Restore prepared playlists from database
-                next_playlists = session.get('next_playlists')
-                next_playlists_status = session.get('next_playlists_status')
-                
-                if next_playlists:
-                    try:
-                        playlist_list = json.loads(next_playlists) if isinstance(next_playlists, str) else next_playlists
-                        status_dict = json.loads(next_playlists_status) if isinstance(next_playlists_status, str) else (next_playlists_status or {})
-                        
-                        # Check if all playlists are COMPLETED
-                        all_completed = all(status_dict.get(pl) == "COMPLETED" for pl in playlist_list)
-                        
-                        if all_completed:
-                            # Validate that prepared playlist files actually exist in pending folder
-                            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
-                            files_exist = self.db.validate_prepared_playlists_exist(session['id'], next_folder)
+                # Skip normal session resume logic if temp playback was restored
+                if not temp_playback_restored:
+                    # Reset download flag but mark as just resumed to skip initial download trigger
+                    self._downloads_triggered_this_rotation = False
+                    self._just_resumed_session = True
+                    
+                    # Restore prepared playlists from database
+                    next_playlists = session.get('next_playlists')
+                    next_playlists_status = session.get('next_playlists_status')
+                    
+                    if next_playlists:
+                        try:
+                            playlist_list = json.loads(next_playlists) if isinstance(next_playlists, str) else next_playlists
+                            status_dict = json.loads(next_playlists_status) if isinstance(next_playlists_status, str) else (next_playlists_status or {})
                             
-                            if files_exist:
-                                # Fetch playlist objects from database with IDs (needed for start_rotation_session)
-                                playlist_objects = self.db.get_playlists_with_ids_by_names(playlist_list)
-                                if playlist_objects:
-                                    self.next_prepared_playlists = playlist_objects
-                                    logger.info(f"Restored prepared playlists from database: {playlist_list}")
+                            # Check if all playlists are COMPLETED
+                            all_completed = all(status_dict.get(pl) == "COMPLETED" for pl in playlist_list)
+                            
+                            if all_completed:
+                                # Validate that prepared playlist files actually exist in pending folder
+                                next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+                                files_exist = self.db.validate_prepared_playlists_exist(session['id'], next_folder)
+                                
+                                if files_exist:
+                                    # Fetch playlist objects from database with IDs (needed for start_rotation_session)
+                                    playlist_objects = self.db.get_playlists_with_ids_by_names(playlist_list)
+                                    if playlist_objects:
+                                        self.next_prepared_playlists = playlist_objects
+                                        logger.info(f"Restored prepared playlists from database: {playlist_list}")
+                                    else:
+                                        logger.warning(f"Could not fetch playlist objects for: {playlist_list}")
                                 else:
-                                    logger.warning(f"Could not fetch playlist objects for: {playlist_list}")
+                                    # Files don't exist in pending folder, clear prepared playlists
+                                    logger.warning(f"Prepared playlist files missing from pending folder, clearing and will download fresh on next rotation: {playlist_list}")
+                                    self.db.set_next_playlists(session['id'], [])
                             else:
-                                # Files don't exist in pending folder, clear prepared playlists
-                                logger.warning(f"Prepared playlist files missing from pending folder, clearing and will download fresh on next rotation: {playlist_list}")
-                                self.db.set_next_playlists(session['id'], [])
-                        else:
-                            logger.info(f"Prepared playlists not fully downloaded, auto-resuming downloads now: {status_dict}")
-                            # Auto-resume interrupted downloads immediately on startup
-                            await self._auto_resume_pending_downloads(session['id'], playlist_list, status_dict)
-                    except Exception as e:
-                        logger.error(f"Failed to restore prepared playlists: {e}")
-                
-                if session.get('stream_title'):
-                    assert self.stream_manager is not None, "Stream manager not initialized"
-                    await self.stream_manager.update_title(session['stream_title'])
-                
-                if playback_seconds > 0:
-                    self._pending_seek_position_ms = int(playback_seconds * 1000)
-                    logger.info(f"Scheduled seek to {playback_seconds}s")
-                
-                self._initialize_skip_detector()
+                                logger.info(f"Prepared playlists not fully downloaded, auto-resuming downloads now: {status_dict}")
+                                # Auto-resume interrupted downloads immediately on startup
+                                await self._auto_resume_pending_downloads(session['id'], playlist_list, status_dict)
+                        except Exception as e:
+                            logger.error(f"Failed to restore prepared playlists: {e}")
+                    
+                    if session.get('stream_title'):
+                        assert self.stream_manager is not None, "Stream manager not initialized"
+                        await self.stream_manager.update_title(session['stream_title'])
+                    
+                    if playback_seconds > 0:
+                        self._pending_seek_position_ms = int(playback_seconds * 1000)
+                        logger.info(f"Scheduled seek to {playback_seconds}s")
+                    
+                    self._initialize_skip_detector()
 
         # Main loop
         loop_count = 0
@@ -1590,12 +1776,20 @@ class AutomationController:
                 if self._skip_rotation_check_delay > 0:
                     self._skip_rotation_check_delay -= 1
                 
-                # Monitor temp playback for new files
+                # Monitor temp playback for new files and save cursor position
                 if self._temp_playback_active:
                     current_time = time.time()
                     if current_time - self._last_temp_folder_check >= 2.0:  # Check every 2 seconds
                         await self._monitor_temp_playback()
                         self._last_temp_folder_check = current_time
+                        
+                        # Save cursor position for crash recovery
+                        if self.current_session_id and self.obs_controller:
+                            media_status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
+                            if media_status:
+                                cursor_ms = media_status.get('media_cursor', 0) or 0
+                                if cursor_ms > 0:
+                                    self.db.update_temp_playback_cursor(self.current_session_id, cursor_ms)
                 
                 # Only check for rotation if not in skip delay period
                 if self._skip_rotation_check_delay == 0:

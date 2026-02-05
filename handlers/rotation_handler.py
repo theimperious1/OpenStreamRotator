@@ -64,7 +64,7 @@ class RotationHandler:
             logger.info(f"Skip detection result: SKIP DETECTED - {skip_info['time_skipped_seconds']:.1f}s skipped")
         return skip_detected, skip_info
 
-    def trigger_background_download(self, next_prepared_playlists, download_in_progress):
+    def trigger_background_download(self, next_prepared_playlists, background_download_in_progress):
         """
         Check if background download should be triggered.
         
@@ -74,7 +74,7 @@ class RotationHandler:
         Returns:
             List of playlists to download, or None if download shouldn't trigger
         """
-        if download_in_progress or next_prepared_playlists is not None:
+        if background_download_in_progress or next_prepared_playlists is not None:
             return None
         
         # Check if we have prepared content backed up waiting to be restored

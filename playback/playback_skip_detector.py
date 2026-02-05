@@ -49,6 +49,7 @@ class PlaybackSkipDetector:
         self._temp_playback_mode: bool = False  # Whether we're in temp playback mode (enables VLC refresh)
         self._vlc_refresh_callback = None  # Callback to refresh VLC when playlist exhausted during temp playback
         self._vlc_refresh_needed = False  # Flag set when VLC refresh is needed (checked by automation controller)
+        self._position_change_callback = None  # Callback to notify when playlist position changes (for persistence)
 
     def initialize(self, total_duration_seconds: int = 0, original_finish_time: Optional[datetime] = None, resume_position_ms: int = 0):
         """Initialize detector with current VLC position and rotation duration.
@@ -94,6 +95,7 @@ class PlaybackSkipDetector:
         self._vlc_playlist = []
         self._playlist_position = 0
         self._temp_playback_mode = False
+        self._position_change_callback = None
         logger.debug("Playback skip detector reset")
 
     def set_handlers(self, content_switch_handler, stream_manager):
@@ -134,6 +136,16 @@ class PlaybackSkipDetector:
         self._temp_playback_mode = enabled
         self._vlc_refresh_callback = refresh_callback
         logger.info(f"Temp playback mode: {'enabled' if enabled else 'disabled'}")
+
+    def set_position_change_callback(self, callback):
+        """Set callback to be called when playlist position changes.
+        
+        Used for persisting temp playback position to database for crash recovery.
+        
+        Args:
+            callback: Function that takes new_position (int) as argument
+        """
+        self._position_change_callback = callback
 
     def get_current_video_from_playlist(self) -> Optional[str]:
         """Get the filename of the current video based on playlist tracking.
@@ -326,6 +338,13 @@ class PlaybackSkipDetector:
                     if self._vlc_playlist:
                         self._playlist_position += 1
                         logger.info(f"Advanced playlist position to {self._playlist_position}")
+                        
+                        # Notify callback for persistence (crash recovery)
+                        if self._position_change_callback:
+                            try:
+                                self._position_change_callback(self._playlist_position)
+                            except Exception as e:
+                                logger.error(f"Error in position change callback: {e}")
                     
                     # Update VLC with current tracked playlist (excluding deleted video)
                     # In temp playback, always use tracked playlist to avoid adding new files mid-playback

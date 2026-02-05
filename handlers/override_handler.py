@@ -104,7 +104,7 @@ class OverrideHandler:
 
     def suspend_current_session(self, current_session_id: Optional[int], 
                                next_prepared_playlists: Optional[List],
-                               download_in_progress: bool,
+                               background_download_in_progress: bool,
                                override: Dict) -> Dict:
         """
         Suspend current session for override.
@@ -112,7 +112,7 @@ class OverrideHandler:
         Args:
             current_session_id: ID of current session
             next_prepared_playlists: Pre-selected playlists (if any)
-            download_in_progress: If background download is in progress
+            background_download_in_progress: If background download is in progress
             override: Override configuration
             
         Returns:
@@ -133,10 +133,10 @@ class OverrideHandler:
         
         # Store prepared playlists if available and no download in progress
         prepared_playlist_names = []
-        if next_prepared_playlists and not download_in_progress:
+        if next_prepared_playlists and not background_download_in_progress:
             prepared_playlist_names = [p['name'] for p in next_prepared_playlists]
             logger.info(f"Saving prepared playlists for restore: {prepared_playlist_names}")
-        elif download_in_progress:
+        elif background_download_in_progress:
             logger.warning("Override triggered during background download - will force fresh download after override")
         else:
             # Check if this session already has suspension data with prepared playlists (nested override case)
@@ -296,7 +296,7 @@ class OverrideHandler:
             if current_session_id:
                 self.suspend_current_session(
                     current_session_id, next_prepared_playlists, 
-                    False,  # download_in_progress = False (we're past download now)
+                    False,  # background_download_in_progress = False (we're past download now)
                     override
                 )
             
