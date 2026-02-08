@@ -131,13 +131,13 @@ class VideoDownloader:
                     # 'ratelimit': 50000000,  # 50MB/s rate limit for balanced speed
                     # Write info.json for metadata-aware resumption of interrupted downloads
                     'write_info_json': True,
-                    'extractor_args': {
-                        'youtube': {
+                    # 'extractor_args': {
+                        # 'youtube': {
                             # Use ios_downgraded to avoid YouTube's aggressive IP-based blocking
                             # Mobile clients have different detection patterns, reducing blocks
-                            'player_client': ['ios_downgraded', 'default', '-android_sdkless'],
-                        }
-                    },
+                            # 'player_client': ['ios_downgraded', 'default', '-android_sdkless'],
+                        # }
+                    # },
                 }
                 
                 # Add cookie support for age-restricted videos if enabled

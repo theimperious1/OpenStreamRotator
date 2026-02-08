@@ -74,13 +74,14 @@ class ContentSwitchHandler:
             logger.error(f"Error getting category for video {video_filename}: {e}")
             return None
 
-    async def update_category_for_video_async(self, video_filename: str, stream_manager) -> bool:
+    async def update_category_for_video_async(self, video_filename: str, stream_manager, temp_playback_active: bool = False) -> bool:
         """
         Asynchronously update stream category based on video filename.
         
         Args:
             video_filename: Filename of the currently playing video
             stream_manager: StreamManager instance for updates
+            temp_playback_active: Whether temp playback is currently active
             
         Returns:
             True if successful or no update needed, False if error
@@ -96,14 +97,21 @@ class ContentSwitchHandler:
             # Throttle category updates to prevent spam (only allow one per 3 seconds)
             current_time = time.time()
             if current_time - self._last_category_update_time >= 3:
-                # Get current session title to pass with category update
-                # Some platforms (like Kick) require title even for category-only updates
-                session = self.db.get_current_session()
-                stream_title = session.get('stream_title', '') if session else ''
+                # During temp playback, only update category without touching the title
+                # (temp playback has its own title with next rotation playlist names)
+                # Otherwise, include title to ensure compatibility with all platforms
+                if temp_playback_active:
+                    # Update only category, preserving temp playback title
+                    await stream_manager.update_category(category)
+                else:
+                    # Get current session title and update both title and category
+                    session = self.db.get_current_session()
+                    stream_title = session.get('stream_title', '') if session else ''
+                    
+                    # Use update_stream_info with current title to ensure compatibility
+                    # This way we update category without changing the title
+                    await stream_manager.update_stream_info(stream_title, category)
                 
-                # Use update_stream_info with current title to ensure compatibility
-                # This way we update category without changing the title
-                await stream_manager.update_stream_info(stream_title, category)
                 self._last_category_update_time = current_time
                 logger.info(f"Updated category to '{category}' (from video: {video_filename})")
                 return True
@@ -283,7 +291,7 @@ class ContentSwitchHandler:
 
     def finalize_switch(self, current_folder: str, vlc_source_name: str,
                        scene_live: str, scene_offline: str,
-                       last_stream_status: Optional[str]) -> bool:
+                       last_stream_status: Optional[str]) -> tuple[bool, list]:
         """
         Finalize content switch (update VLC, switch scene).
         
@@ -295,13 +303,13 @@ class ContentSwitchHandler:
             last_stream_status: Current stream status ("live" or "offline")
             
         Returns:
-            True if successful
+            Tuple of (success: bool, playlist: list[str])
         """
-        # Update VLC source
-        success, _ = self.obs_controller.update_vlc_source(vlc_source_name, current_folder)
+        # Update VLC source and get the playlist
+        success, playlist = self.obs_controller.update_vlc_source(vlc_source_name, current_folder)
         if not success:
             logger.error("Failed to update VLC source with new videos")
-            return False
+            return False, []
         
         # Switch back to appropriate scene
         if last_stream_status == "live":
@@ -309,7 +317,7 @@ class ContentSwitchHandler:
         else:
             self.obs_controller.switch_scene(scene_offline)
         
-        return True
+        return True, playlist
 
     def update_stream_metadata(self, session_id: Optional[int], stream_manager) -> bool:
         """

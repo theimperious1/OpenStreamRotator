@@ -155,7 +155,8 @@ class AutomationController:
             auto_resume_downloads=self._auto_resume_pending_downloads,
             initialize_skip_detector=self._initialize_skip_detector,
             get_background_download_in_progress=lambda: self._background_download_in_progress,
-            set_background_download_in_progress=lambda v: setattr(self, '_background_download_in_progress', v)
+            set_background_download_in_progress=lambda v: setattr(self, '_background_download_in_progress', v),
+            set_override_prep_ready=lambda v: setattr(self, '_override_prep_ready', v)
         )
         
         logger.info("Handlers initialized successfully")
@@ -316,9 +317,10 @@ class AutomationController:
 
             # Finalize (update VLC + switch scene)
             target_scene = SCENE_LIVE if self.last_stream_status == "live" else SCENE_OFFLINE
-            if not self.content_switch_handler.finalize_switch(
+            finalize_success, vlc_playlist = self.content_switch_handler.finalize_switch(
                 current_folder, VLC_SOURCE_NAME, target_scene, SCENE_OFFLINE, self.last_stream_status
-            ):
+            )
+            if not finalize_success:
                 self.is_rotating = False
                 return False
 
@@ -333,6 +335,12 @@ class AutomationController:
             # Initialize skip detector
             # This will handle category updates on video transitions
             self._initialize_skip_detector()
+            
+            # Update skip detector with the new playlist from content switch
+            # This ensures playlist tracking stays in sync with what VLC is actually playing
+            if self.playback_skip_detector and vlc_playlist:
+                self.playback_skip_detector.set_vlc_playlist(vlc_playlist)
+                logger.debug(f"Updated skip detector playlist with {len(vlc_playlist)} videos from content switch")
             
             # Process any queued videos from downloads so they're in database before category lookup
             self._process_video_registration_queue()
@@ -538,7 +546,10 @@ class AutomationController:
             current_video = skip_info.get("current_video_filename")
             if current_video and self.content_switch_handler and self.stream_manager:
                 try:
-                    await self.content_switch_handler.update_category_for_video_async(current_video, self.stream_manager)
+                    temp_playback_active = bool(self.temp_playback_handler and self.temp_playback_handler.is_active)
+                    await self.content_switch_handler.update_category_for_video_async(
+                        current_video, self.stream_manager, temp_playback_active=temp_playback_active
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to update category on video transition: {e}")
         
@@ -879,6 +890,9 @@ class AutomationController:
         # CHECK: If temp playback is active, queue the override instead of executing it
         if self.temp_playback_handler and self.temp_playback_handler.is_active:
             logger.info("Temp playback is active - queueing override to execute after temp playback finishes")
+            # Queue Phase 1 preparation (needed for Phase 2 to execute later)
+            self._override_prep_data = self.override_handler.queue_override_preparation(selected)
+            self._override_preparation_pending = True
             self.temp_playback_handler.queue_override()
             # Don't clear override - user may cancel it before temp playback finishes
             return False

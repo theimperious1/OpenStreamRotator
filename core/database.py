@@ -322,22 +322,35 @@ class DatabaseManager:
                                 total_duration_seconds: int = 0,
                                 estimated_finish_time: Optional[datetime] = None,
                                 download_trigger_time: Optional[datetime] = None) -> Optional[int]:
-        """Create a new rotation session."""
+        """Create a new rotation session with clean state.
+        
+        This ensures only one session is marked as current at a time.
+        Any previously current session is marked as inactive.
+        The new session starts with clean next_playlists to prevent
+        stale playlist exclusions in the selector.
+        """
         conn = self.connect()
         cursor = conn.cursor()
 
-        # Clear any previous current session
-        cursor.execute("UPDATE rotation_sessions SET is_current = 0")
+        # Mark any existing current session as inactive (preserving suspension state)
+        cursor.execute("""
+            UPDATE rotation_sessions 
+            SET is_current = 0 
+            WHERE is_current = 1
+        """)
 
+        # Create new session with clean state (next_playlists starts null)
         cursor.execute("""
             INSERT INTO rotation_sessions (playlists_selected, stream_title, total_duration_seconds, 
-                                          estimated_finish_time, download_trigger_time, is_current)
-            VALUES (?, ?, ?, ?, ?, 1)
+                                          estimated_finish_time, download_trigger_time, is_current,
+                                          current_playlists, next_playlists)
+            VALUES (?, ?, ?, ?, ?, 1, NULL, NULL)
         """, (json.dumps(playlists_selected), stream_title, total_duration_seconds,
               estimated_finish_time, download_trigger_time))
 
         conn.commit()
         session_id = cursor.lastrowid
+        logger.info(f"Created new rotation session {session_id} (marked previous sessions as inactive)")
         self.close()
         return session_id
 

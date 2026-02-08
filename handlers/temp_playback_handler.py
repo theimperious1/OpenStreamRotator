@@ -59,6 +59,7 @@ class TempPlaybackHandler:
         self._check_manual_override_callback: Optional[Callable] = None
         self._auto_resume_downloads_callback: Optional[Callable] = None
         self._initialize_skip_detector_callback: Optional[Callable] = None
+        self._set_override_prep_ready_callback: Optional[Callable[[bool], None]] = None
         
         # Reference to background download flag (shared with automation controller)
         self._get_background_download_in_progress: Optional[Callable[[], bool]] = None
@@ -78,7 +79,8 @@ class TempPlaybackHandler:
         auto_resume_downloads: Optional[Callable] = None,
         initialize_skip_detector: Optional[Callable] = None,
         get_background_download_in_progress: Optional[Callable[[], bool]] = None,
-        set_background_download_in_progress: Optional[Callable[[bool], None]] = None
+        set_background_download_in_progress: Optional[Callable[[bool], None]] = None,
+        set_override_prep_ready: Optional[Callable[[bool], None]] = None
     ) -> None:
         """Set callbacks for coordination with automation controller."""
         self._check_manual_override_callback = check_manual_override
@@ -86,6 +88,7 @@ class TempPlaybackHandler:
         self._initialize_skip_detector_callback = initialize_skip_detector
         self._get_background_download_in_progress = get_background_download_in_progress
         self._set_background_download_in_progress = set_background_download_in_progress
+        self._set_override_prep_ready_callback = set_override_prep_ready
 
     @property
     def is_active(self) -> bool:
@@ -142,13 +145,17 @@ class TempPlaybackHandler:
                 logger.error("No complete files found in pending folder, cannot activate temp playback")
                 return
             
+            # Sort files to ensure consistent order with how VLC will play them
+            # (sorted alphabetically, same as update_vlc_source does internally)
+            complete_files = sorted(complete_files)
+            
             # Point OBS VLC source directly at pending folder (no copying needed)
             # archive.txt ensures yt-dlp won't re-download videos deleted during playback
             if not self.obs_controller:
                 logger.error("No OBS controller available")
                 return
             
-            success, playlist = self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, pending_folder)
+            success, playlist = self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, pending_folder, playlist=complete_files)
             if not success:
                 logger.error("Failed to update VLC source to pending folder")
                 return
@@ -191,40 +198,44 @@ class TempPlaybackHandler:
                             await self.stream_manager.update_title(new_title)
                         logger.info(f"Updated stream title for temp playback: {new_title}")
                         
-                        # Also update category for temp playback based on first video or first playlist
+                        # Determine category from first video's playlist
+                        # Since videos haven't been registered in DB yet, we'll identify
+                        # which next_playlist each file belongs to by checking the database
+                        # or falling back to sequential assignment based on download order
                         category = None
-                        try:
-                            # Get category from first video in pending folder
-                            if complete_files:
-                                first_video = complete_files[0]
-                                from handlers.content_switch_handler import ContentSwitchHandler
-                                # We need a content_switch_handler instance, but we might not have it here
-                                # Check if we can get category from database
-                                video_data = self.db.get_video_by_filename(first_video)
-                                if video_data:
-                                    playlist_name = video_data.get('playlist_name')
-                                    if playlist_name:
-                                        # Get category for this playlist
-                                        playlists_config = self.config.get_playlists()
-                                        for p in playlists_config:
-                                            if p.get('name') == playlist_name:
-                                                category = p.get('category') or p.get('name')
-                                                logger.info(f"Got category from first temp playback video: {first_video} -> {category}")
-                                                break
-                        except Exception as e:
-                            logger.warning(f"Failed to get category from first video: {e}")
                         
-                        # Fallback to first next_playlist category
+                        if complete_files:
+                            # Try to get category from first video's playlist metadata
+                            first_video = complete_files[0]
+                            # Check each next_playlist to see which one this video likely belongs to
+                            # by checking if we can find it in the database
+                            playlists_config = self.config.get_playlists()
+                            
+                            # Try database lookup first (may work if videos were pre-registered)
+                            try:
+                                video_data = self.db.get_video_by_filename(first_video)
+                                if video_data and video_data.get('playlist_name'):
+                                    playlist_name = video_data.get('playlist_name')
+                                    for p in playlists_config:
+                                        if p.get('name') == playlist_name:
+                                            category = p.get('category') or p.get('name')
+                                            logger.info(f"Got category from first video DB lookup: {first_video} -> {category}")
+                                            break
+                            except Exception as e:
+                                logger.debug(f"First video not in DB yet (expected during active download): {e}")
+                        
+                        # Fallback: if first video not in DB, use first next_playlist
+                        # This assumes videos are downloaded in order from next_playlists
                         if not category and next_playlist_names:
                             try:
                                 playlists_config = self.config.get_playlists()
                                 for p in playlists_config:
                                     if p.get('name') == next_playlist_names[0]:
                                         category = p.get('category') or p.get('name')
-                                        logger.info(f"Using fallback category from first next_playlist: {category}")
+                                        logger.info(f"Using category from first next_playlist ({next_playlist_names[0]}): {category}")
                                         break
                             except Exception as e:
-                                logger.warning(f"Failed to get fallback category: {e}")
+                                logger.warning(f"Failed to get category from next_playlists: {e}")
                         
                         # Update category if determined
                         if category and self.stream_manager:
@@ -541,8 +552,10 @@ class TempPlaybackHandler:
                 self.playback_skip_detector.video_folder = live_folder
                 # Disable temp playback mode
                 self.playback_skip_detector.set_temp_playback_mode(False)
-                # Set the new VLC playlist
-                self.playback_skip_detector.set_vlc_playlist(playlist)
+                # Set the new VLC playlist while preserving current playback position
+                # (reset_position=False because VLC is already mid-rotation, we're just updating
+                # the playlist list while maintaining the same position in the stream)
+                self.playback_skip_detector.set_vlc_playlist(playlist, reset_position=False)
                 logger.info(f"Updated skip detector to track live folder with {len(playlist)} videos")
             
             # Recalculate estimated finish time based on new content in live folder
@@ -594,6 +607,9 @@ class TempPlaybackHandler:
             if self._override_queued:
                 logger.info("Override was queued during temp playback - executing it now")
                 self._override_queued = False
+                # Set override prep ready flag so automation controller can commit Phase 2
+                if self._set_override_prep_ready_callback:
+                    self._set_override_prep_ready_callback(True)
                 if self._check_manual_override_callback:
                     await self._check_manual_override_callback()
             

@@ -42,6 +42,7 @@ class PlaybackSkipDetector:
         self._all_content_consumed = False  # Flag set when final video transitions
         self._resume_seek_pending = False  # Flag to skip cumulative increment on first position check after resume
         self._grace_period_checks = 0  # Grace period to allow VLC to stabilize after initialization
+        self._is_resuming = False  # Flag to track if we're resuming from a paused position (uses grace period for stability)
         
         # Playlist tracking for reliable video deletion
         # These track the actual playlist sent to VLC, not folder contents
@@ -77,6 +78,7 @@ class PlaybackSkipDetector:
         if resume_position_ms > 0:
             self.cumulative_playback_ms = resume_position_ms
             self._resume_seek_pending = True  # Flag the next position check to handle seek
+            self._is_resuming = True  # Mark that we're in a resume scenario
             # Set grace period to prevent premature _all_content_consumed flag on first transition check
             # This gives VLC time to stabilize after loading/seeking
             self._grace_period_checks = 2  # Allow 2 checks before setting flag
@@ -92,6 +94,7 @@ class PlaybackSkipDetector:
         self._all_content_consumed = False
         self._resume_seek_pending = False
         self._grace_period_checks = 0
+        self._is_resuming = False
         # Reset playlist tracking
         self._vlc_playlist = []
         self._playlist_position = 0
@@ -395,19 +398,23 @@ class PlaybackSkipDetector:
                         else:
                             # No new files, set all content consumed flag
                             logger.info(f"Not deleting {video_to_delete} - it's the last video and no new files available")
-                            if self._grace_period_checks <= 0:
-                                self._all_content_consumed = True
-                            else:
+                            # Only apply grace period if we're resuming from a pause/crash (VLC stability needed)
+                            # During normal playback, activate immediately when last video with no new files detected
+                            if self._is_resuming and self._grace_period_checks > 0:
                                 self._grace_period_checks -= 1
-                                logger.info(f"Grace period active: {self._grace_period_checks} checks remaining")
+                                logger.info(f"Resume scenario - grace period active: {self._grace_period_checks} checks remaining")
+                            else:
+                                self._all_content_consumed = True
                     else:
                         # Not in temp playback mode, normal behavior
                         logger.info(f"Not deleting {video_to_delete} - it's the last video in playlist")
-                        if self._grace_period_checks <= 0:
-                            self._all_content_consumed = True
-                        else:
+                        # Only apply grace period if we're resuming from a pause/crash (VLC stability needed)
+                        # During normal playback, activate immediately when last video detected
+                        if self._is_resuming and self._grace_period_checks > 0:
                             self._grace_period_checks -= 1
-                            logger.info(f"Grace period active: {self._grace_period_checks} checks remaining before allowing rotation trigger")
+                            logger.info(f"Resume scenario - grace period active: {self._grace_period_checks} checks remaining before allowing rotation trigger")
+                        else:
+                            self._all_content_consumed = True
                 
                 position_delta_ms = current_position_ms  # Current position in new video
         
