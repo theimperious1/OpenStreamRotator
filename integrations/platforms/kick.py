@@ -41,6 +41,7 @@ class KickUpdater(StreamPlatform):
         self.public_api: Optional[KickAPI] = None   # Public client (no auth)
         self.loop = None
         self._initialized = False
+        self.current_title: str = ""                # Track current title for category-only updates
 
     async def _ensure_initialized(self):
         """Initialize both API clients and verify authentication."""
@@ -159,12 +160,14 @@ class KickUpdater(StreamPlatform):
     async def update_title(self, title: str) -> bool:
         try:
             await self._update_channel(stream_title=title)  # No category_id needed — it will fetch current
+            self.current_title = title  # Store for category-only updates
             self.log_success("Updated title", title)
             return True
         except Exception as e:
             error_str = str(e)
             # 204 No Content is actually a success - the API successfully updated but returned no body
             if "204" in error_str and "ContentTypeError" in type(e).__name__:
+                self.current_title = title  # Store even on 204
                 self.log_success("Updated title", title)
                 logger.info(f"[{self.platform_name}] Update successful (API returned 204 No Content)")
                 return True
@@ -282,7 +285,9 @@ class KickUpdater(StreamPlatform):
         try:
             category_id = await self._get_category_id(category)
             if category_id:
-                await self._update_channel(category_id=category_id)
+                # Need to include current title when updating category
+                # (Kick API requires stream_title even when only updating category)
+                await self._update_channel(category_id=category_id, stream_title=self.current_title or "")
                 self.log_success("Updated category", category)
                 return True
             else:
@@ -308,6 +313,7 @@ class KickUpdater(StreamPlatform):
                     params["category_id"] = category_id  # This will override the current one
 
             await self._update_channel(**params)
+            self.current_title = title  # Store title for category-only updates
             self.log_success(
                 "Updated stream info",
                 f"Title: {title}, Category: {category or 'N/A'}"
@@ -317,6 +323,7 @@ class KickUpdater(StreamPlatform):
             error_str = str(e)
             # 204 No Content is actually a success - the API successfully updated but returned no body
             if "204" in error_str and "ContentTypeError" in type(e).__name__:
+                self.current_title = title  # Store even on 204
                 self.log_success(
                     "Updated stream info",
                     f"Title: {title}, Category: {category or 'N/A'}"

@@ -60,6 +60,7 @@ class TempPlaybackHandler:
         self._auto_resume_downloads_callback: Optional[Callable] = None
         self._initialize_skip_detector_callback: Optional[Callable] = None
         self._set_override_prep_ready_callback: Optional[Callable[[bool], None]] = None
+        self._trigger_next_rotation_callback: Optional[Callable] = None
         
         # Reference to background download flag (shared with automation controller)
         self._get_background_download_in_progress: Optional[Callable[[], bool]] = None
@@ -80,7 +81,8 @@ class TempPlaybackHandler:
         initialize_skip_detector: Optional[Callable] = None,
         get_background_download_in_progress: Optional[Callable[[], bool]] = None,
         set_background_download_in_progress: Optional[Callable[[bool], None]] = None,
-        set_override_prep_ready: Optional[Callable[[bool], None]] = None
+        set_override_prep_ready: Optional[Callable[[bool], None]] = None,
+        trigger_next_rotation: Optional[Callable] = None
     ) -> None:
         """Set callbacks for coordination with automation controller."""
         self._check_manual_override_callback = check_manual_override
@@ -89,6 +91,7 @@ class TempPlaybackHandler:
         self._get_background_download_in_progress = get_background_download_in_progress
         self._set_background_download_in_progress = set_background_download_in_progress
         self._set_override_prep_ready_callback = set_override_prep_ready
+        self._trigger_next_rotation_callback = trigger_next_rotation
 
     @property
     def is_active(self) -> bool:
@@ -145,17 +148,13 @@ class TempPlaybackHandler:
                 logger.error("No complete files found in pending folder, cannot activate temp playback")
                 return
             
-            # Sort files to ensure consistent order with how VLC will play them
-            # (sorted alphabetically, same as update_vlc_source does internally)
-            complete_files = sorted(complete_files)
-            
             # Point OBS VLC source directly at pending folder (no copying needed)
             # archive.txt ensures yt-dlp won't re-download videos deleted during playback
             if not self.obs_controller:
                 logger.error("No OBS controller available")
                 return
             
-            success, playlist = self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, pending_folder, playlist=complete_files)
+            success, playlist = self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, pending_folder)
             if not success:
                 logger.error("Failed to update VLC source to pending folder")
                 return
@@ -612,6 +611,12 @@ class TempPlaybackHandler:
                     self._set_override_prep_ready_callback(True)
                 if self._check_manual_override_callback:
                     await self._check_manual_override_callback()
+            else:
+                # No override - trigger next rotation selection and background download
+                # This ensures the automation controller prepares the playlists after this rotation finishes
+                logger.info("Triggering next rotation preparation after temp playback exit")
+                if self._trigger_next_rotation_callback:
+                    await self._trigger_next_rotation_callback()
             
             logger.info("Temp playback successfully exited, resuming normal rotation cycle")
             

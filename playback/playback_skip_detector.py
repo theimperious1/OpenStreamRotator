@@ -160,6 +160,63 @@ class PlaybackSkipDetector:
         if not self._vlc_playlist or self._playlist_position >= len(self._vlc_playlist):
             return None
         return self._vlc_playlist[self._playlist_position]
+    
+    def get_current_video_by_cumulative_time(self, current_position_ms: int) -> Optional[str]:
+        """Get the filename of the current video based on cumulative playback time.
+        
+        This method accounts for skips that may have jumped across video boundaries
+        by calculating which video is actually playing based on cumulative playback time
+        rather than relying on playlist position tracking.
+        
+        Args:
+            current_position_ms: Current position within the current video (from VLC)
+            
+        Returns:
+            Filename of the video that should be playing at the cumulative time
+        """
+        if not self._vlc_playlist:
+            return None
+        
+        # Calculate total cumulative time of content consumed
+        total_cumulative_ms = self.cumulative_playback_ms + current_position_ms
+        
+        # Find which video contains this cumulative position
+        accumulated_ms = 0
+        for i, video_filename in enumerate(self._vlc_playlist):
+            try:
+                video = self.db.get_video_by_filename(video_filename)
+                if not video:
+                    logger.debug(f"Video not found in database: {video_filename}")
+                    # If video not found, assume we're still in current position
+                    if i == self._playlist_position:
+                        return video_filename
+                    continue
+                
+                duration_seconds = video.get('duration_seconds', 0)
+                duration_ms = duration_seconds * 1000
+                
+                # Check if cumulative position falls within this video
+                if accumulated_ms <= total_cumulative_ms < accumulated_ms + duration_ms:
+                    # This is the video being played
+                    if i != self._playlist_position:
+                        logger.info(
+                            f"Cumulative time analysis: cumulative={total_cumulative_ms/1000:.1f}s puts us in video {i} "
+                            f"({video_filename}), but playlist_position is {self._playlist_position}. "
+                            f"Updating position to {i}"
+                        )
+                        # Update playlist position to match actual position
+                        self._playlist_position = i
+                    return video_filename
+                
+                accumulated_ms += duration_ms
+            except Exception as e:
+                logger.error(f"Error calculating cumulative video position: {e}")
+                return self._vlc_playlist[self._playlist_position] if self._playlist_position < len(self._vlc_playlist) else None
+        
+        # If we get here, we're past all known videos or at the end
+        if self._vlc_playlist:
+            return self._vlc_playlist[-1]
+        return None
 
     def is_on_last_known_video(self) -> bool:
         """Check if we're on the last video in the tracked VLC playlist."""
@@ -478,11 +535,14 @@ class PlaybackSkipDetector:
             self.last_known_playback_position_ms = current_position_ms
             self.last_playback_check_time = time.time()
             
+            # Get current video using cumulative time calculation (accounts for skips across boundaries)
+            current_video = self.get_current_video_by_cumulative_time(current_position_ms)
+            
             skip_info = {
                 "time_skipped_seconds": time_skipped_seconds,
                 "new_finish_time": new_finish_time,
                 "new_finish_time_str": new_finish_time.strftime('%H:%M:%S') if new_finish_time else "N/A",
-                "current_video_filename": self.get_current_video_filename()
+                "current_video_filename": current_video
             }
             
             return True, skip_info

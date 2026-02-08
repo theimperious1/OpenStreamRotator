@@ -156,7 +156,8 @@ class AutomationController:
             initialize_skip_detector=self._initialize_skip_detector,
             get_background_download_in_progress=lambda: self._background_download_in_progress,
             set_background_download_in_progress=lambda v: setattr(self, '_background_download_in_progress', v),
-            set_override_prep_ready=lambda v: setattr(self, '_override_prep_ready', v)
+            set_override_prep_ready=lambda v: setattr(self, '_override_prep_ready', v),
+            trigger_next_rotation=self._trigger_next_rotation_async
         )
         
         logger.info("Handlers initialized successfully")
@@ -427,6 +428,32 @@ class AutomationController:
             resume_position_ms=resume_position_ms
         )
 
+    async def _trigger_next_rotation_async(self) -> None:
+        """Trigger next rotation selection and background download.
+        
+        Called when temp playback exits to immediately prepare the next rotation
+        instead of waiting for the current rotation to finish playing.
+        """
+        try:
+            # Select the next 2 playlists for rotation
+            # The selector automatically excludes currently playing and preparing playlists
+            next_playlists = self.playlist_manager.select_playlists_for_rotation()
+            
+            if next_playlists:
+                logger.info(f"Auto-triggered next rotation selection after temp playback: {[p['name'] for p in next_playlists]}")
+                
+                # Start background download
+                settings = self.config_manager.get_settings()
+                next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+                
+                self._background_download_in_progress = True
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, next_playlists)
+            else:
+                logger.warning("Failed to auto-select next rotation after temp playback")
+        except Exception as e:
+            logger.error(f"Error triggering next rotation after temp playback exit: {e}")
+    
     def _sync_background_download_next_rotation(self, playlists):
         """Synchronous wrapper for executor.
         
