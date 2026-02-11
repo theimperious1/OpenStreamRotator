@@ -174,6 +174,12 @@ class FileLockMonitor:
         if not self.video_folder or self._all_content_consumed:
             result['all_consumed'] = self._all_content_consumed
             return result
+
+        # If OBS is disconnected, VLC releases all file locks — every video
+        # would appear "finished" and get deleted.  Pause monitoring until
+        # the connection is restored by the main-loop reconnect logic.
+        if self.obs_controller and not self.obs_controller.is_connected:
+            return result
         
         if not self._current_video:
             # No current video tracked - try to find one

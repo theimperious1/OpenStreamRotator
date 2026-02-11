@@ -8,11 +8,32 @@ from config.constants import VIDEO_EXTENSIONS
 logger = logging.getLogger(__name__)
 
 
+# Errors that indicate a dead/disconnected OBS WebSocket
+_CONNECTION_ERROR_HINTS = (
+    'websocket', 'connection', 'socket', 'timed out', 'timeout',
+    'winerror', 'forcibly closed', 'expecting value',
+)
+
+
 class OBSController:
     """Controller for OBS WebSocket operations."""
 
     def __init__(self, obs_client: obs.ReqClient):
         self.obs_client = obs_client
+        self._is_connected = True
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether the OBS WebSocket connection is believed to be alive."""
+        return self._is_connected
+
+    def _check_connection_error(self, error: Exception) -> None:
+        """Mark connection as dead if the error looks like a connectivity failure."""
+        msg = str(error).lower()
+        if any(hint in msg for hint in _CONNECTION_ERROR_HINTS):
+            if self._is_connected:
+                logger.warning("OBS connection lost (detected from error)")
+            self._is_connected = False
 
     def switch_scene(self, scene_name: str) -> bool:
         """Switch OBS to specified scene."""
@@ -21,6 +42,7 @@ class OBSController:
             logger.info(f"Switched to scene: {scene_name}")
             return True
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to switch scene: {e}")
             return False
 
@@ -30,6 +52,7 @@ class OBSController:
             response = self.obs_client.get_current_program_scene()
             return response.current_program_scene_name  # type: ignore
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to get current scene: {e}")
             return None
 
@@ -47,6 +70,7 @@ class OBSController:
             logger.info(f"Stopped VLC source: {source_name}")
             return True
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to stop VLC source: {e}")
             return False
 
@@ -99,6 +123,7 @@ class OBSController:
             return True, video_filenames
 
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to update VLC source: {e}")
             return False, []
 
@@ -117,6 +142,7 @@ class OBSController:
             logger.info("All required scenes verified in OBS.")
             return True
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to verify scenes: {e}")
             return False
 
@@ -138,6 +164,7 @@ class OBSController:
                 'media_duration': response.media_duration,  # type: ignore (milliseconds)
             }
         except Exception as e:
+            self._check_connection_error(e)
             logger.debug(f"Failed to get media input status for {source_name}: {e}")
             return None
 
@@ -159,6 +186,7 @@ class OBSController:
             logger.info(f"Seeked {source_name} to {position_ms}ms ({position_ms/1000:.1f}s)")
             return True
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to seek media {source_name}: {e}")
             return False
 
@@ -179,6 +207,7 @@ class OBSController:
             logger.info(f"Triggered play on {source_name}")
             return True
         except Exception as e:
+            self._check_connection_error(e)
             logger.debug(f"Failed to trigger play on {source_name}: {e}")
             return False
 

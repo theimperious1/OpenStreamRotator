@@ -1046,6 +1046,20 @@ class AutomationController:
                 self._process_pending_database_operations()
                 self._tick_save_playback()
 
+                # Proactive OBS health check — detect disconnect even though
+                # OBSController swallows exceptions internally
+                if self.obs_controller and not self.obs_controller.is_connected:
+                    logger.warning("OBS connection lost (detected via health check)")
+                    self.notification_service.notify_automation_error("OBS disconnected, attempting reconnect...")
+                    if self.reconnect_obs():
+                        self._initialize_handlers()
+                        self._initialize_file_lock_monitor()
+                        logger.info("OBS reconnected, handlers re-initialized")
+                        continue
+                    else:
+                        logger.error("Failed to reconnect to OBS, shutting down")
+                        break
+
                 # Monitor temp playback for download completion
                 if self.temp_playback_handler and self.temp_playback_handler.is_active:
                     current_time = time.time()
