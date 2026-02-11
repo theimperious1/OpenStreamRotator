@@ -1,16 +1,34 @@
 @echo off
 REM Reset OSR state - delete database and all video files
-REM Reads video directories from config/playlists.json
+REM Reads video directories from .env (falls back to config/playlists.json, then defaults)
 
 setlocal enabledelayedexpansion
 
 echo Resetting OpenStreamRotator state...
 echo.
 
-REM Read video folders from playlists.json using PowerShell
-echo Reading configuration from playlists.json...
-for /f "tokens=*" %%A in ('powershell -NoProfile -Command "try { $config = Get-Content 'config/playlists.json' | ConvertFrom-Json; Write-Output $config.settings.video_folder } catch { Write-Output 'videos/live' }"') do set "VIDEO_FOLDER=%%A"
-for /f "tokens=*" %%A in ('powershell -NoProfile -Command "try { $config = Get-Content 'config/playlists.json' | ConvertFrom-Json; Write-Output $config.settings.next_rotation_folder } catch { Write-Output 'videos/pending' }"') do set "NEXT_FOLDER=%%A"
+REM Read video folders from .env first, fall back to playlists.json, then defaults
+echo Reading configuration...
+set "VIDEO_FOLDER="
+set "NEXT_FOLDER="
+
+REM Try .env file first
+if exist ".env" (
+    for /f "tokens=1,* delims==" %%A in ('findstr /b "VIDEO_FOLDER=" ".env"') do set "VIDEO_FOLDER=%%B"
+    for /f "tokens=1,* delims==" %%A in ('findstr /b "NEXT_ROTATION_FOLDER=" ".env"') do set "NEXT_FOLDER=%%B"
+)
+
+REM Fall back to playlists.json if not found in .env
+if "!VIDEO_FOLDER!"=="" (
+    for /f "tokens=*" %%A in ('powershell -NoProfile -Command "try { $config = Get-Content 'config/playlists.json' | ConvertFrom-Json; Write-Output $config.settings.video_folder } catch { Write-Output '' }"') do set "VIDEO_FOLDER=%%A"
+)
+if "!NEXT_FOLDER!"=="" (
+    for /f "tokens=*" %%A in ('powershell -NoProfile -Command "try { $config = Get-Content 'config/playlists.json' | ConvertFrom-Json; Write-Output $config.settings.next_rotation_folder } catch { Write-Output '' }"') do set "NEXT_FOLDER=%%A"
+)
+
+REM Final defaults
+if "!VIDEO_FOLDER!"=="" set "VIDEO_FOLDER=videos/live"
+if "!NEXT_FOLDER!"=="" set "NEXT_FOLDER=videos/pending"
 
 REM Cleanup path formatting (remove trailing slashes)
 if "!VIDEO_FOLDER:~-1!"=="\" set "VIDEO_FOLDER=!VIDEO_FOLDER:~0,-1!"

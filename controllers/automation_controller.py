@@ -912,8 +912,9 @@ class AutomationController:
         loop_count = 0
         while True:
             try:
-                # DEBUG MODE
-                debug_mode = os.getenv('DEBUG_MODE_ENABLED', 'false').lower() == 'true'
+                # DEBUG MODE (hot-swappable from playlists.json)
+                settings = self.config_manager.get_settings()
+                debug_mode = settings.get('debug_mode', False)
 
                 # Every 60 seconds: Check stream status
                 if loop_count % 60 == 0:

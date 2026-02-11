@@ -58,9 +58,8 @@ cp .env.example .env
 | `SCENE_CONTENT_SWITCH` | No | `content-switch` | OBS scene shown during rotation transitions |
 | `VLC_SOURCE_NAME` | No | `Playlist` | Name of the VLC media source in OBS |
 | `DISCORD_WEBHOOK_URL` | No | — | Discord webhook for notifications |
-| `YT_DLP_USE_COOKIES` | No | `false` | Use browser cookies for age-restricted videos |
-| `YT_DLP_BROWSER_FOR_COOKIES` | No | `firefox` | Browser to extract cookies from (`chrome`, `firefox`, `brave`, `edge`, etc.) |
-| `DEBUG_MODE_ENABLED` | No | `false` | Enable verbose debug logging |
+| `VIDEO_FOLDER` | Yes | `C:/stream_videos/` | Absolute path to the live playback folder (VLC reads from here) |
+| `NEXT_ROTATION_FOLDER` | Yes | `C:/stream_videos_next/` | Absolute path to the pending/download folder |
 | `BROADCASTER_ID` | No | — | Twitch broadcaster ID (auto-resolved from `TWITCH_USER_LOGIN` if empty) |
 
 ### Playlists (`config/playlists.json`)
@@ -78,14 +77,16 @@ cp .env.example .env
   ],
   "settings": {
     "download_buffer_minutes": 30,
-    "video_folder": "C:/path/to/videos/live",
-    "next_rotation_folder": "C:/path/to/videos/pending",
     "check_config_interval": 60,
     "min_playlists_per_rotation": 2,
     "max_playlists_per_rotation": 2,
     "download_retry_attempts": 5,
     "stream_title_template": "24/7 Reruns | {GAMES} | ",
-    "yt_dlp_verbose": false
+    "yt_dlp_verbose": false,
+    "notify_video_transitions": false,
+    "debug_mode": false,
+    "yt_dlp_use_cookies": false,
+    "yt_dlp_browser_for_cookies": "firefox"
   }
 }
 ```
@@ -105,8 +106,6 @@ cp .env.example .env
 | Field | Description |
 |---|---|
 | `download_buffer_minutes` | Minutes before estimated content end to start downloading the next rotation |
-| `video_folder` | Absolute path to the live playback folder (VLC reads from here) |
-| `next_rotation_folder` | Absolute path to the pending/download folder |
 | `check_config_interval` | Seconds between config file re-reads |
 | `min_playlists_per_rotation` | Minimum playlists selected per rotation |
 | `max_playlists_per_rotation` | Maximum playlists selected per rotation |
@@ -114,6 +113,50 @@ cp .env.example .env
 | `stream_title_template` | Title template. `{GAMES}` is replaced with playlist names joined by ` \| ` |
 | `yt_dlp_verbose` | Enable verbose yt-dlp output in logs |
 | `notify_video_transitions` | Send a Discord notification on every video transition (default: `false`, can be noisy with short videos) |
+| `debug_mode` | Prevents the target streamer going live from pausing the 24/7 stream (default: `false`). Hot-swappable at runtime. |
+| `yt_dlp_use_cookies` | Use browser cookies for age-restricted videos (default: `false`). Hot-swappable — toggle mid-download-retry to recover from 403s. |
+| `yt_dlp_browser_for_cookies` | Browser to extract cookies from: `chrome`, `firefox`, `brave`, `edge`, etc. (default: `firefox`). Hot-swappable. |
+
+### Hot-Swappable Configuration
+
+Settings in `playlists.json` can be changed **while the program is running** — no restart required. The system re-reads the file every loop iteration (once per second), so your changes take effect almost immediately.
+
+`.env` values are **not** hot-swappable. Environment variables are loaded once at process startup. Changing `.env` requires a full restart.
+
+**What this means in practice:**
+
+Any setting in the `"settings"` block of `playlists.json` (playlist counts, download retries, title template, debug mode, cookie settings, etc.) can be edited in a text editor and saved. The running program picks up the new values on its next cycle.
+
+**Example — Recovering from YouTube 403 errors mid-download:**
+
+If downloads start failing with 403 (Forbidden) errors — common when YouTube detects automated requests — you can enable/disable cookie-based authentication on the fly without stopping the bot:
+
+1. Open `config/playlists.json` in any text editor.
+2. Change `"yt_dlp_use_cookies"` from `false` to `true`:
+   ```json
+   {
+     "settings": {
+       "yt_dlp_use_cookies": true,
+       "yt_dlp_browser_for_cookies": "firefox"
+     }
+   }
+   ```
+3. Save the file. The program re-reads it before each download attempt, so the very next retry will use cookies from your browser session (where you're logged into YouTube).
+
+This works because the download retry loop reads cookie settings fresh on every attempt. If the program is in the middle of retrying a failed download (with exponential backoff between attempts), your change will be picked up on the next retry — no content interruption.
+
+> **Tip:** Make sure you're logged into YouTube in the browser specified by `yt_dlp_browser_for_cookies` and that the browser is closed (some browsers lock their cookie database while running).
+
+**Example — Toggling debug mode:**
+
+If the target streamer goes live and you want to keep your 24/7 stream running instead of pausing:
+
+1. Set `"debug_mode": true` in `playlists.json` and save.
+2. The program ignores live-status checks until you set it back to `false`.
+
+**Example — Adjusting rotation size:**
+
+Want more variety in the next rotation? Change `max_playlists_per_rotation` from `2` to `4` and save. The *next rotation* will pick up to 4 playlists.
 
 ## OBS Setup
 
@@ -129,7 +172,7 @@ You need **three scenes** and one **VLC media source**:
 
 Add a **VLC Video Source** (not a regular Media Source) named **`Playlist`** (configurable via `VLC_SOURCE_NAME`) to your `Stream` scene with these settings:
 
-- **Playlist directory**: Point it to your `video_folder` path from `playlists.json`
+- **Playlist directory**: Point it to your `VIDEO_FOLDER` path from `.env`
 - **Loop**: Enabled (the system handles advancement by deleting played files; loop ensures VLC keeps playing)
 - **Shuffle**: Disabled (the system controls ordering via filename prefixes)
 
@@ -252,7 +295,7 @@ chmod +x reset_state.sh
 ./reset_state.sh
 ```
 
-This deletes the SQLite database and all downloaded videos from both the live and pending folders (paths are read from `playlists.json`).
+This deletes the SQLite database and all downloaded videos from both the live and pending folders (paths are read from `VIDEO_FOLDER` / `NEXT_ROTATION_FOLDER` env vars).
 
 ## Project Structure
 

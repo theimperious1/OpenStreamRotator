@@ -1,14 +1,32 @@
 #!/bin/bash
 # Reset OSR state - delete database and all video files
-# Reads video directories from config/playlists.json
+# Reads video directories from .env (falls back to config/playlists.json, then defaults)
 
 echo "Resetting OpenStreamRotator state..."
 echo ""
 
-# Read video folders from playlists.json using Python
-echo "Reading configuration from playlists.json..."
-VIDEO_FOLDER=$(python3 -c "import json; config = json.load(open('config/playlists.json')); print(config['settings'].get('video_folder', 'videos/live'))" 2>/dev/null || echo "videos/live")
-NEXT_FOLDER=$(python3 -c "import json; config = json.load(open('config/playlists.json')); print(config['settings'].get('next_rotation_folder', 'videos/pending'))" 2>/dev/null || echo "videos/pending")
+# Read video folders from .env first, fall back to playlists.json, then defaults
+echo "Reading configuration..."
+VIDEO_FOLDER=""
+NEXT_FOLDER=""
+
+# Try .env file first
+if [ -f ".env" ]; then
+    VIDEO_FOLDER=$(grep -m1 '^VIDEO_FOLDER=' .env | cut -d'=' -f2- | tr -d '\r')
+    NEXT_FOLDER=$(grep -m1 '^NEXT_ROTATION_FOLDER=' .env | cut -d'=' -f2- | tr -d '\r')
+fi
+
+# Fall back to playlists.json if not found in .env
+if [ -z "$VIDEO_FOLDER" ]; then
+    VIDEO_FOLDER=$(python3 -c "import json; config = json.load(open('config/playlists.json')); print(config['settings'].get('video_folder', ''))" 2>/dev/null || echo "")
+fi
+if [ -z "$NEXT_FOLDER" ]; then
+    NEXT_FOLDER=$(python3 -c "import json; config = json.load(open('config/playlists.json')); print(config['settings'].get('next_rotation_folder', ''))" 2>/dev/null || echo "")
+fi
+
+# Final defaults
+[ -z "$VIDEO_FOLDER" ] && VIDEO_FOLDER="videos/live"
+[ -z "$NEXT_FOLDER" ] && NEXT_FOLDER="videos/pending"
 
 # Cleanup path formatting (remove trailing slashes)
 VIDEO_FOLDER="${VIDEO_FOLDER%/}"

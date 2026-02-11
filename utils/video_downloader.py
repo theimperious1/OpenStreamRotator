@@ -182,9 +182,11 @@ class VideoDownloader:
                 }
                 
                 # Add cookie support for age-restricted videos if enabled
-                use_cookies = os.getenv('YT_DLP_USE_COOKIES', 'false').lower() == 'true'
+                # Read from playlists.json settings (hot-swappable mid-retry)
+                cookie_settings = self.config.get_settings()
+                use_cookies = cookie_settings.get('yt_dlp_use_cookies', False)
                 if use_cookies:
-                    browser = os.getenv('YT_DLP_BROWSER_FOR_COOKIES', 'firefox').lower()
+                    browser = str(cookie_settings.get('yt_dlp_browser_for_cookies', 'firefox')).lower()
                     ydl_opts['cookiesfrombrowser'] = (browser,)
                     logger.debug(f"Using cookies from browser: {browser}")
                 

@@ -28,13 +28,14 @@ class ConfigManager:
                 }
             ],
             "settings": {
-                "video_folder": "C:/stream_videos/",
-                "next_rotation_folder": "C:/stream_videos_next/",
                 "check_config_interval": 60,
                 "min_playlists_per_rotation": 2,
                 "max_playlists_per_rotation": 4,
                 "download_retry_attempts": 3,
-                "stream_title_template": "24/7 @example1 / @example2 | {GAMES} | !playlist !streamtime !new"
+                "stream_title_template": "24/7 @example1 / @example2 | {GAMES} | !playlist !streamtime !new",
+                "debug_mode": False,
+                "yt_dlp_use_cookies": False,
+                "yt_dlp_browser_for_cookies": "firefox"
             }
         }
 
@@ -73,11 +74,29 @@ class ConfigManager:
         return []
 
     def get_settings(self) -> Dict:
-        """Get application settings."""
+        """Get application settings.
+        
+        Folder paths (video_folder, next_rotation_folder) are read from
+        environment variables (VIDEO_FOLDER, NEXT_ROTATION_FOLDER) and injected
+        into the settings dict so all existing callers continue to work.
+        
+        Runtime-tunable settings (debug_mode, yt_dlp_use_cookies, etc.) live in
+        playlists.json and are re-read on every call for hot-swap support.
+        """
         config = self.load_config()
-        if config:
-            return config.get('settings', {})
-        return {}
+        settings = config.get('settings', {}) if config else {}
+
+        # Inject env-var folder paths into settings dict (env overrides json fallback)
+        settings['video_folder'] = os.getenv(
+            'VIDEO_FOLDER',
+            settings.get('video_folder', 'C:/stream_videos/')
+        )
+        settings['next_rotation_folder'] = os.getenv(
+            'NEXT_ROTATION_FOLDER',
+            settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+        )
+
+        return settings
 
     def validate_config(self) -> bool:
         """Validate configuration file structure."""
@@ -96,12 +115,6 @@ class ConfigManager:
                 logger.error(f"Invalid playlist config: {playlist}")
                 return False
 
-        # Validate settings
-        settings = config['settings']
-        required_settings = ['video_folder', 'next_rotation_folder']
-        for setting in required_settings:
-            if setting not in settings:
-                logger.error(f"Missing required setting: {setting}")
-                return False
+        # Validate settings (folder paths now come from env vars, not required in json)
 
-        return True
+        return True        return True
