@@ -76,7 +76,7 @@ class PlaylistSelector:
             # Get next_playlists from current session (what's being prepared)
             next_playlists_json = session.get('next_playlists')
             if next_playlists_json:
-                next_playlist_names = json.loads(next_playlists_json) if isinstance(next_playlists_json, str) else next_playlists_json
+                next_playlist_names = self.db.parse_json_field(next_playlists_json, [])
                 excluded.update(next_playlist_names)
             
             if excluded:
@@ -147,6 +147,10 @@ class PlaylistSelector:
         # Select between min and max playlists
         num_to_select = min(len(all_playlists), max_playlists)
         num_to_select = max(num_to_select, min_playlists)
+        # Cap at available playlists (can't select more than we have)
+        num_to_select = min(num_to_select, len(all_playlists))
+        if num_to_select < min_playlists:
+            logger.warning(f"Only {len(all_playlists)} playlists available, fewer than minimum {min_playlists}")
 
         selected = all_playlists[:num_to_select]
 

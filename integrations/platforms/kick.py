@@ -157,17 +157,24 @@ class KickUpdater(StreamPlatform):
         logger.debug(f"[{self.platform_name}] Calling update_channel with: channel_id={self.channel_id}, category_id={category_id}, {kwargs}")
         await self.api.update_channel(**update_params)  # type: ignore
 
+    @staticmethod
+    def _is_204_success(exc: Exception) -> bool:
+        """Check if an exception represents a 204 No Content success response.
+        
+        Kick's API returns 204 with no body on successful updates,
+        which aiohttp raises as ContentTypeError.
+        """
+        return "204" in str(exc) and "ContentTypeError" in type(exc).__name__
+
     async def update_title(self, title: str) -> bool:
         try:
-            await self._update_channel(stream_title=title)  # No category_id needed — it will fetch current
-            self.current_title = title  # Store for category-only updates
+            await self._update_channel(stream_title=title)
+            self.current_title = title
             self.log_success("Updated title", title)
             return True
         except Exception as e:
-            error_str = str(e)
-            # 204 No Content is actually a success - the API successfully updated but returned no body
-            if "204" in error_str and "ContentTypeError" in type(e).__name__:
-                self.current_title = title  # Store even on 204
+            if self._is_204_success(e):
+                self.current_title = title
                 self.log_success("Updated title", title)
                 logger.info(f"[{self.platform_name}] Update successful (API returned 204 No Content)")
                 return True
@@ -261,16 +268,9 @@ class KickUpdater(StreamPlatform):
             logger.error(f"[{self.platform_name}] Category lookup error for '{category_name}': {type(e).__name__}: {e}", exc_info=True)
             return None
 
-    def update_category(self, category_name: str) -> bool:
-        """Note: This is a sync wrapper. Use update_stream_info for category + title updates."""
-        try:
-            # For now, return False since we can't do async lookups in a sync context
-            # The category lookup happens in update_stream_info instead
-            logger.warning(f"[{self.platform_name}] Direct category update not supported, use update_stream_info")
-            return False
-        except Exception as e:
-            self.log_error("Update category", e)
-            return False
+    async def update_category(self, category_name: str) -> bool:
+        """Async category update — delegates to update_category_async."""
+        return await self.update_category_async(category_name)
 
     async def update_category_async(self, category: str) -> bool:
         """
@@ -294,9 +294,7 @@ class KickUpdater(StreamPlatform):
                 logger.warning(f"[{self.platform_name}] Could not find category ID for: {category}")
                 return False
         except Exception as e:
-            error_str = str(e)
-            # 204 No Content is actually a success
-            if "204" in error_str and "ContentTypeError" in type(e).__name__:
+            if self._is_204_success(e):
                 logger.info(f"[{self.platform_name}] Update successful (API returned 204 No Content)")
                 return True
             logger.error(f"[{self.platform_name}] Update category failed with error: {type(e).__name__}: {e}", exc_info=True)
@@ -320,10 +318,8 @@ class KickUpdater(StreamPlatform):
             )
             return True
         except Exception as e:
-            error_str = str(e)
-            # 204 No Content is actually a success - the API successfully updated but returned no body
-            if "204" in error_str and "ContentTypeError" in type(e).__name__:
-                self.current_title = title  # Store even on 204
+            if self._is_204_success(e):
+                self.current_title = title
                 self.log_success(
                     "Updated stream info",
                     f"Title: {title}, Category: {category or 'N/A'}"

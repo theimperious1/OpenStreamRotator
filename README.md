@@ -53,8 +53,8 @@ cp .env.example .env
 | `OBS_HOST` | No | `localhost` | OBS WebSocket host |
 | `OBS_PORT` | No | `4455` | OBS WebSocket port |
 | `OBS_PASSWORD` | Yes | — | OBS WebSocket password |
-| `SCENE_LIVE` | No | `Pause screen` | OBS scene shown when target streamer is live |
-| `SCENE_OFFLINE` | No | `Stream` | OBS scene for normal 24/7 playback |
+| `SCENE_PAUSE` | No | `Pause screen` | OBS scene shown when target streamer is live (pauses 24/7 content) |
+| `SCENE_STREAM` | No | `Stream` | OBS scene for normal 24/7 playback |
 | `SCENE_CONTENT_SWITCH` | No | `content-switch` | OBS scene shown during rotation transitions |
 | `VLC_SOURCE_NAME` | No | `Playlist` | Name of the VLC media source in OBS |
 | `DISCORD_WEBHOOK_URL` | No | — | Discord webhook for notifications |
@@ -171,8 +171,8 @@ You need **three scenes** and one **VLC media source**:
 
 ### Scenes
 
-1. **`Stream`** (default name, configurable via `SCENE_OFFLINE`) — The main playback scene. Should contain your VLC media source and any overlays. This is what viewers see during normal 24/7 operation.
-2. **`Pause screen`** (default name, configurable via `SCENE_LIVE`) — Shown when the target streamer goes live. Typically a static image telling viewers the main stream is live.
+1. **`Stream`** (default name, configurable via `SCENE_STREAM`) — The main playback scene. Should contain your VLC media source and any overlays. This is what viewers see during normal 24/7 operation.
+2. **`Pause screen`** (default name, configurable via `SCENE_PAUSE`) — Shown when the target streamer goes live. Typically a static image telling viewers the main stream is live.
 3. **`content-switch`** (default name, configurable via `SCENE_CONTENT_SWITCH`) — Brief transition scene shown while content folders are being swapped. Can be a loading animation or static image.
 
 ### VLC Media Source

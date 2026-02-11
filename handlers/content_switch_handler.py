@@ -1,7 +1,5 @@
 import json
 import logging
-import os
-import re
 import time
 from typing import Optional
 from core.database import DatabaseManager
@@ -9,7 +7,7 @@ from config.config_manager import ConfigManager
 from managers.playlist_manager import PlaylistManager
 from controllers.obs_controller import OBSController
 from services.notification_service import NotificationService
-import asyncio
+from utils.video_utils import strip_ordering_prefix, resolve_category_for_video, get_video_files_sorted
 
 logger = logging.getLogger(__name__)
 
@@ -49,35 +47,7 @@ class ContentSwitchHandler:
         Returns:
             Category name, or None if not found
         """
-        if not video_filename:
-            return None
-        
-        try:
-            # Strip ordering prefix (e.g., "01_") before DB lookup
-            clean_filename = re.sub(r'^\d{2}_', '', video_filename)
-            
-            # Look up the video in database to find its source playlist
-            video = self.db.get_video_by_filename(clean_filename)
-            if not video:
-                logger.debug(f"Video not found in database: {clean_filename}")
-                return None
-            
-            playlist_name = video.get('playlist_name')
-            if not playlist_name:
-                logger.debug(f"No playlist_name for video: {video_filename}")
-                return None
-            
-            # Get the category for this playlist from playlists config
-            playlists_config = self.config.get_playlists()
-            for p in playlists_config:
-                if p.get('name') == playlist_name:
-                    return p.get('category') or p.get('name')
-            
-            logger.warning(f"Playlist '{playlist_name}' not found in config for video: {video_filename}")
-            return None
-        except Exception as e:
-            logger.error(f"Error getting category for video {video_filename}: {e}")
-            return None
+        return resolve_category_for_video(video_filename, self.db, self.config)
 
     async def update_category_for_video_async(self, video_filename: str, stream_manager) -> bool:
         """
@@ -131,21 +101,14 @@ class ContentSwitchHandler:
         
         try:
             # Get first video from the folder (sorted alphabetically, matching VLC order)
-            if video_folder and os.path.isdir(video_folder):
-                video_extensions = {'.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.wmv'}
-                video_files = sorted([
-                    f for f in os.listdir(video_folder)
-                    if os.path.isfile(os.path.join(video_folder, f))
-                    and os.path.splitext(f)[1].lower() in video_extensions
-                ])
-                if video_files:
-                    first_video = video_files[0]
-                    # Strip ordering prefix (e.g., "01_") before DB lookup
-                    original_name = re.sub(r'^\d{2}_', '', first_video)
-                    category = self.get_category_for_video(original_name)
-                    if category:
-                        logger.info(f"Got initial rotation category from first video: {first_video} -> {category}")
-                        return category
+            video_files = get_video_files_sorted(video_folder)
+            if video_files:
+                first_video = video_files[0]
+                original_name = strip_ordering_prefix(first_video)
+                category = self.get_category_for_video(original_name)
+                if category:
+                    logger.info(f"Got initial rotation category from first video: {first_video} -> {category}")
+                    return category
         except Exception as e:
             logger.warning(f"Failed to get category from first video: {e}")
         
@@ -155,7 +118,6 @@ class ContentSwitchHandler:
             if session:
                 playlists_selected = session.get('playlists_selected', '')
                 if playlists_selected:
-                    import json
                     playlist_ids = json.loads(playlists_selected)
                     playlists = playlist_manager.get_playlists_by_ids(playlist_ids)
                     if playlists:
@@ -253,7 +215,7 @@ class ContentSwitchHandler:
         return True
 
     def finalize_switch(self, current_folder: str, vlc_source_name: str,
-                       scene_live: str, scene_offline: str,
+                       scene_pause: str, scene_stream: str,
                        last_stream_status: Optional[str]) -> tuple[bool, list]:
         """
         Finalize content switch (update VLC, switch scene).
@@ -261,8 +223,8 @@ class ContentSwitchHandler:
         Args:
             current_folder: Current video folder
             vlc_source_name: Name of VLC source
-            scene_live: Name of live scene
-            scene_offline: Name of offline scene
+            scene_pause: Name of pause scene (shown when streamer is live)
+            scene_stream: Name of stream scene (normal 24/7 playback)
             last_stream_status: Current stream status ("live" or "offline")
             
         Returns:
@@ -276,13 +238,13 @@ class ContentSwitchHandler:
         
         # Switch back to appropriate scene
         if last_stream_status == "live":
-            self.obs_controller.switch_scene(scene_live)
+            self.obs_controller.switch_scene(scene_pause)
         else:
-            self.obs_controller.switch_scene(scene_offline)
+            self.obs_controller.switch_scene(scene_stream)
         
         return True, playlist
 
-    def update_stream_metadata(self, session_id: Optional[int], stream_manager) -> bool:
+    async def update_stream_metadata(self, session_id: Optional[int], stream_manager) -> bool:
         """
         Update stream title and category based on session.
         
@@ -319,7 +281,7 @@ class ContentSwitchHandler:
         
         # Update via stream manager
         try:
-            stream_manager.update_both(stream_title, category)
+            await stream_manager.update_both(stream_title, category)
             logger.info(f"Updated stream: title='{stream_title}', category='{category}'")
             return True
         except Exception as e:
@@ -357,68 +319,4 @@ class ContentSwitchHandler:
             logger.error(f"Failed to mark playlists as played: {e}")
             return False
 
-    def update_category_by_video(self, video_filename: str, stream_manager) -> bool:
-        """
-        Update stream category based on the currently playing video's source playlist.
-        
-        This is called when a video transition is detected to update the stream category
-        to match the currently playing video's source playlist.
-        
-        Args:
-            video_filename: Filename of the currently playing video
-            stream_manager: StreamManager instance for updates
-            
-        Returns:
-            True if successful or no update needed, False if error
-        """
-        if not video_filename:
-            return True
-        
-        try:
-            # Look up the video in database to find its source playlist
-            video = self.db.get_video_by_filename(video_filename)
-            if not video:
-                logger.debug(f"Video not found in database: {video_filename} (may be already deleted)")
-                return True
-            
-            playlist_name = video.get('playlist_name')
-            if not playlist_name:
-                logger.debug(f"No playlist_name for video: {video_filename}")
-                return True
-            
-            # Get the category for this playlist from playlists config
-            playlists_config = self.config.get_playlists()
-            target_playlist = None
-            for p in playlists_config:
-                if p.get('name') == playlist_name:
-                    target_playlist = p
-                    break
-            
-            if not target_playlist:
-                logger.warning(f"Playlist '{playlist_name}' not found in config for video: {video_filename}")
-                return True
-            
-            category = target_playlist.get('category') or target_playlist.get('name')
-            
-            # Update via stream manager (async, so schedule it)
-            try:
-                if category:  # Only create task if category is valid
-                    # Throttle category updates to prevent spam (only allow one per 3 seconds)
-                    current_time = time.time()
-                    if current_time - self._last_category_update_time >= 3:
-                        asyncio.create_task(stream_manager.update_category(category))  # Use update_category instead of update_stream_info with None title
-                        self._last_category_update_time = current_time
-                        logger.info(f"Updated category to '{category}' (from video: {video_filename})")
-                    else:
-                        logger.debug(f"Skipping category update for '{category}' - throttled (from video: {video_filename})")
-                    return True
-                else:
-                    logger.warning(f"No valid category for video: {video_filename}")
-                    return True
-            except Exception as e:
-                logger.error(f"Failed to update category: {e}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error updating category by video: {e}")
-            return False
+

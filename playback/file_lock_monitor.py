@@ -11,11 +11,11 @@ VLC loops the last video (never releasing the lock).
 
 import logging
 import os
-import re
 import time
 from typing import Optional, TYPE_CHECKING
 
 from config.constants import VIDEO_EXTENSIONS
+from utils.video_utils import strip_ordering_prefix, resolve_category_for_video
 
 if TYPE_CHECKING:
     from controllers.obs_controller import OBSController
@@ -23,24 +23,6 @@ if TYPE_CHECKING:
     from config.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
-
-# Prefix pattern: "XX_" where XX is a 2-digit number
-PREFIX_PATTERN = re.compile(r'^\d{2}_')
-
-
-def strip_ordering_prefix(filename: str) -> str:
-    """Strip the ordering prefix (e.g., '01_') from a video filename.
-    
-    Used to recover the original filename for database lookups,
-    since videos are stored in the database without the prefix.
-    
-    Args:
-        filename: Filename with optional ordering prefix (e.g., '01_CATS Being the Boss.webm')
-    
-    Returns:
-        Original filename without prefix (e.g., 'CATS Being the Boss.webm')
-    """
-    return PREFIX_PATTERN.sub('', filename)
 
 
 def is_file_locked(filepath: str) -> bool:
@@ -390,36 +372,9 @@ class FileLockMonitor:
     def get_category_for_current_video(self) -> Optional[str]:
         """Get the stream category for the currently playing video.
         
-        Strips ordering prefix, looks up original filename in database,
-        finds the source playlist, and returns the playlist's category.
-        
         Returns:
             Category name, or None if unable to determine
         """
-        if not self._current_video:
+        if not self._current_video or not self.config:
             return None
-        
-        original_name = strip_ordering_prefix(self._current_video)
-        
-        try:
-            video = self.db.get_video_by_filename(original_name)
-            if not video:
-                logger.debug(f"Video not found in database: {original_name}")
-                return None
-            
-            playlist_name = video.get('playlist_name')
-            if not playlist_name:
-                return None
-            
-            # Look up the actual category from playlists config
-            # Falls back to playlist_name if no config or no category field
-            if self.config:
-                playlists_config = self.config.get_playlists()
-                for p in playlists_config:
-                    if p.get('name') == playlist_name:
-                        return p.get('category') or p.get('name')
-            
-            return playlist_name
-        except Exception as e:
-            logger.error(f"Error getting category for video {original_name}: {e}")
-            return None
+        return resolve_category_for_video(self._current_video, self.db, self.config)

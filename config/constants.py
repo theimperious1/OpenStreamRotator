@@ -18,7 +18,7 @@ CHECK_INTERVAL_TWITCH_API = 60  # Twitch live status checks
 SKIP_DETECTION_MARGIN_MS = 5000  # 5 second margin for VLC/OBS reporting variations
 
 # Video File Extensions
-VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov', '.webm')
+VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
 
 # Default Paths (can be overridden in config)
 DEFAULT_VIDEO_FOLDER = 'C:/stream_videos/'
@@ -26,8 +26,8 @@ DEFAULT_NEXT_ROTATION_FOLDER = 'C:/stream_videos_next/'
 
 # OBS Scene Names (must match OBS configuration)
 # These can be overridden via environment variables
-DEFAULT_SCENE_LIVE = "Pause screen"
-DEFAULT_SCENE_OFFLINE = "Stream"
+DEFAULT_SCENE_PAUSE = "Pause screen"
+DEFAULT_SCENE_STREAM = "Stream"
 DEFAULT_SCENE_CONTENT_SWITCH = "content-switch"
 DEFAULT_VLC_SOURCE_NAME = "Playlist"
 
@@ -43,3 +43,4 @@ COLOR_INFO = 0x0099FF
 COLOR_STREAM_LIVE = 0x9146FF
 COLOR_ROTATION_START = 0xFFA500
 COLOR_NEXT_READY = 0x00FF00
+COLOR_MUTED = 0x808080

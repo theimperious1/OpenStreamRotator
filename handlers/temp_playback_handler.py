@@ -7,11 +7,9 @@ after playing, and archive.txt prevents re-downloading deleted videos.
 """
 
 import asyncio
-import json
 import logging
 import os
 import time
-from datetime import datetime
 from typing import Optional, Callable, TYPE_CHECKING
 
 from config.config_manager import ConfigManager
@@ -25,9 +23,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# OBS VLC source name - can be overridden via environment variable
-VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", "Playlist")
-
 
 class TempPlaybackHandler:
     """Handles temporary playback mode during long playlist downloads."""
@@ -39,7 +34,10 @@ class TempPlaybackHandler:
         playlist_manager: PlaylistManager,
         obs_controller: 'OBSController',
         stream_manager: 'StreamManager',
-        notification_service: Optional[NotificationService] = None
+        notification_service: Optional[NotificationService] = None,
+        scene_stream: str = "Stream",
+        scene_content_switch: str = "content-switch",
+        vlc_source_name: str = "Playlist"
     ):
         self.db = db
         self.config = config
@@ -47,6 +45,9 @@ class TempPlaybackHandler:
         self.obs_controller = obs_controller
         self.stream_manager = stream_manager
         self.notification_service = notification_service
+        self.scene_stream = scene_stream
+        self.scene_content_switch = scene_content_switch
+        self.vlc_source_name = vlc_source_name
         
         # State
         self._active = False
@@ -117,7 +118,7 @@ class TempPlaybackHandler:
         pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
         
         # Switch to content-switch scene briefly for VLC source update
-        if not self.obs_controller or not self.obs_controller.switch_scene('content-switch'):
+        if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_content_switch):
             logger.error("Failed to switch to content-switch scene for temp playback setup")
             return
         
@@ -137,14 +138,14 @@ class TempPlaybackHandler:
                 logger.error("No OBS controller available")
                 return
             
-            success, playlist = self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, pending_folder)
+            success, playlist = self.obs_controller.update_vlc_source(self.vlc_source_name, pending_folder)
             if not success:
                 logger.error("Failed to update VLC source to pending folder")
                 return
             
             # Switch back to Stream scene to resume streaming
             await asyncio.sleep(0.5)
-            if not self.obs_controller.switch_scene('Stream'):
+            if not self.obs_controller.switch_scene(self.scene_stream):
                 logger.error("Failed to switch back to Stream scene after temp playback setup")
                 return
             
@@ -156,7 +157,7 @@ class TempPlaybackHandler:
             # The next_playlists column contains the prepared rotation playlists
             if session and session.get('next_playlists'):
                 try:
-                    next_playlist_names = json.loads(session.get('next_playlists', '[]'))
+                    next_playlist_names = DatabaseManager.parse_json_field(session.get('next_playlists'), [])
                     if next_playlist_names:
                         new_title = self.playlist_manager.generate_stream_title(next_playlist_names)
                         if self.stream_manager:
@@ -231,7 +232,7 @@ class TempPlaybackHandler:
             try:
                 await asyncio.sleep(0.5)
                 if self.obs_controller:
-                    self.obs_controller.switch_scene('Stream')
+                    self.obs_controller.switch_scene(self.scene_stream)
             except Exception as scene_error:
                 logger.error(f"Failed to recover scene after temp playback error: {scene_error}")
 
@@ -275,7 +276,7 @@ class TempPlaybackHandler:
             logger.info(f"Restoring temp playback: {len(valid_playlist)} valid files from position {saved_position}")
             
             # Switch to content-switch scene briefly for VLC source update
-            if not self.obs_controller or not self.obs_controller.switch_scene('content-switch'):
+            if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_content_switch):
                 logger.error("Failed to switch to content-switch scene for temp playback restore")
                 return False
             
@@ -283,7 +284,7 @@ class TempPlaybackHandler:
             
             # Update OBS VLC source with valid remaining playlist
             success, playlist = self.obs_controller.update_vlc_source(
-                VLC_SOURCE_NAME, 
+                self.vlc_source_name, 
                 pending_folder, 
                 playlist=valid_playlist
             )
@@ -293,14 +294,14 @@ class TempPlaybackHandler:
             
             # Switch back to Stream scene
             await asyncio.sleep(0.5)
-            if not self.obs_controller.switch_scene('Stream'):
+            if not self.obs_controller.switch_scene(self.scene_stream):
                 logger.error("Failed to switch back to Stream scene after temp playback restore")
                 return False
             
             # Seek to saved cursor position if we have one
             if saved_cursor_ms > 0 and self.obs_controller:
                 await asyncio.sleep(0.5)  # Give VLC time to start playing
-                seek_success = self.obs_controller.seek_media(VLC_SOURCE_NAME, saved_cursor_ms)
+                seek_success = self.obs_controller.seek_media(self.vlc_source_name, saved_cursor_ms)
                 if seek_success:
                     logger.info(f"Seeked to saved cursor position: {saved_cursor_ms}ms ({saved_cursor_ms/1000:.1f}s)")
                 else:
@@ -324,7 +325,7 @@ class TempPlaybackHandler:
             # Update stream title from next_playlists
             if session and session.get('next_playlists'):
                 try:
-                    next_playlist_names = json.loads(session.get('next_playlists', '[]'))
+                    next_playlist_names = DatabaseManager.parse_json_field(session.get('next_playlists'), [])
                     if next_playlist_names:
                         new_title = self.playlist_manager.generate_stream_title(next_playlist_names)
                         if self.stream_manager:
@@ -339,7 +340,7 @@ class TempPlaybackHandler:
             # Resume pending downloads in background
             if session and session.get('next_playlists_status') and self.current_session_id:
                 try:
-                    status_dict = json.loads(session.get('next_playlists_status', '{}'))
+                    status_dict: dict = DatabaseManager.parse_json_field(session.get('next_playlists_status'), {})
                     # Find playlists with PENDING status
                     pending_playlists = [name for name, status in status_dict.items() if status == "PENDING"]
                     if pending_playlists:
@@ -363,7 +364,7 @@ class TempPlaybackHandler:
             try:
                 await asyncio.sleep(0.5)
                 if self.obs_controller:
-                    self.obs_controller.switch_scene('Stream')
+                    self.obs_controller.switch_scene(self.scene_stream)
             except Exception as scene_error:
                 logger.error(f"Failed to recover scene after temp playback restore error: {scene_error}")
             return False
@@ -389,21 +390,21 @@ class TempPlaybackHandler:
         
         try:
             # Switch to content-switch scene briefly
-            if not self.obs_controller or not self.obs_controller.switch_scene('content-switch'):
+            if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_content_switch):
                 logger.error("Failed to switch to content-switch scene for VLC refresh")
                 return
             
             await asyncio.sleep(1.0)  # Wait for scene switch
             
             # Update VLC source with current pending folder contents
-            success, playlist = self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, pending_folder)
+            success, playlist = self.obs_controller.update_vlc_source(self.vlc_source_name, pending_folder)
             if not success:
                 logger.error("Failed to refresh VLC source")
                 return
             
             # Switch back to Stream scene
             await asyncio.sleep(0.3)
-            if not self.obs_controller.switch_scene('Stream'):
+            if not self.obs_controller.switch_scene(self.scene_stream):
                 logger.error("Failed to switch back to Stream scene after VLC refresh")
                 return
             
@@ -414,7 +415,7 @@ class TempPlaybackHandler:
             # Try to switch back to Stream scene
             try:
                 if self.obs_controller:
-                    self.obs_controller.switch_scene('Stream')
+                    self.obs_controller.switch_scene(self.scene_stream)
             except:
                 pass
 
@@ -442,11 +443,8 @@ class TempPlaybackHandler:
                 return
             
             # Get the prepared playlist names and their statuses
-            next_playlists_raw = session.get('next_playlists', [])
-            next_playlists_status_raw = session.get('next_playlists_status', {})
-            
-            next_playlists = json.loads(next_playlists_raw) if isinstance(next_playlists_raw, str) else (next_playlists_raw or [])
-            next_playlists_status = json.loads(next_playlists_status_raw) if isinstance(next_playlists_status_raw, str) else (next_playlists_status_raw or {})
+            next_playlists = DatabaseManager.parse_json_field(session.get('next_playlists'), [])
+            next_playlists_status: dict = DatabaseManager.parse_json_field(session.get('next_playlists_status'), {})
             
             # If no playlists are being prepared, nothing to wait for
             if not next_playlists:
@@ -474,7 +472,7 @@ class TempPlaybackHandler:
             settings = self.config.get_settings()
             
             # Switch to content-switch scene for folder operations
-            if not self.obs_controller or not self.obs_controller.switch_scene('content-switch'):
+            if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_content_switch):
                 logger.error("Failed to switch to content-switch scene for temp playback exit")
                 return
             
@@ -494,8 +492,7 @@ class TempPlaybackHandler:
             try:
                 session = self.db.get_current_session()
                 if session:
-                    next_playlists_raw = session.get('next_playlists', '[]')
-                    next_playlist_names = json.loads(next_playlists_raw) if isinstance(next_playlists_raw, str) else (next_playlists_raw or [])
+                    next_playlist_names = DatabaseManager.parse_json_field(session.get('next_playlists'), [])
                     if next_playlist_names:
                         self.playlist_manager.rename_videos_with_playlist_prefix(live_folder, next_playlist_names)
             except Exception as e:
@@ -519,14 +516,14 @@ class TempPlaybackHandler:
                 logger.error("No OBS controller available")
                 return
             
-            success, playlist = self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, live_folder)
+            success, playlist = self.obs_controller.update_vlc_source(self.vlc_source_name, live_folder)
             if not success:
                 logger.error("Failed to update VLC source to live folder")
                 return
             
             # Switch back to Stream scene
             await asyncio.sleep(0.5)
-            if not self.obs_controller.switch_scene('Stream'):
+            if not self.obs_controller.switch_scene(self.scene_stream):
                 logger.error("Failed to switch back to Stream scene after temp playback exit")
                 return
             
@@ -561,7 +558,7 @@ class TempPlaybackHandler:
             try:
                 await asyncio.sleep(0.5)
                 if self.obs_controller:
-                    self.obs_controller.switch_scene('Stream')
+                    self.obs_controller.switch_scene(self.scene_stream)
             except Exception as scene_error:
                 logger.error(f"Failed to recover scene after temp playback exit error: {scene_error}")
 

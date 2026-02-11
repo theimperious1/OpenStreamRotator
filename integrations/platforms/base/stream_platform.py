@@ -17,7 +17,7 @@ class StreamPlatform(ABC):
         pass
 
     @abstractmethod
-    def update_category(self, category_name: str) -> bool:
+    async def update_category(self, category_name: str) -> bool:
         """Update stream category/game on the platform."""
         pass
 
@@ -33,7 +33,7 @@ class StreamPlatform(ABC):
         success = await self.update_title(title)
 
         if category:
-            category_success = self.update_category(category)
+            category_success = await self.update_category(category)
             success = success and category_success
 
         return success

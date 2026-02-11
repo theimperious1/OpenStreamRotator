@@ -3,6 +3,7 @@ import os
 import logging
 import re
 import json
+import threading
 from typing import List
 from config.constants import VIDEO_EXTENSIONS
 
@@ -10,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Global list to track running subprocesses for cleanup on exit
 _running_processes: List[subprocess.Popen] = []
+_process_lock = threading.Lock()
 
 
 class VideoProcessor:
@@ -90,14 +92,16 @@ class VideoProcessor:
                 file_path
             ]
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            _running_processes.append(proc)
+            with _process_lock:
+                _running_processes.append(proc)
             
             try:
                 stdout, stderr = proc.communicate(timeout=30)
                 result_returncode = proc.returncode
             finally:
-                if proc in _running_processes:
-                    _running_processes.remove(proc)
+                with _process_lock:
+                    if proc in _running_processes:
+                        _running_processes.remove(proc)
             
             if result_returncode == 0:
                 data = json.loads(stdout)
@@ -192,17 +196,17 @@ class VideoProcessor:
 
 def kill_all_running_processes():
     """Kill all tracked subprocesses. Called on program exit."""
-    global _running_processes
-    for proc in _running_processes:
-        try:
-            if proc.poll() is None:  # Process still running
-                logger.info(f"Killing subprocess (PID {proc.pid})")
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    logger.warning(f"Subprocess {proc.pid} didn't terminate, forcing kill")
-                    proc.kill()
-        except Exception as e:
-            logger.error(f"Error killing subprocess: {e}")
-    _running_processes.clear()
+    with _process_lock:
+        for proc in _running_processes:
+            try:
+                if proc.poll() is None:  # Process still running
+                    logger.info(f"Killing subprocess (PID {proc.pid})")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        logger.warning(f"Subprocess {proc.pid} didn't terminate, forcing kill")
+                        proc.kill()
+            except Exception as e:
+                logger.error(f"Error killing subprocess: {e}")
+        _running_processes.clear()
