@@ -80,20 +80,6 @@ if [ -d "$VIDEO_PARENT/temp_pending_backup" ]; then
     rmdir "$VIDEO_PARENT/temp_pending_backup" 2>/dev/null || true
 fi
 
-# Delete temp_override_pending (override content download folder)
-if [ -d "$VIDEO_PARENT/temp_override_pending" ]; then
-    echo "Deleting $VIDEO_PARENT/temp_override_pending/*..."
-    rm -rf "$VIDEO_PARENT/temp_override_pending"/*
-    rmdir "$VIDEO_PARENT/temp_override_pending" 2>/dev/null || true
-fi
-
-# Delete temp_backup_override (live content backup during override)
-if [ -d "$VIDEO_PARENT/temp_backup_override" ]; then
-    echo "Deleting $VIDEO_PARENT/temp_backup_override/*..."
-    rm -rf "$VIDEO_PARENT/temp_backup_override"/*
-    rmdir "$VIDEO_PARENT/temp_backup_override" 2>/dev/null || true
-fi
-
 echo ""
 
 # Delete temp_playback folder (created during large playlist downloads)

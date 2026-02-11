@@ -173,31 +173,6 @@ The system uses your playlist name to automatically set the Kick category:
 
 If the category isn't found on Kick, it defaults to "Just Chatting" (category 15).
 
-## Manual Override
-
-Take manual control when needed (e.g., raid scenario, special events). **Plan ahead** - the override will download the selected playlists, which takes time. **NOTE**: The stream will **NOT** be interrupted during this period. This is safe to do at any time.
-
-1. Edit `manual_override.json`:
-```json
-{
-  "override_active": true,
-  "selected_playlists": ["Hytale", "Gaming"],
-  "trigger_now": true
-}
-```
-
-2. The script will:
-   - Download selected playlists while current content continues playing (this is why planning ahead matters)
-   - Once download completes, pause stream and switch to "content-switch" scene
-   - Backup current content folder and load ONLY the manual override playlists
-   - Restart stream with new content
-   - Update stream title and category
-   - Resume streaming
-
-3. After completion, it automatically resets to automatic mode and resumes normal rotations. The next rotation that was planned will continue as planned.
-
-**Note:** Manual override replaces everything currently playing with **only** the playlists you specify. Nothing else will play until it's over.
-
 ### Temporarily Disabling Playlists
 
 You can also temporarily disable playlists by setting `"enabled": false` in `playlists.json` without needing manual override. This simply excludes them from automatic rotation but doesn't interrupt current playback:

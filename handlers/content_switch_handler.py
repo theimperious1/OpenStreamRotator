@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class ContentSwitchHandler:
-    """Handles content switching operations (normal rotations and overrides)."""
+    """Handles content switching operations (normal rotations)."""
 
     MAX_TITLE_LENGTH = 140  # Kick's title character limit
 
@@ -233,54 +233,19 @@ class ContentSwitchHandler:
         time.sleep(3)  # Wait for file locks to release
         return True
 
-    def execute_switch(self, current_folder: str, next_folder: str,
-                      is_override_resumption: bool = False,
-                      is_override_switch: bool = False,
-                      backup_folder: Optional[str] = None) -> bool:
+    def execute_switch(self, current_folder: str, next_folder: str) -> bool:
         """
         Execute the actual folder content switch.
         
         Args:
             current_folder: Current video folder
             next_folder: Next/pending folder with new content
-            is_override_resumption: If resuming override (add without wiping)
-            is_override_switch: If switching for override (backup then wipe+move)
-            backup_folder: Where to backup current content (for overrides)
             
         Returns:
             True if successful
         """
-        if is_override_resumption:
-            # Add override content without wiping
-            success = self.playlist_manager.add_override_content(current_folder, next_folder)
-        elif is_override_switch and backup_folder:
-            # Backup first, then normal switch
-            backup_success = self.playlist_manager.backup_current_content(current_folder, backup_folder)
-            if not backup_success:
-                logger.error("Failed to backup current content for override")
-                self.notification_service.notify_rotation_error("Failed to backup content for override")
-                return False
-            
-            # Mark backup success
-            suspended_session = self.db.get_suspended_session()
-            if suspended_session:
-                suspension_data_str = suspended_session.get('suspension_data', '{}')
-                try:
-                    suspension_data = json.loads(suspension_data_str)
-                    suspension_data['backup_success'] = True
-                    self.db.update_session_column(
-                        suspended_session['id'],
-                        'suspension_data',
-                        json.dumps(suspension_data)
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to mark backup success: {e}")
-            
-            # Now do normal switch
-            success = self.playlist_manager.switch_content_folders(current_folder, next_folder)
-        else:
-            # Normal rotation: wipe and switch
-            success = self.playlist_manager.switch_content_folders(current_folder, next_folder)
+        # Normal rotation: wipe and switch
+        success = self.playlist_manager.switch_content_folders(current_folder, next_folder)
         
         if not success:
             logger.error("Failed to switch content folders")

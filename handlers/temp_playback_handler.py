@@ -48,7 +48,6 @@ class TempPlaybackHandler:
         
         # State
         self._active = False
-        self._override_queued = False
         self._last_folder_check = 0
         
         # External references (set by automation controller)
@@ -56,10 +55,8 @@ class TempPlaybackHandler:
         self.current_session_id: Optional[int] = None
         
         # Callbacks for automation controller coordination
-        self._check_manual_override_callback: Optional[Callable] = None
         self._auto_resume_downloads_callback: Optional[Callable] = None
         self._initialize_skip_detector_callback: Optional[Callable] = None
-        self._set_override_prep_ready_callback: Optional[Callable[[bool], None]] = None
         self._trigger_next_rotation_callback: Optional[Callable] = None
         
         # Reference to background download flag (shared with automation controller)
@@ -76,37 +73,23 @@ class TempPlaybackHandler:
 
     def set_callbacks(
         self,
-        check_manual_override: Optional[Callable] = None,
         auto_resume_downloads: Optional[Callable] = None,
         initialize_skip_detector: Optional[Callable] = None,
         get_background_download_in_progress: Optional[Callable[[], bool]] = None,
         set_background_download_in_progress: Optional[Callable[[bool], None]] = None,
-        set_override_prep_ready: Optional[Callable[[bool], None]] = None,
         trigger_next_rotation: Optional[Callable] = None
     ) -> None:
         """Set callbacks for coordination with automation controller."""
-        self._check_manual_override_callback = check_manual_override
         self._auto_resume_downloads_callback = auto_resume_downloads
         self._initialize_skip_detector_callback = initialize_skip_detector
         self._get_background_download_in_progress = get_background_download_in_progress
         self._set_background_download_in_progress = set_background_download_in_progress
-        self._set_override_prep_ready_callback = set_override_prep_ready
         self._trigger_next_rotation_callback = trigger_next_rotation
 
     @property
     def is_active(self) -> bool:
         """Check if temp playback is currently active."""
         return self._active
-
-    @property
-    def override_queued(self) -> bool:
-        """Check if an override is queued to run after temp playback exits."""
-        return self._override_queued
-
-    def queue_override(self) -> None:
-        """Queue an override to execute after temp playback exits."""
-        self._override_queued = True
-        logger.info("Override queued to run after temp playback exits")
 
     def _is_background_download_in_progress(self) -> bool:
         """Check if background download is in progress."""
@@ -474,7 +457,8 @@ class TempPlaybackHandler:
         """Monitor pending folder during temp playback.
         
         Since we're streaming directly from pending folder, no file copying is needed.
-        Just check if the background download task has completed and trigger rotation.
+        Just check if all prepared playlists have been marked COMPLETED in the database.
+        Once all downloads complete, trigger rotation to move pending → live.
         New files are automatically picked up by VLC as they complete downloading.
         
         NOTE: Guard check ensures this doesn't trigger if flag is already cleared
@@ -486,11 +470,28 @@ class TempPlaybackHandler:
             return
         
         try:
-            # Check if background download is still running
-            # This is more reliable than checking for .part files, which may have
-            # brief gaps between videos
-            if not self._is_background_download_in_progress():
-                logger.info("Background download completed, exiting temp playback")
+            # Check if all prepared playlists are marked as COMPLETED in the database
+            # This is more reliable than checking flags which may be out of sync
+            session = self.db.get_current_session()
+            if not session or not self.current_session_id:
+                return
+            
+            # Get the prepared playlist names and their statuses
+            next_playlists_raw = session.get('next_playlists', [])
+            next_playlists_status_raw = session.get('next_playlists_status', {})
+            
+            next_playlists = json.loads(next_playlists_raw) if isinstance(next_playlists_raw, str) else (next_playlists_raw or [])
+            next_playlists_status = json.loads(next_playlists_status_raw) if isinstance(next_playlists_status_raw, str) else (next_playlists_status_raw or {})
+            
+            # If no playlists are being prepared, nothing to wait for
+            if not next_playlists:
+                return
+            
+            # Check if all prepared playlists are COMPLETED
+            all_completed = all(next_playlists_status.get(pl) == "COMPLETED" for pl in next_playlists)
+            
+            if all_completed:
+                logger.info(f"All prepared playlists completed: {next_playlists} - exiting temp playback")
                 await self.exit()
                 
         except Exception as e:
@@ -602,21 +603,11 @@ class TempPlaybackHandler:
                 except Exception as e:
                     logger.error(f"Error recalculating finish time after temp playback exit: {e}")
             
-            # Check if override was queued during temp playback
-            if self._override_queued:
-                logger.info("Override was queued during temp playback - executing it now")
-                self._override_queued = False
-                # Set override prep ready flag so automation controller can commit Phase 2
-                if self._set_override_prep_ready_callback:
-                    self._set_override_prep_ready_callback(True)
-                if self._check_manual_override_callback:
-                    await self._check_manual_override_callback()
-            else:
-                # No override - trigger next rotation selection and background download
-                # This ensures the automation controller prepares the playlists after this rotation finishes
-                logger.info("Triggering next rotation preparation after temp playback exit")
-                if self._trigger_next_rotation_callback:
-                    await self._trigger_next_rotation_callback()
+            # Trigger next rotation selection and background download
+            # This ensures the automation controller prepares the playlists after this rotation finishes
+            logger.info("Triggering next rotation preparation after temp playback exit")
+            if self._trigger_next_rotation_callback:
+                await self._trigger_next_rotation_callback()
             
             logger.info("Temp playback successfully exited, resuming normal rotation cycle")
             
@@ -636,8 +627,7 @@ class TempPlaybackHandler:
         directly from pending), the rotation has already moved files from pending → live.
         This method handles:
         1. Update skip detector back to live folder
-        2. Execute any queued overrides
-        3. Clear temp playback flag
+        2. Clear temp playback flag
         """
         logger.info("Cleaning up temp playback after normal rotation")
         
@@ -650,12 +640,10 @@ class TempPlaybackHandler:
                 self.playback_skip_detector.video_folder = video_folder
                 logger.info("Updated skip detector to track live folder")
             
-            # Step 2: Execute queued override if one was triggered during temp playback
-            if self._override_queued:
-                logger.info("Override was queued during temp playback - executing it now")
-                self._override_queued = False
-                if self._check_manual_override_callback:
-                    await self._check_manual_override_callback()
+            # Trigger next rotation
+            logger.info("Triggering next rotation after temp playback cleanup")
+            if self._trigger_next_rotation_callback:
+                await self._trigger_next_rotation_callback()
             
             # Step 3: Clear temp playback flag
             self._active = False

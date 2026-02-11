@@ -77,8 +77,7 @@ class RotationHandler:
         if background_download_in_progress or next_prepared_playlists is not None:
             return None
         
-        # Check if we have prepared content backed up waiting to be restored
-        # (happens when override completes and restores prepared rotation)
+        # Check if we have prepared content waiting in backup
         settings = self.config.get_settings()
         base_path = os.path.dirname(settings.get('video_folder', 'C:/stream_videos/'))
         pending_backup_folder = os.path.normpath(os.path.join(base_path, 'temp_pending_backup'))
@@ -108,18 +107,14 @@ class RotationHandler:
         finish_time = datetime.fromisoformat(session['estimated_finish_time'])
         return datetime.now() >= finish_time
 
-    def get_rotation_completion_info(self, session: dict) -> Tuple[int, bool]:
+    def get_rotation_completion_info(self, session: dict) -> int:
         """
         Get info needed for rotation completion.
         
         Returns:
-            Tuple of (total_seconds, has_suspended_session)
+            Total playback seconds
         """
-        total_seconds = self.playback_tracker.get_total_seconds()
-        suspended_session = self.db.get_suspended_session()
-        has_suspended = suspended_session is not None
-        
-        return total_seconds, has_suspended
+        return self.playback_tracker.get_total_seconds()
 
     def log_rotation_completion(self, total_seconds: int):
         """Log rotation completion (once per session)."""
@@ -131,86 +126,7 @@ class RotationHandler:
         """Reset the rotation duration log flag for new session."""
         self._rotation_duration_reached_logged = False
 
-    def restore_after_override(self, current_folder: str, backup_folder: str, 
-                              pending_backup_folder: str, prepared_playlist_names: list,
-                              obs_controller, vlc_source_name: str, scene_content_switch: str) -> bool:
-        """
-        Restore original content after override completes.
-        
-        Args:
-            current_folder: Current video folder
-            backup_folder: Where original content is backed up
-            pending_backup_folder: Where prepared next rotation was saved
-            prepared_playlist_names: Names of playlists to restore to next_prepared_playlists
-            obs_controller: OBS controller for scene/VLC operations
-            vlc_source_name: Name of VLC source
-            scene_content_switch: Name of content-switch scene
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        if not backup_folder or not os.path.exists(backup_folder):
-            logger.warning("No backup folder available, skipping restore")
-            return False
-        
-        try:
-            logger.info(f"Restoring original content from {backup_folder}")
-            
-            # Stop VLC BEFORE attempting file operations
-            if obs_controller:
-                obs_controller.switch_scene(scene_content_switch)
-                obs_controller.stop_vlc_source(vlc_source_name)
-                time.sleep(3)  # Wait for OS to release file handles
-            
-            # Delete override content
-            if os.path.exists(current_folder):
-                for filename in os.listdir(current_folder):
-                    file_path = os.path.join(current_folder, filename)
-                    deleted = False
-                    
-                    # Try 5 times with 1.5s delays for file lock handling
-                    for attempt in range(5):
-                        try:
-                            if os.path.isfile(file_path):
-                                os.unlink(file_path)
-                            elif os.path.isdir(file_path):
-                                shutil.rmtree(file_path)
-                            deleted = True
-                            break
-                        except (PermissionError, OSError) as e:
-                            if attempt < 4:
-                                time.sleep(1.5)
-                            else:
-                                logger.error(f"CRITICAL: Could not delete {filename} after 5 attempts: {e}")
-                    
-                    if deleted:
-                        logger.info(f"Deleted override: {filename}")
-            
-            # Restore original content
-            if os.path.exists(backup_folder):
-                for filename in os.listdir(backup_folder):
-                    src = os.path.join(backup_folder, filename)
-                    dst = os.path.join(current_folder, filename)
-                    try:
-                        shutil.move(src, dst)
-                        logger.info(f"Restored: {filename}")
-                    except Exception as e:
-                        logger.error(f"Error restoring {filename}: {e}")
-            
-            # Clean up backup folder
-            try:
-                if os.path.exists(backup_folder):
-                    os.rmdir(backup_folder)
-                    logger.info(f"Cleaned up backup folder: {backup_folder}")
-            except Exception as e:
-                logger.warning(f"Could not remove backup folder: {e}")
-            
-            logger.info(f"Restore complete: {backup_folder} → {current_folder}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to restore content: {e}")
-            return False
+
 
     def restore_prepared_rotation(self, pending_backup_folder: str, next_folder: str,
                                   prepared_playlist_names: list) -> Tuple[bool, list]:
