@@ -17,6 +17,7 @@ from typing import Optional, Callable, TYPE_CHECKING
 from config.config_manager import ConfigManager
 from core.database import DatabaseManager
 from managers.playlist_manager import PlaylistManager
+from services.notification_service import NotificationService
 
 if TYPE_CHECKING:
     from controllers.obs_controller import OBSController
@@ -37,13 +38,15 @@ class TempPlaybackHandler:
         config: ConfigManager,
         playlist_manager: PlaylistManager,
         obs_controller: 'OBSController',
-        stream_manager: 'StreamManager'
+        stream_manager: 'StreamManager',
+        notification_service: Optional[NotificationService] = None
     ):
         self.db = db
         self.config = config
         self.playlist_manager = playlist_manager
         self.obs_controller = obs_controller
         self.stream_manager = stream_manager
+        self.notification_service = notification_service
         
         # State
         self._active = False
@@ -218,6 +221,9 @@ class TempPlaybackHandler:
             logger.info(f"Temp playback activated with {len(complete_files)} files")
             logger.info(f"Streaming directly from pending folder: {pending_folder}")
             logger.info("Videos will be deleted after playing, archive.txt prevents re-download")
+            
+            if self.notification_service:
+                self.notification_service.notify_temp_playback_activated(len(complete_files))
             
         except Exception as e:
             logger.error(f"Error during temp playback activation: {e}")
@@ -546,6 +552,9 @@ class TempPlaybackHandler:
                 await self._trigger_next_rotation_callback()
             
             logger.info("Temp playback successfully exited, resuming normal rotation cycle")
+            
+            if self.notification_service and next_playlist_names:
+                self.notification_service.notify_temp_playback_exited(next_playlist_names)
             
         except Exception as e:
             logger.error(f"Error during temp playback exit: {e}")

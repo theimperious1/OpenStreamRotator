@@ -111,13 +111,67 @@ class NotificationService:
             color=0xFF0000
         )
 
-    def notify_playback_skip(self, time_skipped_seconds: float, new_finish_time_str: str):
-        """Notify about detected playback skip."""
+    def notify_rotation_switched(self, playlist_names: list[str]):
+        """Notify that a rotation content switch completed successfully."""
         self.send_discord(
-            "Playback Skip Detected",
-            f"Video position jumped {time_skipped_seconds:.1f}s ahead. "
-            f"Rotation finish time recalculated to: {new_finish_time_str}",
+            "Now Playing",
+            f"Switched to: **{', '.join(playlist_names)}**",
+            color=0x00FF00
+        )
+
+    def notify_temp_playback_activated(self, file_count: int):
+        """Notify that temp playback mode was activated."""
+        self.send_discord(
+            "Temp Playback Activated",
+            f"Long download detected — streaming {file_count} ready files while download continues",
+            color=0xFFA500
+        )
+
+    def notify_temp_playback_exited(self, playlist_names: list[str]):
+        """Notify that temp playback mode exited and normal rotation resumed."""
+        self.send_discord(
+            "Temp Playback Complete",
+            f"Download finished, switched to: **{', '.join(playlist_names)}**",
+            color=0x00FF00
+        )
+
+    def notify_session_resumed(self, session_id: int, video: Optional[str] = None, cursor_s: Optional[float] = None):
+        """Notify that a session was resumed (crash recovery)."""
+        desc = f"Resumed session **#{session_id}**"
+        if video and cursor_s is not None and cursor_s > 0:
+            minutes, seconds = divmod(int(cursor_s), 60)
+            desc += f"\nResuming **{video}** at {minutes}:{seconds:02d}"
+        self.send_discord(
+            "Session Resumed",
+            desc,
             color=0x0099FF
+        )
+
+    def notify_video_transition(self, video_name: str, category: Optional[str] = None):
+        """Notify about a video transition (optional, can be noisy)."""
+        desc = f"**{video_name}**"
+        if category:
+            desc += f" ({category})"
+        self.send_discord(
+            "Video Transition",
+            desc,
+            color=0x808080
+        )
+
+    def notify_automation_started(self):
+        """Notify that the automation system has started."""
+        self.send_discord(
+            "Automation Started",
+            "24/7 stream automation is online",
+            color=0x00FF00
+        )
+
+    def notify_automation_shutdown(self):
+        """Notify that the automation system is shutting down."""
+        self.send_discord(
+            "Automation Shutting Down",
+            "24/7 stream automation is going offline",
+            color=0xFF9900
         )
 
     def notify_streamer_live(self):

@@ -131,7 +131,8 @@ class AutomationController:
         # Initialize temp playback handler (needs stream_manager)
         self.temp_playback_handler = TempPlaybackHandler(
             self.db, self.config_manager, self.playlist_manager,
-            self.obs_controller, self.stream_manager
+            self.obs_controller, self.stream_manager,
+            self.notification_service
         )
         # Set up callbacks for coordination
         self.temp_playback_handler.set_callbacks(
@@ -359,6 +360,18 @@ class AutomationController:
             pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
             self.playlist_manager.cleanup_temp_downloads(pending_folder)
             
+            # Notify rotation switched with playlist names
+            try:
+                session = self.db.get_current_session()
+                if session:
+                    playlists_selected = session.get('playlists_selected', '')
+                    if playlists_selected:
+                        pids = json.loads(playlists_selected)
+                        pls = self.playlist_manager.get_playlists_by_ids(pids)
+                        self.notification_service.notify_rotation_switched([p['name'] for p in pls])
+            except Exception:
+                pass  # Non-critical
+            
             self.is_rotating = False
             logger.info("Content switch completed successfully")
             return True
@@ -560,6 +573,11 @@ class AutomationController:
                         await self.content_switch_handler.update_category_for_video_async(
                             current_video, self.stream_manager
                         )
+                        # Optional video transition notification
+                        settings = self.config_manager.get_settings()
+                        if settings.get('notify_video_transitions', False):
+                            category = self.file_lock_monitor.get_category_for_current_video() if self.file_lock_monitor else None
+                            self.notification_service.notify_video_transition(current_video, category)
                     except Exception as e:
                         logger.warning(f"Failed to update category on video transition: {e}")
 
@@ -769,6 +787,7 @@ class AutomationController:
 
         self.setup_platforms()
         self._initialize_handlers()
+        self.notification_service.notify_automation_started()
 
         # Sync and check for startup conditions
         config_playlists = self.config_manager.get_playlists()
@@ -794,6 +813,15 @@ class AutomationController:
             if self.temp_playback_handler:
                 self.temp_playback_handler.set_session_id(self.current_session_id)
             logger.info(f"Resuming session {self.current_session_id}")
+            
+            # Notify crash recovery / session resume
+            saved_video = session.get('playback_current_video')
+            saved_cursor = session.get('playback_cursor_ms', 0)
+            self.notification_service.notify_session_resumed(
+                self.current_session_id,
+                video=saved_video,
+                cursor_s=(saved_cursor / 1000) if saved_cursor else None
+            )
             
             # Check for temp playback state that needs to be restored (crash recovery)
             temp_state = self.db.get_temp_playback_state(session['id'])
@@ -965,6 +993,7 @@ class AutomationController:
                 # Shutdown
                 if self.shutdown_event:
                     logger.info("Shutdown event detected, cleaning up...")
+                    self.notification_service.notify_automation_shutdown()
                     self.save_playback_on_exit()
                     
                     # Cancel all pending asyncio tasks to prevent orphaned tasks from executing with torn-down state
