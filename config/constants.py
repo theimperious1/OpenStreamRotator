@@ -34,7 +34,6 @@ DEFAULT_VLC_SOURCE_NAME = "Playlist"
 # Playlist Constraints
 DEFAULT_MIN_PLAYLISTS = 2
 DEFAULT_MAX_PLAYLISTS = 4
-DEFAULT_ROTATION_HOURS = 12
 
 # Discord Notification Colors (hex values without 0x prefix)
 COLOR_SUCCESS = 0x00FF00

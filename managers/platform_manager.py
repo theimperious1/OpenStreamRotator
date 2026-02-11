@@ -1,5 +1,6 @@
 import logging
 import inspect
+import os
 from typing import Optional, List
 from integrations.platforms.base.stream_platform import StreamPlatform
 from integrations.platforms.twitch import TwitchUpdater
@@ -7,12 +8,73 @@ from integrations.platforms.kick import KickUpdater
 
 logger = logging.getLogger(__name__)
 
+
 class PlatformManager:
     """Manages multiple streaming platform integrations."""
 
     def __init__(self):
         self.platforms: List[StreamPlatform] = []
         self.enabled_platforms = set()
+
+    def setup(self, twitch_live_checker=None) -> None:
+        """Initialize enabled streaming platforms from environment configuration.
+        
+        Args:
+            twitch_live_checker: Optional TwitchLiveChecker instance for token management
+        """
+        # Load configuration from environment
+        enable_twitch = os.getenv("ENABLE_TWITCH", "false").lower() == "true"
+        enable_kick = os.getenv("ENABLE_KICK", "false").lower() == "true"
+        
+        twitch_client_id = os.getenv("TWITCH_CLIENT_ID", "")
+        twitch_user_login = os.getenv("TWITCH_USER_LOGIN", "")
+        twitch_broadcaster_id = os.getenv("TWITCH_BROADCASTER_ID", "")
+        
+        kick_client_id = os.getenv("KICK_CLIENT_ID", "")
+        kick_client_secret = os.getenv("KICK_CLIENT_SECRET", "")
+        kick_channel_id = os.getenv("KICK_CHANNEL_ID", "")
+        kick_redirect_uri = os.getenv("KICK_REDIRECT_URI", "http://localhost:8080/callback")
+        
+        # Setup Twitch live checker first
+        if twitch_live_checker:
+            try:
+                twitch_live_checker.refresh_token_if_needed()
+                logger.info("Twitch credentials available for live status checking")
+            except Exception as e:
+                logger.warning(f"Could not initialize Twitch live checker: {e}")
+        
+        # Setup Twitch platform
+        if enable_twitch and twitch_live_checker:
+            try:
+                broadcaster_id = twitch_broadcaster_id
+                if not broadcaster_id and twitch_user_login:
+                    broadcaster_id = twitch_live_checker.get_broadcaster_id(twitch_user_login)
+
+                if broadcaster_id and twitch_live_checker.token:
+                    self.add_twitch(
+                        twitch_client_id,
+                        twitch_live_checker.token,
+                        broadcaster_id
+                    )
+                    logger.info(f"Twitch enabled for channel: {twitch_user_login}")
+                else:
+                    logger.warning("Twitch broadcaster ID not found")
+            except Exception as e:
+                logger.error(f"Failed to setup Twitch: {e}")
+
+        # Setup Kick platform
+        if enable_kick and kick_client_id and kick_client_secret and kick_channel_id:
+            self.add_kick(
+                kick_client_id, kick_client_secret, kick_channel_id, kick_redirect_uri
+            )
+            logger.info(f"Kick enabled for channel ID: {kick_channel_id}")
+
+        # Log summary
+        enabled = self.get_enabled_platforms()
+        if enabled:
+            logger.info(f"Enabled platforms: {', '.join(enabled)}")
+        else:
+            logger.warning("No streaming platforms enabled")
 
     def add_twitch(self, client_id: str, access_token: str, broadcaster_id: str):
         """Add Twitch platform integration."""
@@ -56,11 +118,15 @@ class PlatformManager:
             results[platform.platform_name] = await platform.update_title(title)
         return results
 
-    def update_category_all(self, category: str) -> dict[str, bool]:
+    async def update_category_all(self, category: str) -> dict[str, bool]:
         """Update category on all enabled platforms."""
         results = {}
         for platform in self.platforms:
-            results[platform.platform_name] = platform.update_category(category)
+            # Use async version if available, otherwise fallback to sync
+            if hasattr(platform, 'update_category_async'):
+                results[platform.platform_name] = await platform.update_category_async(category)
+            else:
+                results[platform.platform_name] = platform.update_category(category)
         return results
 
     async def update_stream_info_all(self, title: str, category: Optional[str] = None) -> dict[str, bool]:

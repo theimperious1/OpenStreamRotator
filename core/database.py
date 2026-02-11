@@ -91,16 +91,11 @@ class DatabaseManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 ended_at TIMESTAMP,
-                suspended_at TIMESTAMP,
-                suspension_data TEXT,
                 playlists_selected TEXT,
                 total_videos INTEGER,
                 total_size_mb INTEGER,
                 total_duration_seconds INTEGER DEFAULT 0,
-                estimated_finish_time TIMESTAMP,
-                download_trigger_time TIMESTAMP,
                 stream_title TEXT,
-                playback_seconds INTEGER DEFAULT 0,
                 is_current BOOLEAN DEFAULT 0,
                 current_playlists TEXT,
                 next_playlists TEXT,
@@ -319,25 +314,34 @@ class DatabaseManager:
 
     def create_rotation_session(self, playlists_selected: List[int],
                                 stream_title: str,
-                                total_duration_seconds: int = 0,
-                                estimated_finish_time: Optional[datetime] = None,
-                                download_trigger_time: Optional[datetime] = None) -> Optional[int]:
-        """Create a new rotation session."""
+                                total_duration_seconds: int = 0) -> Optional[int]:
+        """Create a new rotation session with clean state.
+        
+        This ensures only one session is marked as current at a time.
+        Any previously current session is marked as inactive.
+        The new session starts with clean next_playlists to prevent
+        stale playlist exclusions in the selector.
+        """
         conn = self.connect()
         cursor = conn.cursor()
 
-        # Clear any previous current session
-        cursor.execute("UPDATE rotation_sessions SET is_current = 0")
+        # Mark any existing current session as inactive (preserving suspension state)
+        cursor.execute("""
+            UPDATE rotation_sessions 
+            SET is_current = 0 
+            WHERE is_current = 1
+        """)
 
+        # Create new session with clean state (next_playlists starts null)
         cursor.execute("""
             INSERT INTO rotation_sessions (playlists_selected, stream_title, total_duration_seconds, 
-                                          estimated_finish_time, download_trigger_time, is_current)
-            VALUES (?, ?, ?, ?, ?, 1)
-        """, (json.dumps(playlists_selected), stream_title, total_duration_seconds,
-              estimated_finish_time, download_trigger_time))
+                                          is_current, current_playlists, next_playlists)
+            VALUES (?, ?, ?, 1, NULL, NULL)
+        """, (json.dumps(playlists_selected), stream_title, total_duration_seconds))
 
         conn.commit()
         session_id = cursor.lastrowid
+        logger.info(f"Created new rotation session {session_id} (marked previous sessions as inactive)")
         self.close()
         return session_id
 
@@ -375,34 +379,6 @@ class DatabaseManager:
         if row:
             return dict(row)
         return None
-
-    def update_session_playback(self, session_id: int, playback_seconds: int):
-        """Update the playback time for a session."""
-        conn = self.connect()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            UPDATE rotation_sessions 
-            SET playback_seconds = ?
-            WHERE id = ?
-        """, (playback_seconds, session_id))
-
-        conn.commit()
-        self.close()
-
-    def update_session_times(self, session_id: int, estimated_finish_time: str, download_trigger_time: str):
-        """Update estimated_finish_time and download_trigger_time for a session (for skip detection recalculation)."""
-        conn = self.connect()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            UPDATE rotation_sessions 
-            SET estimated_finish_time = ?, download_trigger_time = ?
-            WHERE id = ?
-        """, (estimated_finish_time, download_trigger_time, session_id))
-
-        conn.commit()
-        self.close()
 
     def end_session(self, session_id: int):
         """Mark a rotation session as ended and update playlists' last_played timestamp."""
@@ -442,68 +418,7 @@ class DatabaseManager:
         conn.commit()
         self.close()
 
-    def suspend_session(self, session_id: int, suspension_data: Dict) -> bool:
-        """Suspend a rotation session (pause it for manual override)."""
-        conn = self.connect()
-        cursor = conn.cursor()
 
-        try:
-            cursor.execute("""
-                UPDATE rotation_sessions 
-                SET suspended_at = ?, suspension_data = ?
-                WHERE id = ?
-            """, (datetime.now().isoformat(), json.dumps(suspension_data), session_id))
-
-            conn.commit()
-            logger.info(f"Suspended session {session_id}: {suspension_data}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to suspend session: {e}")
-            return False
-        finally:
-            self.close()
-
-    def resume_session(self, session_id: int) -> bool:
-        """Resume a suspended rotation session."""
-        conn = self.connect()
-        cursor = conn.cursor()
-
-        try:
-            # Clear any other current session and set this one as current
-            cursor.execute("UPDATE rotation_sessions SET is_current = 0")
-            cursor.execute("""
-                UPDATE rotation_sessions 
-                SET suspended_at = NULL, suspension_data = NULL, is_current = 1
-                WHERE id = ?
-            """, (session_id,))
-
-            conn.commit()
-            logger.info(f"Resumed session {session_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to resume session: {e}")
-            return False
-        finally:
-            self.close()
-
-    def get_suspended_session(self) -> Optional[Dict]:
-        """Get the most recent suspended rotation session."""
-        conn = self.connect()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            SELECT * FROM rotation_sessions 
-            WHERE suspended_at IS NOT NULL AND ended_at IS NULL
-            ORDER BY suspended_at DESC 
-            LIMIT 1
-        """)
-
-        row = cursor.fetchone()
-        self.close()
-
-        if row:
-            return dict(row)
-        return None
 
     def update_session_column(self, session_id: int, column_name: str, value: str) -> bool:
         """Update a specific column in a session."""

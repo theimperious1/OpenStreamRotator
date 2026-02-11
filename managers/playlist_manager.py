@@ -171,7 +171,7 @@ class PlaylistManager:
     def backup_current_content(self, current_folder: str, backup_folder: str) -> bool:
         """
         Backup current folder contents to backup folder.
-        Used before override to preserve original content.
+        Preserves original content before switching.
         """
         try:
             # Normalize paths to avoid Windows path issues
@@ -200,99 +200,6 @@ class PlaylistManager:
             logger.error(f"Failed to backup content: {e}")
             return False
 
-    def restore_content_after_override(self, current_folder: str, backup_folder: str) -> bool:
-        """
-        Restore original content from backup folder after override completes.
-        Cleans up override content and restores original.
-        """
-        try:
-            
-            # Normalize paths to avoid Windows path issues
-            current_folder = os.path.normpath(current_folder)
-            backup_folder = os.path.normpath(backup_folder)
-            
-            # Delete override content from current folder
-            # Use retry logic since VLC might still hold file locks briefly
-            if os.path.exists(current_folder):
-                for filename in os.listdir(current_folder):
-                    file_path = os.path.join(current_folder, filename)
-                    deleted = False
-                    # Try 5 times with longer delays (1.5s) to handle OS file locking
-                    for attempt in range(5):
-                        try:
-                            if os.path.isfile(file_path):
-                                os.unlink(file_path)
-                            elif os.path.isdir(file_path):
-                                shutil.rmtree(file_path)
-                            deleted = True
-                            break
-                        except (PermissionError, OSError) as e:
-                            if attempt < 4:  # Not the last attempt
-                                time.sleep(1.5)  # Longer delay before retry
-                            else:
-                                logger.error(f"CRITICAL: Could not delete {filename} after 5 attempts (6s total) - file may be locked: {e}")
-                    
-                    if deleted:
-                        logger.info(f"Deleted override: {filename}")
-                    else:
-                        logger.error(f"CRITICAL: Failed to delete override file {filename} - restoration may be incomplete!")
-            
-            # Move backup folder contents back to current
-            if os.path.exists(backup_folder):
-                for filename in os.listdir(backup_folder):
-                    src = os.path.join(backup_folder, filename)
-                    dst = os.path.join(current_folder, filename)
-                    try:
-                        shutil.move(src, dst)
-                        logger.info(f"Restored: {filename}")
-                    except Exception as e:
-                        logger.error(f"Error restoring {src} to {dst}: {e}")
-            
-            # Clean up backup folder
-            try:
-                if os.path.exists(backup_folder):
-                    os.rmdir(backup_folder)
-                    logger.info(f"Cleaned up backup folder: {backup_folder}")
-            except Exception as e:
-                logger.warning(f"Could not remove backup folder {backup_folder}: {e}")
-            
-            logger.info(f"Restore complete: {backup_folder} → {current_folder}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to restore content: {e}")
-            return False
-
-    def add_override_content(self, current_folder: str, next_folder: str) -> bool:
-        """
-        Add override content to current folder WITHOUT wiping existing content.
-        This is used when temporarily overriding but preserving original content.
-        """
-        try:
-            # Ensure current folder exists
-            os.makedirs(current_folder, exist_ok=True)
-            
-            # Move next folder contents to current folder (but don't delete current)
-            if os.path.exists(next_folder):
-                for filename in os.listdir(next_folder):
-                    src = os.path.join(next_folder, filename)
-                    dst = os.path.join(current_folder, filename)
-                    try:
-                        # Skip if file already exists with same name
-                        if not os.path.exists(dst):
-                            shutil.move(src, dst)
-                        else:
-                            logger.warning(f"File already exists, skipping: {filename}")
-                    except Exception as e:
-                        logger.error(f"Error moving {src} to {dst}: {e}")
-
-            logger.info("Override content added to current folder")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to add override content: {e}")
-            return False
-
     def validate_downloads(self, folder: str) -> bool:
         """Validate that downloads completed successfully."""
 
@@ -316,6 +223,28 @@ class PlaylistManager:
 
         logger.info(f"Validated {len(video_files)} video files")
         return True
+
+    def is_folder_empty(self, folder: str) -> bool:
+        """Check if a folder is empty or doesn't exist (only counts video files, not metadata).
+        
+        Args:
+            folder: Path to folder to check
+            
+        Returns:
+            True if folder is empty/missing or contains no video files, False otherwise
+        """
+        try:
+            if not os.path.exists(folder):
+                return True
+            
+            # Check if folder has any files (ignore subdirectories, archive.txt, and temp folder)
+            # archive.txt is yt-dlp's download tracking file, not actual content
+            items = [entry.name for entry in os.scandir(folder) 
+                     if entry.is_file() and entry.name != 'archive.txt']
+            return len(items) == 0
+        except Exception as e:
+            logger.warning(f"Error checking folder {folder}: {e}")
+            return False  # Conservative: assume not empty if we can't check
 
     def get_complete_video_files(self, folder: str) -> list:
         """
@@ -388,6 +317,62 @@ class PlaylistManager:
             return True
         except Exception as e:
             logger.error(f"Error copying files: {e}")
+            return False
+
+    def rename_videos_with_playlist_prefix(self, folder: str, playlist_order: list[str]) -> bool:
+        """Rename video files with ordering prefix based on their source playlist.
+        
+        Files are prefixed with 'XX_' where XX is the playlist's position in the
+        rotation order (01, 02, etc.). This ensures alphabetical sorting groups
+        videos by playlist and plays them in the correct order.
+        
+        Args:
+            folder: Path to the folder containing video files to rename
+            playlist_order: Ordered list of playlist names (e.g., ['CATS', 'MW2'])
+        
+        Returns:
+            True if successful
+        """
+        if not os.path.exists(folder) or not playlist_order:
+            return True
+        
+        try:
+            # Build a lookup: playlist_name -> prefix index
+            playlist_prefix = {}
+            for i, name in enumerate(playlist_order):
+                playlist_prefix[name] = f"{i + 1:02d}"
+            
+            renamed_count = 0
+            for filename in os.listdir(folder):
+                if not filename.lower().endswith(VIDEO_EXTENSIONS):
+                    continue
+                
+                # Skip files that already have a prefix
+                if re.match(r'^\d{2}_', filename):
+                    continue
+                
+                # Look up this video's playlist in the database
+                video = self.db.get_video_by_filename(filename)
+                if not video:
+                    logger.debug(f"Video not in database, skipping prefix: {filename}")
+                    continue
+                
+                playlist_name = video.get('playlist_name', '')
+                prefix = playlist_prefix.get(playlist_name, '99')  # Default to end
+                
+                new_filename = f"{prefix}_{filename}"
+                src = os.path.join(folder, filename)
+                dst = os.path.join(folder, new_filename)
+                
+                os.rename(src, dst)
+                renamed_count += 1
+            
+            if renamed_count > 0:
+                logger.info(f"Renamed {renamed_count} videos with playlist prefix in {folder}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to rename videos with prefix: {e}")
             return False
 
     def merge_folders_to_destination(self, source_folders: list, dest_folder: str) -> bool:

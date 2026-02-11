@@ -48,65 +48,15 @@
       "category": "Final Fantasy XIV",
       "enabled": true,
       "priority": 1
-    },
-    {
-      "name": "Black Myth: Wukong",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjmzzsTkN4_I4hZ2X-STK1ib",
-      "category": "Black Myth: Wukong",
-      "enabled": true,
-      "priority": 1
-    },
-    {
-      "name": "Schedule 1",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjlVBWozRFfJBK9R_eP5plNr",
-      "category": "Schedule 1",
-      "enabled": true,
-      "priority": 1
-    },
-    {
-      "name": "BALL x PIT",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjk-iw5AoSHa-1Kd8-AvhW7h",
-      "category": "BALL x PIT",
-      "enabled": true,
-      "priority": 1
-    },
-    {
-      "name": "Core Keeper",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjk7g04kLZ80DBYwO63ww8ky",
-      "category": "Core Keeper",
-      "enabled": true,
-      "priority": 1
-    },
-    {
-      "name": "Monster Hunter: World",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjkAqm9rmCdOQkQH9YJCDDbQ",
-      "category": "Monster Hunter: World",
-      "enabled": true,
-      "priority": 1
-    },
-    {
-      "name": "Monster Hunter: Wilds",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjnNiPuwBgcl51QshEVw6ANz",
-      "category": "Monster Hunter: Wilds",
-      "enabled": true,
-      "priority": 1
-    },
-    {
-      "name": "Where Winds Meet",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjlK0haa9ius3ocP4xHG4lmN",
-      "category": "Where Winds Meet",
-      "enabled": true,
-      "priority": 1
     }
   ],
   "settings": {
-    "rotation_hours": 12,
     "download_buffer_minutes": 30,
     "video_folder": "C:/Projects/OpenStreamRotator/videos/live",
     "next_rotation_folder": "C:/Projects/OpenStreamRotator/videos/pending",
     "check_config_interval": 60,
     "min_playlists_per_rotation": 2,
-    "max_playlists_per_rotation": 4,
+    "max_playlists_per_rotation": 2,
     "download_retry_attempts": 5,
     "stream_title_template": "24/7 TEST FOR @Asmongold247 | {GAMES} | ",
     "yt_dlp_verbose": false

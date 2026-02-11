@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import re
 import time
 from typing import Optional
 from core.database import DatabaseManager
@@ -13,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class ContentSwitchHandler:
-    """Handles content switching operations (normal rotations and overrides)."""
+    """Handles content switching operations (normal rotations)."""
 
     MAX_TITLE_LENGTH = 140  # Kick's title character limit
 
@@ -36,6 +38,147 @@ class ContentSwitchHandler:
         self.obs_controller = obs_controller
         self.notification_service = notification_service
         self._last_category_update_time = 0  # Track last category update to throttle spam
+
+    def get_category_for_video(self, video_filename: str) -> Optional[str]:
+        """
+        Get the stream category for a specific video based on its source playlist.
+        
+        Args:
+            video_filename: Filename of the video to look up
+            
+        Returns:
+            Category name, or None if not found
+        """
+        if not video_filename:
+            return None
+        
+        try:
+            # Strip ordering prefix (e.g., "01_") before DB lookup
+            clean_filename = re.sub(r'^\d{2}_', '', video_filename)
+            
+            # Look up the video in database to find its source playlist
+            video = self.db.get_video_by_filename(clean_filename)
+            if not video:
+                logger.debug(f"Video not found in database: {clean_filename}")
+                return None
+            
+            playlist_name = video.get('playlist_name')
+            if not playlist_name:
+                logger.debug(f"No playlist_name for video: {video_filename}")
+                return None
+            
+            # Get the category for this playlist from playlists config
+            playlists_config = self.config.get_playlists()
+            for p in playlists_config:
+                if p.get('name') == playlist_name:
+                    return p.get('category') or p.get('name')
+            
+            logger.warning(f"Playlist '{playlist_name}' not found in config for video: {video_filename}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting category for video {video_filename}: {e}")
+            return None
+
+    async def update_category_for_video_async(self, video_filename: str, stream_manager, temp_playback_active: bool = False) -> bool:
+        """
+        Asynchronously update stream category based on video filename.
+        
+        Args:
+            video_filename: Filename of the currently playing video
+            stream_manager: StreamManager instance for updates
+            temp_playback_active: Whether temp playback is currently active
+            
+        Returns:
+            True if successful or no update needed, False if error
+        """
+        if not video_filename:
+            return True
+        
+        try:
+            category = self.get_category_for_video(video_filename)
+            if not category:
+                return True
+            
+            # Throttle category updates to prevent spam (only allow one per 3 seconds)
+            current_time = time.time()
+            if current_time - self._last_category_update_time >= 3:
+                # During temp playback, only update category without touching the title
+                # (temp playback has its own title with next rotation playlist names)
+                # Otherwise, include title to ensure compatibility with all platforms
+                if temp_playback_active:
+                    # Update only category, preserving temp playback title
+                    await stream_manager.update_category(category)
+                else:
+                    # Get current session title and update both title and category
+                    session = self.db.get_current_session()
+                    stream_title = session.get('stream_title', '') if session else ''
+                    
+                    # Use update_stream_info with current title to ensure compatibility
+                    # This way we update category without changing the title
+                    await stream_manager.update_stream_info(stream_title, category)
+                
+                self._last_category_update_time = current_time
+                logger.info(f"Updated category to '{category}' (from video: {video_filename})")
+                return True
+            else:
+                logger.debug(f"Skipping category update for '{category}' - throttled (from video: {video_filename})")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to update category for video {video_filename}: {e}")
+            return False
+
+    def get_initial_rotation_category(self, video_folder: str, playlist_manager) -> Optional[str]:
+        """
+        Get the category for the first video in rotation, with fallback to first playlist.
+        
+        Used during rotation startup to set the correct category for the video about to play.
+        
+        Args:
+            video_folder: Path to the video folder to scan
+            playlist_manager: PlaylistManager instance to get first playlist as fallback
+            
+        Returns:
+            Category name, or None if unable to determine
+        """
+        category = None
+        
+        try:
+            # Get first video from the folder (sorted alphabetically, matching VLC order)
+            if video_folder and os.path.isdir(video_folder):
+                video_extensions = {'.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.wmv'}
+                video_files = sorted([
+                    f for f in os.listdir(video_folder)
+                    if os.path.isfile(os.path.join(video_folder, f))
+                    and os.path.splitext(f)[1].lower() in video_extensions
+                ])
+                if video_files:
+                    first_video = video_files[0]
+                    # Strip ordering prefix (e.g., "01_") before DB lookup
+                    original_name = re.sub(r'^\d{2}_', '', first_video)
+                    category = self.get_category_for_video(original_name)
+                    if category:
+                        logger.info(f"Got initial rotation category from first video: {first_video} -> {category}")
+                        return category
+        except Exception as e:
+            logger.warning(f"Failed to get category from first video: {e}")
+        
+        # Fallback: get category from first selected playlist in current session
+        try:
+            session = self.db.get_current_session()
+            if session:
+                playlists_selected = session.get('playlists_selected', '')
+                if playlists_selected:
+                    import json
+                    playlist_ids = json.loads(playlists_selected)
+                    playlists = playlist_manager.get_playlists_by_ids(playlist_ids)
+                    if playlists:
+                        category = playlists[0].get('category') or playlists[0].get('name')
+                        logger.info(f"Using fallback category from first selected playlist: {category}")
+                        return category
+        except Exception as e:
+            logger.warning(f"Failed to get fallback category from playlist: {e}")
+        
+        return None
 
     def truncate_stream_title(self, title: str) -> str:
         """
@@ -101,54 +244,19 @@ class ContentSwitchHandler:
         time.sleep(3)  # Wait for file locks to release
         return True
 
-    def execute_switch(self, current_folder: str, next_folder: str,
-                      is_override_resumption: bool = False,
-                      is_override_switch: bool = False,
-                      backup_folder: Optional[str] = None) -> bool:
+    def execute_switch(self, current_folder: str, next_folder: str) -> bool:
         """
         Execute the actual folder content switch.
         
         Args:
             current_folder: Current video folder
             next_folder: Next/pending folder with new content
-            is_override_resumption: If resuming override (add without wiping)
-            is_override_switch: If switching for override (backup then wipe+move)
-            backup_folder: Where to backup current content (for overrides)
             
         Returns:
             True if successful
         """
-        if is_override_resumption:
-            # Add override content without wiping
-            success = self.playlist_manager.add_override_content(current_folder, next_folder)
-        elif is_override_switch and backup_folder:
-            # Backup first, then normal switch
-            backup_success = self.playlist_manager.backup_current_content(current_folder, backup_folder)
-            if not backup_success:
-                logger.error("Failed to backup current content for override")
-                self.notification_service.notify_rotation_error("Failed to backup content for override")
-                return False
-            
-            # Mark backup success
-            suspended_session = self.db.get_suspended_session()
-            if suspended_session:
-                suspension_data_str = suspended_session.get('suspension_data', '{}')
-                try:
-                    suspension_data = json.loads(suspension_data_str)
-                    suspension_data['backup_success'] = True
-                    self.db.update_session_column(
-                        suspended_session['id'],
-                        'suspension_data',
-                        json.dumps(suspension_data)
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to mark backup success: {e}")
-            
-            # Now do normal switch
-            success = self.playlist_manager.switch_content_folders(current_folder, next_folder)
-        else:
-            # Normal rotation: wipe and switch
-            success = self.playlist_manager.switch_content_folders(current_folder, next_folder)
+        # Normal rotation: wipe and switch
+        success = self.playlist_manager.switch_content_folders(current_folder, next_folder)
         
         if not success:
             logger.error("Failed to switch content folders")
@@ -159,7 +267,7 @@ class ContentSwitchHandler:
 
     def finalize_switch(self, current_folder: str, vlc_source_name: str,
                        scene_live: str, scene_offline: str,
-                       last_stream_status: Optional[str]) -> bool:
+                       last_stream_status: Optional[str]) -> tuple[bool, list]:
         """
         Finalize content switch (update VLC, switch scene).
         
@@ -171,13 +279,13 @@ class ContentSwitchHandler:
             last_stream_status: Current stream status ("live" or "offline")
             
         Returns:
-            True if successful
+            Tuple of (success: bool, playlist: list[str])
         """
-        # Update VLC source
-        success, _ = self.obs_controller.update_vlc_source(vlc_source_name, current_folder)
+        # Update VLC source and get the playlist
+        success, playlist = self.obs_controller.update_vlc_source(vlc_source_name, current_folder)
         if not success:
             logger.error("Failed to update VLC source with new videos")
-            return False
+            return False, []
         
         # Switch back to appropriate scene
         if last_stream_status == "live":
@@ -185,7 +293,7 @@ class ContentSwitchHandler:
         else:
             self.obs_controller.switch_scene(scene_offline)
         
-        return True
+        return True, playlist
 
     def update_stream_metadata(self, session_id: Optional[int], stream_manager) -> bool:
         """
@@ -311,7 +419,7 @@ class ContentSwitchHandler:
                     # Throttle category updates to prevent spam (only allow one per 3 seconds)
                     current_time = time.time()
                     if current_time - self._last_category_update_time >= 3:
-                        asyncio.create_task(stream_manager.update_stream_info(None, category))  # Only update category, not title
+                        asyncio.create_task(stream_manager.update_category(category))  # Use update_category instead of update_stream_info with None title
                         self._last_category_update_time = current_time
                         logger.info(f"Updated category to '{category}' (from video: {video_filename})")
                     else:

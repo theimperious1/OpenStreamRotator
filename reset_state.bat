@@ -89,22 +89,6 @@ if exist "!VIDEO_PARENT!\temp_pending_backup" (
     rmdir /q "!VIDEO_PARENT!\temp_pending_backup" 2>nul
 )
 
-REM Delete temp_override_pending (override content download folder)
-if exist "!VIDEO_PARENT!\temp_override_pending" (
-    echo Deleting !VIDEO_PARENT!\temp_override_pending\*...
-    del /f /q "!VIDEO_PARENT!\temp_override_pending\*" 2>nul
-    for /d %%x in ("!VIDEO_PARENT!\temp_override_pending\*") do @rmdir /s /q "%%x" 2>nul
-    rmdir /q "!VIDEO_PARENT!\temp_override_pending" 2>nul
-)
-
-REM Delete temp_backup_override (live content backup during override)
-if exist "!VIDEO_PARENT!\temp_backup_override" (
-    echo Deleting !VIDEO_PARENT!\temp_backup_override\*...
-    del /f /q "!VIDEO_PARENT!\temp_backup_override\*" 2>nul
-    for /d %%x in ("!VIDEO_PARENT!\temp_backup_override\*") do @rmdir /s /q "%%x" 2>nul
-    rmdir /q "!VIDEO_PARENT!\temp_backup_override" 2>nul
-)
-
 echo.
 
 REM Delete temp_playback folder (created during large playlist downloads)
