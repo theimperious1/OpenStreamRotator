@@ -43,6 +43,7 @@ cp .env.example .env
 | `TWITCH_CLIENT_ID` | If Twitch enabled | — | Twitch application client ID |
 | `TWITCH_CLIENT_SECRET` | If Twitch enabled | — | Twitch application client secret |
 | `TWITCH_USER_LOGIN` | If Twitch enabled | — | Your 24/7 Twitch channel username |
+| `TWITCH_REDIRECT_URI` | No | `http://localhost:8080/callback` | OAuth redirect URI for Twitch |
 | `TARGET_TWITCH_STREAMER` | No | `zackrawrr` | Streamer whose live status pauses the rerun |
 | `ENABLE_KICK` | No | `false` | Enable Kick integration |
 | `KICK_CLIENT_ID` | If Kick enabled | — | Kick application client ID |
@@ -60,6 +61,7 @@ cp .env.example .env
 | `YT_DLP_USE_COOKIES` | No | `false` | Use browser cookies for age-restricted videos |
 | `YT_DLP_BROWSER_FOR_COOKIES` | No | `firefox` | Browser to extract cookies from (`chrome`, `firefox`, `brave`, `edge`, etc.) |
 | `DEBUG_MODE_ENABLED` | No | `false` | Enable verbose debug logging |
+| `BROADCASTER_ID` | No | — | Twitch broadcaster ID (auto-resolved from `TWITCH_USER_LOGIN` if empty) |
 
 ### Playlists (`config/playlists.json`)
 
@@ -111,6 +113,7 @@ cp .env.example .env
 | `download_retry_attempts` | Number of retry attempts for failed downloads |
 | `stream_title_template` | Title template. `{GAMES}` is replaced with playlist names joined by ` \| ` |
 | `yt_dlp_verbose` | Enable verbose yt-dlp output in logs |
+| `notify_video_transitions` | Send a Discord notification on every video transition (default: `false`, can be noisy with short videos) |
 
 ## OBS Setup
 
@@ -138,9 +141,25 @@ When Kick integration is enabled, the bot uses OAuth for authentication:
 
 1. On first startup, a browser window opens automatically to the Kick authorization page.
 2. Log in and authorize the application.
-3. You'll be redirected to a page with an authorization code.
-4. Paste the code into the terminal when prompted.
-5. Tokens are saved and refreshed automatically for subsequent runs.
+3. You'll be redirected to a URL containing an authorization code (the page won't load — that's expected).
+4. Copy the full redirect URL from your browser's address bar and paste it into the terminal.
+5. Tokens are saved in `core/kick_tokens.db` and refreshed automatically for subsequent runs.
+
+## Twitch Setup
+
+Twitch uses the OAuth Authorization Code flow for channel updates (title and category). Live status checking uses a separate app token that's generated automatically.
+
+1. Create a Twitch application at [dev.twitch.tv/console](https://dev.twitch.tv/console).
+2. Set **Client Type** to **Confidential**.
+3. Add your `TWITCH_REDIRECT_URI` (default: `http://localhost:8080/callback`) as an **OAuth Redirect URL**.
+4. Copy the Client ID and Client Secret to your `.env` file.
+5. On first startup, a browser window opens to the Twitch authorization page.
+6. Log in and click **Authorize**.
+7. You'll be redirected to a URL like `http://localhost:8080/callback?code=abc123...` (the page won't load — that's expected).
+8. Copy the full redirect URL from your browser's address bar and paste it into the terminal.
+9. Tokens are saved in `core/twitch_tokens.db` and auto-refresh when they expire. You only need to do this once.
+
+If you change your Twitch password or disconnect the app, the refresh token becomes invalid and you'll be prompted to re-authorize on next startup.
 
 ## Running
 
@@ -181,9 +200,11 @@ This prevents dead air during long downloads.
 
 The system tracks session state in a local SQLite database. If the process is restarted:
 
-- If videos remain in the live folder, playback resumes from where VLC picks up
+- If videos remain in the live folder, playback resumes from the last saved position (cursor is saved every second)
+- The stream title and category are restored automatically
 - If a temp playback session was active, it's restored
 - If mid-download, downloads resume (yt-dlp handles partial file resumption)
+- A Discord notification is sent with the resumed session ID and playback position
 
 ### Skipping Videos
 
@@ -197,12 +218,15 @@ Press `Ctrl+C` to stop. The system handles the interrupt cleanly and shuts down.
 
 If `DISCORD_WEBHOOK_URL` is set, the system sends notifications for:
 
-- Rotation starts (with playlist names and video count)
-- Content switches
-- Download progress and completion
-- Stream title/category update failures
-- Target streamer going live/offline
-- Errors and warnings
+- **Automation Started / Shutting Down** — bot lifecycle events
+- **Now Playing** — playlist names after a content switch completes
+- **Session Resumed** — crash recovery with video name and timestamp
+- **Temp Playback Activated / Complete** — long download handling
+- **Video Transition** — per-video notifications (opt-in via `notify_video_transitions` in settings)
+- **Rotation downloads** — started, ready, errors, warnings
+- **Stream metadata failures** — title/category update errors
+- **Streamer live/offline** — target streamer status changes
+- **Automation errors** — unexpected exceptions
 
 ## Twitch Live Detection
 
@@ -243,7 +267,7 @@ OpenStreamRotator/
 │   ├── automation_controller.py     # Main orchestration loop
 │   └── obs_controller.py            # OBS WebSocket interface
 ├── core/
-│   └── database.py                  # SQLite session and playlist tracking
+│   └── database.py                  # SQLite session, playlist, and playback tracking
 ├── handlers/
 │   ├── content_switch_handler.py    # OBS scene transitions during rotation
 │   ├── rotation_handler.py          # Background download triggers and rotation prep
@@ -277,3 +301,7 @@ OpenStreamRotator/
 ## License
 
 This project is open source. See the repository for license details.
+
+## Credits
+u/theimperious1 / Shadow
+u/Kryptiiq
