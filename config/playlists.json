@@ -49,18 +49,5 @@
       "enabled": true,
       "priority": 1
     }
-  ],
-  "settings": {
-    "download_buffer_minutes": 30,
-    "check_config_interval": 60,
-    "min_playlists_per_rotation": 2,
-    "max_playlists_per_rotation": 2,
-    "download_retry_attempts": 5,
-    "stream_title_template": "24/7 TEST FOR @Asmongold247 | {GAMES} | ",
-    "yt_dlp_verbose": false,
-    "notify_video_transitions": true,
-    "debug_mode": false,
-    "yt_dlp_use_cookies": true,
-    "yt_dlp_browser_for_cookies": "firefox"
-  }
+  ]
 }

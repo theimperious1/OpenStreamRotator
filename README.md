@@ -74,24 +74,9 @@ cp .env.example .env
       "enabled": true,
       "priority": 1
     }
-  ],
-  "settings": {
-    "download_buffer_minutes": 30,
-    "check_config_interval": 60,
-    "min_playlists_per_rotation": 2,
-    "max_playlists_per_rotation": 2,
-    "download_retry_attempts": 5,
-    "stream_title_template": "24/7 Reruns | {GAMES} | ",
-    "yt_dlp_verbose": false,
-    "notify_video_transitions": false,
-    "debug_mode": false,
-    "yt_dlp_use_cookies": false,
-    "yt_dlp_browser_for_cookies": "firefox"
-  }
+  ]
 }
 ```
-
-**Playlist fields:**
 
 | Field | Description |
 |---|---|
@@ -101,7 +86,25 @@ cp .env.example .env
 | `enabled` | Whether this playlist is available for rotation selection |
 | `priority` | Selection priority (lower = higher priority among equally-old playlists) |
 
-**Settings fields:**
+### Settings (`config/settings.json`)
+
+All settings in this file are **hot-swappable** — you can edit and save while the program is running and changes take effect within seconds. See [Hot-Swappable Configuration](#hot-swappable-configuration) below for details and examples.
+
+```json
+{
+  "download_buffer_minutes": 30,
+  "check_config_interval": 60,
+  "min_playlists_per_rotation": 2,
+  "max_playlists_per_rotation": 2,
+  "download_retry_attempts": 5,
+  "stream_title_template": "24/7 Reruns | {GAMES} | ",
+  "yt_dlp_verbose": false,
+  "notify_video_transitions": false,
+  "debug_mode": false,
+  "yt_dlp_use_cookies": false,
+  "yt_dlp_browser_for_cookies": "firefox"
+}
+```
 
 | Field | Description |
 |---|---|
@@ -113,32 +116,32 @@ cp .env.example .env
 | `stream_title_template` | Title template. `{GAMES}` is replaced with playlist names joined by ` \| ` |
 | `yt_dlp_verbose` | Enable verbose yt-dlp output in logs |
 | `notify_video_transitions` | Send a Discord notification on every video transition (default: `false`, can be noisy with short videos) |
-| `debug_mode` | Prevents the target streamer going live from pausing the 24/7 stream (default: `false`). Hot-swappable at runtime. |
-| `yt_dlp_use_cookies` | Use browser cookies for age-restricted videos (default: `false`). Hot-swappable — toggle mid-download-retry to recover from 403s. |
-| `yt_dlp_browser_for_cookies` | Browser to extract cookies from: `chrome`, `firefox`, `brave`, `edge`, etc. (default: `firefox`). Hot-swappable. |
+| `debug_mode` | Prevents the target streamer going live from pausing the 24/7 stream (default: `false`) |
+| `yt_dlp_use_cookies` | Use browser cookies for age-restricted videos (default: `false`). Toggle mid-download-retry to recover from 403s. |
+| `yt_dlp_browser_for_cookies` | Browser to extract cookies from: `chrome`, `firefox`, `brave`, `edge`, etc. (default: `firefox`) |
 
 ### Hot-Swappable Configuration
 
-Settings in `playlists.json` can be changed **while the program is running** — no restart required. The system re-reads the file every loop iteration (once per second), so your changes take effect almost immediately.
+Both `config/settings.json` and `config/playlists.json` can be changed **while the program is running** — no restart required. The system re-reads both files every loop iteration (once per second), so your changes take effect almost immediately.
 
 `.env` values are **not** hot-swappable. Environment variables are loaded once at process startup. Changing `.env` requires a full restart.
 
-**What this means in practice:**
-
-Any setting in the `"settings"` block of `playlists.json` (playlist counts, download retries, title template, debug mode, cookie settings, etc.) can be edited in a text editor and saved. The running program picks up the new values on its next cycle.
+| File | Hot-swappable | What lives here |
+|---|---|---|
+| `config/settings.json` | Yes | All runtime behavior settings |
+| `config/playlists.json` | Yes | Playlist definitions (enable/disable, priorities, URLs) |
+| `.env` | No (restart required) | Credentials, folder paths, platform toggles |
 
 **Example — Recovering from YouTube 403 errors mid-download:**
 
-If downloads start failing with 403 (Forbidden) errors — common when YouTube detects automated requests — you can enable/disable cookie-based authentication on the fly without stopping the bot:
+If downloads start failing with 403 (Forbidden) errors — common when YouTube detects automated requests — you can enable cookie-based authentication on the fly without stopping the bot:
 
-1. Open `config/playlists.json` in any text editor.
+1. Open `config/settings.json` in any text editor.
 2. Change `"yt_dlp_use_cookies"` from `false` to `true`:
    ```json
    {
-     "settings": {
-       "yt_dlp_use_cookies": true,
-       "yt_dlp_browser_for_cookies": "firefox"
-     }
+     "yt_dlp_use_cookies": true,
+     "yt_dlp_browser_for_cookies": "firefox"
    }
    ```
 3. Save the file. The program re-reads it before each download attempt, so the very next retry will use cookies from your browser session (where you're logged into YouTube).
@@ -151,12 +154,16 @@ This works because the download retry loop reads cookie settings fresh on every 
 
 If the target streamer goes live and you want to keep your 24/7 stream running instead of pausing:
 
-1. Set `"debug_mode": true` in `playlists.json` and save.
+1. Set `"debug_mode": true` in `config/settings.json` and save.
 2. The program ignores live-status checks until you set it back to `false`.
 
 **Example — Adjusting rotation size:**
 
-Want more variety in the next rotation? Change `max_playlists_per_rotation` from `2` to `4` and save. The *next rotation* will pick up to 4 playlists.
+Want more variety in the next rotation? Change `max_playlists_per_rotation` from `2` to `4` in `config/settings.json` and save. The *next rotation* will pick up to 4 playlists.
+
+**Example — Disabling a playlist mid-run:**
+
+Want to stop a playlist from being selected in future rotations? Open `config/playlists.json`, set `"enabled": false` on that playlist, and save. It won't be picked for the next rotation.
 
 ## OBS Setup
 
@@ -265,7 +272,7 @@ If `DISCORD_WEBHOOK_URL` is set, the system sends notifications for:
 - **Now Playing** — playlist names after a content switch completes
 - **Session Resumed** — crash recovery with video name and timestamp
 - **Temp Playback Activated / Complete** — long download handling
-- **Video Transition** — per-video notifications (opt-in via `notify_video_transitions` in settings)
+- **Video Transition** — per-video notifications (opt-in via `notify_video_transitions` in `settings.json`)
 - **Rotation downloads** — started, ready, errors, warnings
 - **Stream metadata failures** — title/category update errors
 - **Streamer live/offline** — target streamer status changes
@@ -303,9 +310,10 @@ This deletes the SQLite database and all downloaded videos from both the live an
 OpenStreamRotator/
 ├── main.py                          # Entry point
 ├── config/
-│   ├── config_manager.py            # Loads .env and playlists.json
+│   ├── config_manager.py            # Loads playlists.json and settings.json
 │   ├── constants.py                 # Application constants
-│   └── playlists.json               # Playlist and settings configuration
+│   ├── playlists.json               # Playlist definitions
+│   └── settings.json                # Runtime settings (hot-swappable)
 ├── controllers/
 │   ├── automation_controller.py     # Main orchestration loop
 │   └── obs_controller.py            # OBS WebSocket interface
@@ -341,10 +349,10 @@ OpenStreamRotator/
     └── content-switch/              # Assets for the content-switch OBS scene
 ```
 
+## Credits
+u/theimperious1 / Shadow  
+u/Kryptiiq
+
 ## License
 
 This project is open source. See the repository for license details.
-
-## Credits
-u/theimperious1 / Shadow
-u/Kryptiiq
