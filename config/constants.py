@@ -3,6 +3,11 @@ Application-wide constants for stream automation.
 Centralized location for magic numbers, strings, and IDs.
 """
 
+import os
+
+# Project root directory (parent of config/)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # Kick Platform
 KICK_FALLBACK_CATEGORY_ID = 15  # "Just Chatting" category ID on Kick
 
@@ -21,8 +26,8 @@ SKIP_DETECTION_MARGIN_MS = 5000  # 5 second margin for VLC/OBS reporting variati
 VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
 
 # Default Paths (can be overridden in config)
-DEFAULT_VIDEO_FOLDER = 'C:/stream_videos/'
-DEFAULT_NEXT_ROTATION_FOLDER = 'C:/stream_videos_next/'
+DEFAULT_VIDEO_FOLDER = os.path.join(_PROJECT_ROOT, 'content', 'live', '')
+DEFAULT_NEXT_ROTATION_FOLDER = os.path.join(_PROJECT_ROOT, 'content', 'pending', '')
 
 # OBS Scene Names (must match OBS configuration)
 # These can be overridden via environment variables

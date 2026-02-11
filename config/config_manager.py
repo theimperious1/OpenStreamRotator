@@ -3,6 +3,8 @@ import os
 import logging
 from typing import Dict, List, Optional
 
+from config.constants import DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER
+
 logger = logging.getLogger(__name__)
 
 class ConfigManager:
@@ -139,11 +141,11 @@ class ConfigManager:
         # Inject env-var folder paths into settings dict (env overrides json fallback)
         settings['video_folder'] = os.getenv(
             'VIDEO_FOLDER',
-            settings.get('video_folder', 'C:/stream_videos/')
+            settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
         )
         settings['next_rotation_folder'] = os.getenv(
             'NEXT_ROTATION_FOLDER',
-            settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
         )
 
         self._cached_settings = settings
@@ -152,12 +154,12 @@ class ConfigManager:
     @property
     def video_folder(self) -> str:
         """Get the live video folder path."""
-        return self.get_settings().get('video_folder', 'C:/stream_videos/')
+        return self.get_settings().get('video_folder', DEFAULT_VIDEO_FOLDER)
 
     @property
     def next_rotation_folder(self) -> str:
         """Get the pending/next rotation folder path."""
-        return self.get_settings().get('next_rotation_folder', 'C:/stream_videos_next/')
+        return self.get_settings().get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
 
     def validate_config(self) -> bool:
         """Validate configuration file structures."""

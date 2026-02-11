@@ -1,5 +1,6 @@
 # theimperious1's personal ignores
-content/
+content/live/
+content/pending/
 stream_data.db
 kick_tokens.db
 twitch_tokens.db

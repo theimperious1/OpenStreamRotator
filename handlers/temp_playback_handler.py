@@ -16,6 +16,7 @@ from config.config_manager import ConfigManager
 from core.database import DatabaseManager
 from managers.playlist_manager import PlaylistManager
 from services.notification_service import NotificationService
+from config.constants import DEFAULT_NEXT_ROTATION_FOLDER, DEFAULT_VIDEO_FOLDER
 
 if TYPE_CHECKING:
     from controllers.obs_controller import OBSController
@@ -115,7 +116,7 @@ class TempPlaybackHandler:
         logger.info("===== TEMP PLAYBACK ACTIVATION =====")
         
         settings = self.config.get_settings()
-        pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+        pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
         
         # Switch to Rotation screen scene briefly for VLC source update
         if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_rotation_screen):
@@ -428,8 +429,8 @@ class TempPlaybackHandler:
             
             await asyncio.sleep(1.5)
             
-            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
-            live_folder = settings.get('video_folder', 'C:/stream_videos/')
+            pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
+            live_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
             
             # Use the standard folder switch which handles archive.txt exclusion and deletion
             if not self.playlist_manager.switch_content_folders(live_folder, pending_folder):

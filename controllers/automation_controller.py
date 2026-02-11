@@ -24,6 +24,7 @@ from handlers.rotation_handler import RotationHandler
 from handlers.content_switch_handler import ContentSwitchHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
+from config.constants import DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER
 
 # Load environment variables
 load_dotenv()
@@ -229,7 +230,7 @@ class AutomationController:
         logger.info("Starting new rotation session...")
 
         settings = self.config_manager.get_settings()
-        next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+        next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
 
         # Use prepared playlists or select new ones
         using_prepared = False
@@ -309,8 +310,8 @@ class AutomationController:
         self.is_rotating = True
 
         settings = self.config_manager.get_settings()
-        current_folder = settings.get('video_folder', 'C:/stream_videos/')
-        next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+        current_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
+        next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
 
         try:
             # Prepare for switch
@@ -385,7 +386,7 @@ class AutomationController:
             # Clean up temporary download files from the previous rotation
             # Safe to do now that content switch is complete
             settings = self.config_manager.get_settings()
-            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
             self.playlist_manager.cleanup_temp_downloads(pending_folder)
             
             # Notify rotation switched with playlist names
@@ -420,7 +421,7 @@ class AutomationController:
         
         if video_folder is None:
             settings = self.config_manager.get_settings()
-            video_folder = settings.get('video_folder', 'C:/stream_videos/')
+            video_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
         
         if self.file_lock_monitor is None:
             self.file_lock_monitor = FileLockMonitor(
@@ -469,7 +470,7 @@ class AutomationController:
             return
         
         settings = self.config_manager.get_settings()
-        pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+        pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
         
         # Delete the finished video now (monitor deferred deletion for us)
         finished_video = self.file_lock_monitor.current_video
@@ -552,7 +553,7 @@ class AutomationController:
         try:
             logger.info(f"Downloading next rotation in thread: {[p['name'] for p in playlists]}")
             settings = self.config_manager.get_settings()
-            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
             
             # Queue database initialization to be done in main thread
             self._pending_db_playlists_to_initialize = [p['name'] for p in playlists]
@@ -686,7 +687,7 @@ class AutomationController:
         # Trigger background download only if pending folder is empty and not already triggered
         # Skip on first loop after resume to avoid downloading when resuming into existing rotation
         settings = self.config_manager.get_settings()
-        pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+        pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
         if (not self._downloads_triggered_this_rotation and 
             self.playlist_manager.is_folder_empty(pending_folder) and 
             not self._background_download_in_progress and
@@ -821,7 +822,7 @@ class AutomationController:
         """
         try:
             settings = self.config_manager.get_settings()
-            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
             
             # Ensure folder exists
             os.makedirs(next_folder, exist_ok=True)
@@ -949,7 +950,7 @@ class AutomationController:
             all_completed = all(status_dict.get(pl) == "COMPLETED" for pl in playlist_list)
 
             if all_completed:
-                next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+                next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
                 files_exist = self.db.validate_prepared_playlists_exist(session['id'], next_folder)
 
                 if files_exist:
@@ -1080,7 +1081,7 @@ class AutomationController:
 
         session = self.db.get_current_session()
         settings = self.config_manager.get_settings()
-        video_folder = settings.get('video_folder', 'C:/stream_videos/')
+        video_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
 
         if not session:
             logger.info("No active session, starting initial rotation")

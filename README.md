@@ -58,8 +58,8 @@ cp .env.example .env
 | `SCENE_ROTATION_SCREEN` | No | `Rotation screen` | OBS scene shown during rotation transitions |
 | `VLC_SOURCE_NAME` | No | `Playlist` | Name of the VLC media source in OBS |
 | `DISCORD_WEBHOOK_URL` | No | — | Discord webhook for notifications |
-| `VIDEO_FOLDER` | Yes | `C:/stream_videos/` | Absolute path to the live playback folder (VLC reads from here) |
-| `NEXT_ROTATION_FOLDER` | Yes | `C:/stream_videos_next/` | Absolute path to the pending/download folder |
+| `VIDEO_FOLDER` | No | `content/live/` | Path to the live playback folder (VLC reads from here) |
+| `NEXT_ROTATION_FOLDER` | No | `content/pending/` | Path to the pending/download folder |
 | `BROADCASTER_ID` | No | — | Twitch broadcaster ID (auto-resolved from `TWITCH_USER_LOGIN` if empty) |
 
 ### Playlists (`config/playlists.json`)
