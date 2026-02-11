@@ -27,8 +27,10 @@ class PlatformManager:
         enable_kick = os.getenv("ENABLE_KICK", "false").lower() == "true"
         
         twitch_client_id = os.getenv("TWITCH_CLIENT_ID", "")
+        twitch_client_secret = os.getenv("TWITCH_CLIENT_SECRET", "")
         twitch_user_login = os.getenv("TWITCH_USER_LOGIN", "")
         twitch_broadcaster_id = os.getenv("TWITCH_BROADCASTER_ID", "")
+        twitch_redirect_uri = os.getenv("TWITCH_REDIRECT_URI", "http://localhost:8080/callback")
         
         kick_client_id = os.getenv("KICK_CLIENT_ID", "")
         kick_client_secret = os.getenv("KICK_CLIENT_SECRET", "")
@@ -44,17 +46,18 @@ class PlatformManager:
                 logger.warning(f"Could not initialize Twitch live checker: {e}")
         
         # Setup Twitch platform
-        if enable_twitch and twitch_live_checker:
+        if enable_twitch and twitch_client_id and twitch_client_secret and twitch_live_checker:
             try:
                 broadcaster_id = twitch_broadcaster_id
                 if not broadcaster_id and twitch_user_login:
                     broadcaster_id = twitch_live_checker.get_broadcaster_id(twitch_user_login)
 
-                if broadcaster_id and twitch_live_checker.token:
+                if broadcaster_id:
                     self.add_twitch(
                         twitch_client_id,
-                        twitch_live_checker.token,
-                        broadcaster_id
+                        twitch_client_secret,
+                        broadcaster_id,
+                        twitch_redirect_uri
                     )
                     logger.info(f"Twitch enabled for channel: {twitch_user_login}")
                 else:
@@ -76,10 +79,11 @@ class PlatformManager:
         else:
             logger.warning("No streaming platforms enabled")
 
-    def add_twitch(self, client_id: str, access_token: str, broadcaster_id: str):
+    def add_twitch(self, client_id: str, client_secret: str, broadcaster_id: str,
+                    redirect_uri: str = "http://localhost:8080/callback"):
         """Add Twitch platform integration."""
         try:
-            twitch = TwitchUpdater(client_id, access_token, broadcaster_id)
+            twitch = TwitchUpdater(client_id, client_secret, broadcaster_id, redirect_uri)
             self.platforms.append(twitch)
             self.enabled_platforms.add("twitch")
             logger.info("Twitch integration enabled")

@@ -890,6 +890,9 @@ class AutomationController:
                 
                 self._initialize_file_lock_monitor()
                 
+                # Update category based on the actual video VLC is playing
+                await self._update_category_for_current_video()
+                
                 # Restore playback position from crash recovery
                 saved_video = session.get('playback_current_video')
                 saved_cursor = session.get('playback_cursor_ms', 0)
@@ -917,11 +920,8 @@ class AutomationController:
                     if self.twitch_live_checker:
                         try:
                             self.twitch_live_checker.refresh_token_if_needed()
-                            twitch = self.platform_manager.get_platform("Twitch")
-                            if twitch and self.twitch_live_checker.token:
-                                twitch.update_token(self.twitch_live_checker.token)
                         except Exception as e:
-                            logger.warning(f"Failed to refresh Twitch token: {e}")
+                            logger.warning(f"Failed to refresh Twitch app token: {e}")
 
                     is_live = False
                     if self.twitch_live_checker:
