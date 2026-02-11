@@ -5,8 +5,8 @@ import os
 import signal
 import asyncio
 import json
+from threading import Event
 from typing import Optional
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from core.database import DatabaseManager
@@ -57,7 +57,10 @@ class AutomationController:
         # Thread-safe queue for video registration from background downloads
         self.video_registration_queue = VideoRegistrationQueue()
         
-        self.playlist_manager = PlaylistManager(self.db, self.config_manager, self.video_registration_queue)
+        # Shutdown coordination — threading.Event is thread-safe and can interrupt sleeps
+        self._shutdown_event = Event()
+        
+        self.playlist_manager = PlaylistManager(self.db, self.config_manager, self.video_registration_queue, shutdown_event=self._shutdown_event)
 
         # OBS
         self.obs_client: Optional[obs.ReqClient] = None
@@ -110,6 +113,7 @@ class AutomationController:
     def signal_handler(self, sig, frame):
         """Handle shutdown signals gracefully."""
         logger.info("Shutdown signal received...")
+        self._shutdown_event.set()  # Signal download threads to abort
         kill_processor_processes()
         logger.info("Cleanup complete. Setting shutdown flag...")
         self.shutdown_event = True
@@ -556,7 +560,8 @@ class AutomationController:
             return
 
         # Check file lock monitor for video transitions
-        if self.file_lock_monitor:
+        # Skip when on the pause screen — VLC isn't playing so all files appear unlocked
+        if self.file_lock_monitor and self.last_stream_status != "live":
             check_result = self.file_lock_monitor.check()
             
             if check_result['transition']:
@@ -910,14 +915,21 @@ class AutomationController:
 
         # Main loop
         loop_count = 0
+        last_debug_mode = False
         while True:
             try:
-                # DEBUG MODE (hot-swappable from playlists.json)
+                # DEBUG MODE (hot-swappable from settings.json)
                 settings = self.config_manager.get_settings()
                 debug_mode = settings.get('debug_mode', False)
+                
+                # Force an immediate live recheck when debug_mode is toggled
+                debug_mode_changed = (debug_mode != last_debug_mode)
+                if debug_mode_changed:
+                    logger.info(f"debug_mode changed to {debug_mode}, forcing live status recheck")
+                last_debug_mode = debug_mode
 
-                # Every 60 seconds: Check stream status
-                if loop_count % 60 == 0:
+                # Every 60 seconds (or immediately when debug_mode changes): Check stream status
+                if loop_count % 60 == 0 or debug_mode_changed:
                     if self.twitch_live_checker:
                         try:
                             self.twitch_live_checker.refresh_token_if_needed()
@@ -937,6 +949,10 @@ class AutomationController:
                         logger.info("Streamer is LIVE — pausing 24/7 stream")
                         if self.obs_controller:
                             self.obs_controller.switch_scene(SCENE_LIVE)
+                        # Reset file lock debounce so stale "unlocked" state doesn't
+                        # carry over and cause false transitions when we resume
+                        if self.file_lock_monitor:
+                            self.file_lock_monitor._pending_transition_file = None
                         self.last_stream_status = "live"
                         self.notification_service.notify_streamer_live()
                     elif not is_live and self.last_stream_status != "offline":
@@ -997,23 +1013,21 @@ class AutomationController:
                     self.notification_service.notify_automation_shutdown()
                     self.save_playback_on_exit()
                     
-                    # Cancel all pending asyncio tasks to prevent orphaned tasks from executing with torn-down state
-                    try:
-                        pending = asyncio.all_tasks()
-                        for task in pending:
-                            if not task.done():
-                                task.cancel()
-                        logger.debug(f"Cancelled {len(pending)} pending asyncio tasks")
-                    except Exception as e:
-                        logger.debug(f"Error cancelling tasks (non-critical): {e}")
-                    
                     try:
                         self.platform_manager.cleanup()
                     except Exception as e:
                         logger.debug(f"Platform cleanup warning (non-critical): {e}")
                     if self.obs_client:
                         self.obs_client.disconnect()
-                    self.executor.shutdown(wait=True)
+                    
+                    # Shut down executor: cancel queued futures, don't wait for running downloads
+                    # The _shutdown_event is already set so download threads will bail at their next check point.
+                    # Give them a brief grace period, then force-exit if still blocked.
+                    self.executor.shutdown(wait=False, cancel_futures=True)
+                    if self._background_download_in_progress:
+                        logger.info("Waiting up to 5s for download thread to notice shutdown...")
+                        self._shutdown_event.wait(5)
+                    
                     logger.info("Thread executor shutdown complete")
                     self.db.close()
                     logger.info("Cleanup complete, exiting...")
@@ -1024,4 +1038,4 @@ class AutomationController:
                 self.notification_service.notify_automation_error(str(e))
 
             loop_count += 1
-            time.sleep(1)
+            await asyncio.sleep(1)

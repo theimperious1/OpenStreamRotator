@@ -7,7 +7,7 @@
   "stream_title_template": "24/7 TEST FOR @Asmongold247 | {GAMES} | ",
   "yt_dlp_verbose": false,
   "notify_video_transitions": true,
-  "debug_mode": false,
+  "debug_mode": true,
   "yt_dlp_use_cookies": true,
   "yt_dlp_browser_for_cookies": "firefox"
 }

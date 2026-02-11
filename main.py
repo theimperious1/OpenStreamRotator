@@ -42,8 +42,13 @@ if __name__ == "__main__":
     try:
         controller = AutomationController()
         asyncio.run(controller.run())
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Shutdown complete")
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        # Force-exit if a background download thread is still blocking
+        # yt-dlp's extract_info() cannot be interrupted from another thread,
+        # so os._exit is the last resort to avoid hanging indefinitely
+        os._exit(0)

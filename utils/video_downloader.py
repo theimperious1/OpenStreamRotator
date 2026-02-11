@@ -1,7 +1,6 @@
 import os
 import logging
-import time
-from threading import Lock
+from threading import Event, Lock
 from typing import List, Dict, Optional, Set
 from yt_dlp import YoutubeDL
 from core.database import DatabaseManager
@@ -16,7 +15,8 @@ class VideoDownloader:
     """Handles YouTube playlist downloading and video registration."""
 
     def __init__(self, db: DatabaseManager, config: ConfigManager, 
-                 registration_queue: Optional[VideoRegistrationQueue] = None):
+                 registration_queue: Optional[VideoRegistrationQueue] = None,
+                 shutdown_event: Optional[Event] = None):
         """
         Initialize video downloader.
         
@@ -24,10 +24,12 @@ class VideoDownloader:
             db: DatabaseManager instance
             config: ConfigManager instance
             registration_queue: VideoRegistrationQueue for thread-safe video registration
+            shutdown_event: Threading event set when the application is shutting down
         """
         self.db = db
         self.config = config
         self.registration_queue = registration_queue
+        self.shutdown_event = shutdown_event or Event()
         
         # Thread-safe set of filenames already registered via per-video post_hooks
         # Prevents _register_downloaded_videos from re-registering under wrong playlist
@@ -72,6 +74,10 @@ class VideoDownloader:
         total_duration = 0
 
         for playlist in playlists:
+            if self.shutdown_event.is_set():
+                logger.info("Shutdown requested, aborting remaining playlist downloads")
+                return {'success': False, 'total_duration_seconds': total_duration}
+
             result = self._download_single_playlist(
                 playlist['youtube_url'], output_folder, max_retries, verbose=verbose,
                 playlist_id=playlist['id'], playlist_name=playlist['name']
@@ -112,6 +118,10 @@ class VideoDownloader:
             Dict with 'success' key (bool)
         """
         for attempt in range(max_retries):
+            if self.shutdown_event.is_set():
+                logger.info("Shutdown requested, aborting download retries")
+                return {'success': False}
+
             try:
                 logger.info(f"Downloading playlist (attempt {attempt + 1}/{max_retries}): {playlist_url}")
                 
@@ -193,11 +203,13 @@ class VideoDownloader:
                 if verbose:
                     logger.debug(f"yt-dlp options (attempt {attempt + 1}): {ydl_opts}")
                 
-                # Exponential backoff on retries
+                # Exponential backoff on retries (interruptible by shutdown)
                 if attempt > 0:
                     wait_time = min(2 ** (attempt - 1), 8)  # 1s, 2s, 4s, 8s
                     logger.debug(f"Waiting {wait_time}s before retry...")
-                    time.sleep(wait_time)
+                    if self.shutdown_event.wait(wait_time):
+                        logger.info("Shutdown requested during backoff, aborting")
+                        return {'success': False}
                 
                 # Download using yt-dlp library directly
                 with YoutubeDL(ydl_opts) as ydl:  # type: ignore

@@ -335,7 +335,5 @@ class KickUpdater(StreamPlatform):
             return False
 
     def close(self):
-        if self.loop and not self.loop.is_closed():
-            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
-            self.loop.run_until_complete(self.loop.shutdown_default_executor())
-            self.loop.close()
+        """No-op — asyncio.run() handles event loop cleanup automatically."""
+        pass

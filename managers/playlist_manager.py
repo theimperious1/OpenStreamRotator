@@ -1,7 +1,7 @@
 import os
 import logging
 import shutil
-import time
+from threading import Event
 from typing import List, Dict, Optional
 from config.constants import VIDEO_EXTENSIONS
 from core.database import DatabaseManager
@@ -16,12 +16,13 @@ logger = logging.getLogger(__name__)
 
 class PlaylistManager:
     def __init__(self, db: DatabaseManager, config: ConfigManager, 
-                 registration_queue: Optional[VideoRegistrationQueue] = None):
+                 registration_queue: Optional[VideoRegistrationQueue] = None,
+                 shutdown_event: Optional[Event] = None):
         self.db = db
         self.config = config
         self.registration_queue = registration_queue
         self.selector = PlaylistSelector(db, config)
-        self.downloader = VideoDownloader(db, config, registration_queue)
+        self.downloader = VideoDownloader(db, config, registration_queue, shutdown_event=shutdown_event)
 
     def get_playlists_by_ids(self, playlist_ids: List[int]) -> List[Dict]:
         """Get full playlist data from config by their database IDs.
