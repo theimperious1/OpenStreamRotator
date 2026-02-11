@@ -58,11 +58,8 @@ class DatabaseManager:
                 playlist_id INTEGER NOT NULL,
                 playlist_name TEXT,
                 filename TEXT NOT NULL,
-                youtube_id TEXT,
                 title TEXT,
                 duration_seconds INTEGER,
-                last_played TIMESTAMP,
-                play_count INTEGER DEFAULT 0,
                 file_size_mb INTEGER,
                 downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -92,8 +89,6 @@ class DatabaseManager:
                 started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 ended_at TIMESTAMP,
                 playlists_selected TEXT,
-                total_videos INTEGER,
-                total_size_mb INTEGER,
                 total_duration_seconds INTEGER DEFAULT 0,
                 stream_title TEXT,
                 is_current BOOLEAN DEFAULT 0,
@@ -153,12 +148,14 @@ class DatabaseManager:
         except sqlite3.OperationalError:
             logger.debug("temp_playback_cursor_ms column already exists")
 
-        # Playback log table
+        # Playback log table - records each video transition for historical audit
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS playback_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 video_id INTEGER,
                 session_id INTEGER,
+                video_filename TEXT,
+                playlist_name TEXT,
                 played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (video_id) REFERENCES videos(id),
                 FOREIGN KEY (session_id) REFERENCES rotation_sessions(id)
@@ -233,6 +230,36 @@ class DatabaseManager:
 
         conn.commit()
         self.close()
+
+    def log_playback(self, video_filename: str, session_id: Optional[int] = None) -> None:
+        """Record a video playback event in the playback log.
+        
+        Args:
+            video_filename: Original filename of the video (without prefix)
+            session_id: Current rotation session ID
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+        
+        try:
+            # Look up video_id and playlist_name from videos table
+            video_id = None
+            playlist_name = None
+            video = self.get_video_by_filename(video_filename)
+            if video:
+                video_id = video.get('id')
+                playlist_name = video.get('playlist_name')
+            
+            cursor.execute("""
+                INSERT INTO playback_log (video_id, session_id, video_filename, playlist_name)
+                VALUES (?, ?, ?, ?)
+            """, (video_id, session_id, video_filename, playlist_name))
+            conn.commit()
+            logger.debug(f"Logged playback: {video_filename} (playlist={playlist_name})")
+        except Exception as e:
+            logger.warning(f"Failed to log playback for {video_filename}: {e}")
+        finally:
+            self.close()
 
     def add_video(self, playlist_id: int, filename: str, title: Optional[str] = None,
                   file_size_mb: Optional[int] = None, duration_seconds: Optional[int] = None,
@@ -344,6 +371,16 @@ class DatabaseManager:
         logger.info(f"Created new rotation session {session_id} (marked previous sessions as inactive)")
         self.close()
         return session_id
+
+    def update_session_stream_title(self, session_id: int, stream_title: str) -> None:
+        """Update the stream title for a rotation session."""
+        conn = self.connect()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE rotation_sessions SET stream_title = ? WHERE id = ?
+        """, (stream_title, session_id))
+        conn.commit()
+        self.close()
 
     def get_session_by_id(self, session_id: int) -> Optional[Dict]:
         """Get a specific session by ID."""

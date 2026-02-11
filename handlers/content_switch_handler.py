@@ -79,14 +79,13 @@ class ContentSwitchHandler:
             logger.error(f"Error getting category for video {video_filename}: {e}")
             return None
 
-    async def update_category_for_video_async(self, video_filename: str, stream_manager, temp_playback_active: bool = False) -> bool:
+    async def update_category_for_video_async(self, video_filename: str, stream_manager) -> bool:
         """
         Asynchronously update stream category based on video filename.
         
         Args:
             video_filename: Filename of the currently playing video
             stream_manager: StreamManager instance for updates
-            temp_playback_active: Whether temp playback is currently active
             
         Returns:
             True if successful or no update needed, False if error
@@ -102,20 +101,8 @@ class ContentSwitchHandler:
             # Throttle category updates to prevent spam (only allow one per 3 seconds)
             current_time = time.time()
             if current_time - self._last_category_update_time >= 3:
-                # During temp playback, only update category without touching the title
-                # (temp playback has its own title with next rotation playlist names)
-                # Otherwise, include title to ensure compatibility with all platforms
-                if temp_playback_active:
-                    # Update only category, preserving temp playback title
-                    await stream_manager.update_category(category)
-                else:
-                    # Get current session title and update both title and category
-                    session = self.db.get_current_session()
-                    stream_title = session.get('stream_title', '') if session else ''
-                    
-                    # Use update_stream_info with current title to ensure compatibility
-                    # This way we update category without changing the title
-                    await stream_manager.update_stream_info(stream_title, category)
+                # Only update category - title is managed separately at rotation/temp playback boundaries
+                await stream_manager.update_category(category)
                 
                 self._last_category_update_time = current_time
                 logger.info(f"Updated category to '{category}' (from video: {video_filename})")

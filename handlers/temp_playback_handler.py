@@ -56,6 +56,7 @@ class TempPlaybackHandler:
         self._auto_resume_downloads_callback: Optional[Callable] = None
         self._trigger_next_rotation_callback: Optional[Callable] = None
         self._reinitialize_file_lock_monitor_callback: Optional[Callable] = None
+        self._update_category_after_switch_callback: Optional[Callable] = None
         
         # Reference to background download flag (shared with automation controller)
         self._get_background_download_in_progress: Optional[Callable[[], bool]] = None
@@ -71,7 +72,8 @@ class TempPlaybackHandler:
         get_background_download_in_progress: Optional[Callable[[], bool]] = None,
         set_background_download_in_progress: Optional[Callable[[bool], None]] = None,
         trigger_next_rotation: Optional[Callable] = None,
-        reinitialize_file_lock_monitor: Optional[Callable] = None
+        reinitialize_file_lock_monitor: Optional[Callable] = None,
+        update_category_after_switch: Optional[Callable] = None
     ) -> None:
         """Set callbacks for coordination with automation controller."""
         self._auto_resume_downloads_callback = auto_resume_downloads
@@ -79,6 +81,7 @@ class TempPlaybackHandler:
         self._set_background_download_in_progress = set_background_download_in_progress
         self._trigger_next_rotation_callback = trigger_next_rotation
         self._reinitialize_file_lock_monitor_callback = reinitialize_file_lock_monitor
+        self._update_category_after_switch_callback = update_category_after_switch
 
     @property
     def is_active(self) -> bool:
@@ -481,6 +484,7 @@ class TempPlaybackHandler:
             
             # Rename videos with playlist ordering prefix (01_, 02_, etc.)
             # Use next_playlists (the temp playback content) not playlists_selected (the original rotation)
+            next_playlist_names = []
             try:
                 session = self.db.get_current_session()
                 if session:
@@ -490,6 +494,18 @@ class TempPlaybackHandler:
                         self.playlist_manager.rename_videos_with_playlist_prefix(live_folder, next_playlist_names)
             except Exception as e:
                 logger.warning(f"Failed to rename videos with prefix during temp playback exit: {e}")
+            
+            # Update stream title to reflect the new content (CATS|MW2 instead of MUSIC|NARWHALS)
+            if next_playlist_names:
+                new_title = self.playlist_manager.generate_stream_title(next_playlist_names)
+                try:
+                    await self.stream_manager.update_title(new_title)
+                    # Keep DB in sync so future category updates don't revert the title
+                    if self.current_session_id:
+                        self.db.update_session_stream_title(self.current_session_id, new_title)
+                    logger.info(f"Updated stream title after temp playback exit: {new_title}")
+                except Exception as e:
+                    logger.warning(f"Failed to update stream title after temp playback exit: {e}")
             
             # Update OBS to stream from live folder
             await asyncio.sleep(0.5)
@@ -518,6 +534,10 @@ class TempPlaybackHandler:
             # Re-initialize file lock monitor to watch the live folder
             if self._reinitialize_file_lock_monitor_callback:
                 self._reinitialize_file_lock_monitor_callback(live_folder)
+            
+            # Update category based on the actual video now playing
+            if self._update_category_after_switch_callback:
+                await self._update_category_after_switch_callback()
             
             # Trigger next rotation selection and background download
             # This ensures the automation controller prepares the playlists after this rotation finishes

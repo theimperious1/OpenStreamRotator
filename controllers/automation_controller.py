@@ -135,7 +135,8 @@ class AutomationController:
             get_background_download_in_progress=lambda: self._background_download_in_progress,
             set_background_download_in_progress=lambda v: setattr(self, '_background_download_in_progress', v),
             trigger_next_rotation=self._trigger_next_rotation_async,
-            reinitialize_file_lock_monitor=self._initialize_file_lock_monitor
+            reinitialize_file_lock_monitor=self._initialize_file_lock_monitor,
+            update_category_after_switch=self._update_category_for_current_video
         )
         
         logger.info("Handlers initialized successfully")
@@ -306,7 +307,7 @@ class AutomationController:
             # Initialize file lock monitor for this rotation
             self._initialize_file_lock_monitor(current_folder)
             
-            # Update stream title and category
+            # Update stream title and category based on current video
             try:
                 session = self.db.get_current_session()
                 if session:
@@ -368,6 +369,26 @@ class AutomationController:
             )
         
         self.file_lock_monitor.initialize(str(video_folder))
+
+    async def _update_category_for_current_video(self) -> None:
+        """Update stream category based on the video currently playing.
+        
+        Called after file lock monitor (re)initialization to ensure the category
+        matches the actual video VLC is playing.
+        """
+        if not self.file_lock_monitor or not self.stream_manager:
+            return
+        
+        # Ensure any pending video registrations are in DB first
+        self._process_video_registration_queue()
+        
+        category = self.file_lock_monitor.get_category_for_current_video()
+        if category:
+            try:
+                await self.stream_manager.update_category(category)
+                logger.info(f"Updated category to '{category}' based on current video")
+            except Exception as e:
+                logger.warning(f"Failed to update category for current video: {e}")
 
     async def _trigger_next_rotation_async(self) -> None:
         """Trigger next rotation selection and background download.
@@ -509,11 +530,16 @@ class AutomationController:
             if check_result['transition']:
                 # Video transition detected - update stream category
                 current_video = check_result.get('current_video')
+                previous_video = check_result.get('previous_video')
+                
+                # Log the completed video in playback_log
+                if previous_video:
+                    self.db.log_playback(previous_video, session.get('id'))
+                
                 if current_video and self.content_switch_handler and self.stream_manager:
                     try:
-                        temp_playback_active = bool(self.temp_playback_handler and self.temp_playback_handler.is_active)
                         await self.content_switch_handler.update_category_for_video_async(
-                            current_video, self.stream_manager, temp_playback_active=temp_playback_active
+                            current_video, self.stream_manager
                         )
                     except Exception as e:
                         logger.warning(f"Failed to update category on video transition: {e}")
@@ -576,19 +602,9 @@ class AutomationController:
                 # Re-initialize file lock monitor to watch the pending folder
                 self._initialize_file_lock_monitor(pending_folder)
                 
-                # Ensure videos are registered in DB before category lookup
-                self._process_video_registration_queue()
-                
                 # Correct the category based on the actual video VLC is playing
                 # (activate() guesses from playlist order, but VLC picks alphabetically)
-                if self.file_lock_monitor:
-                    actual_category = self.file_lock_monitor.get_category_for_current_video()
-                    if actual_category and self.stream_manager:
-                        try:
-                            await self.stream_manager.update_category(actual_category)
-                            logger.info(f"Corrected temp playback category to '{actual_category}' based on actual playing video")
-                        except Exception as e:
-                            logger.warning(f"Failed to correct temp playback category: {e}")
+                await self._update_category_for_current_video()
                 
                 return
         
