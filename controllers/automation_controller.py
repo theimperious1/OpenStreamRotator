@@ -352,14 +352,6 @@ class AutomationController:
                 self.is_rotating = False
                 return False
 
-            # Mark playlists as played
-            try:
-                session = self.db.get_current_session()
-                if session:
-                    self.content_switch_handler.mark_playlists_as_played(session.get('id'))
-            except Exception as e:
-                logger.warning(f"Failed to mark playlists as played: {e}")
-
             # Initialize file lock monitor for this rotation
             self._initialize_file_lock_monitor(current_folder)
             

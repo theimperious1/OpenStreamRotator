@@ -288,35 +288,4 @@ class ContentSwitchHandler:
             logger.error(f"Failed to update stream info: {e}")
             return False
 
-    def mark_playlists_as_played(self, session_id: Optional[int]) -> bool:
-        """
-        Mark selected playlists as played in database.
-        
-        Args:
-            session_id: Session ID
-            
-        Returns:
-            True if successful
-        """
-        if not session_id:
-            return True
-        
-        session = self.db.get_current_session()
-        if not session:
-            return True
-        
-        playlists_selected = session.get('playlists_selected', '')
-        if not playlists_selected:
-            return True
-        
-        try:
-            playlist_ids = json.loads(playlists_selected)
-            for playlist_id in playlist_ids:
-                self.db.update_playlist_played(playlist_id)
-            logger.info(f"Marking {len(playlist_ids)} playlists as played: {playlist_ids}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to mark playlists as played: {e}")
-            return False
-
 
