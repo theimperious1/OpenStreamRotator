@@ -435,6 +435,9 @@ class AutomationController:
                 self.db, self.obs_controller, VLC_SOURCE_NAME,
                 config=self.config_manager
             )
+        else:
+            # Update reference after OBS reconnect (new OBSController instance)
+            self.file_lock_monitor.obs_controller = self.obs_controller
         
         self.file_lock_monitor.initialize(str(video_folder))
 
