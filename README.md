@@ -55,7 +55,7 @@ cp .env.example .env
 | `OBS_PASSWORD` | Yes | — | OBS WebSocket password |
 | `SCENE_PAUSE` | No | `Pause screen` | OBS scene shown when target streamer is live (pauses 24/7 content) |
 | `SCENE_STREAM` | No | `Stream` | OBS scene for normal 24/7 playback |
-| `SCENE_CONTENT_SWITCH` | No | `content-switch` | OBS scene shown during rotation transitions |
+| `SCENE_ROTATION_SCREEN` | No | `Rotation screen` | OBS scene shown during rotation transitions |
 | `VLC_SOURCE_NAME` | No | `Playlist` | Name of the VLC media source in OBS |
 | `DISCORD_WEBHOOK_URL` | No | — | Discord webhook for notifications |
 | `VIDEO_FOLDER` | Yes | `C:/stream_videos/` | Absolute path to the live playback folder (VLC reads from here) |
@@ -173,7 +173,7 @@ You need **three scenes** and one **VLC media source**:
 
 1. **`Stream`** (default name, configurable via `SCENE_STREAM`) — The main playback scene. Should contain your VLC media source and any overlays. This is what viewers see during normal 24/7 operation.
 2. **`Pause screen`** (default name, configurable via `SCENE_PAUSE`) — Shown when the target streamer goes live. Typically a static image telling viewers the main stream is live.
-3. **`content-switch`** (default name, configurable via `SCENE_CONTENT_SWITCH`) — Brief transition scene shown while content folders are being swapped. Can be a loading animation or static image.
+3. **`Rotation screen`** (default name, configurable via `SCENE_ROTATION_SCREEN`) — Brief transition scene shown while content folders are being swapped. Can be a loading animation or static image.
 
 ### VLC Media Source
 
@@ -228,7 +228,7 @@ The system will:
 
 1. Playlists are selected (least-recently-played first, excluding currently playing and currently downloading playlists)
 2. Videos are downloaded via yt-dlp into the pending folder
-3. When downloads complete, OBS switches to the content-switch scene
+3. When downloads complete, OBS switches to the Rotation screen scene
 4. The live folder is cleared and pending content is moved in
 5. Videos are renamed with ordering prefixes (`01_video.mp4`, `02_video.mp4`, etc.) so VLC plays them grouped by playlist
 6. VLC reloads, OBS switches back to the playback scene
@@ -346,7 +346,7 @@ OpenStreamRotator/
     ├── pending/                     # Next rotation downloads
     │   ├── archive.txt              # yt-dlp download archive (prevents re-downloads)
     │   └── temp/                    # yt-dlp partial download fragments
-    └── content-switch/              # Assets for the content-switch OBS scene
+    └── rotation/              # Assets for the Rotation Screen OBS scene
 ```
 
 ## Credits

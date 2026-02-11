@@ -226,20 +226,20 @@ class OBSController:
             time.sleep(wait_seconds)
         return success
 
-    def prepare_for_content_switch(self, scene_content_switch: str, 
+    def prepare_for_content_switch(self, scene_rotation_screen: str, 
                                    vlc_source_name: str, wait_seconds: float = 3.0) -> bool:
-        """Prepare for content switch (switch to content-switch scene and stop VLC).
+        """Prepare for content switch (switch to Rotation screen scene and stop VLC).
         
         Args:
-            scene_content_switch: Name of content-switch scene
+            scene_rotation_screen: Name of Rotation screen scene
             vlc_source_name: Name of VLC source
             wait_seconds: Seconds to wait for OS to release file locks
         
         Returns:
             True if successful
         """
-        # Switch to content-switch scene
-        if not self.switch_scene(scene_content_switch):
+        # Switch to Rotation screen scene
+        if not self.switch_scene(scene_rotation_screen):
             return False
         
         # Stop VLC source

@@ -36,7 +36,7 @@ OBS_PORT = int(os.getenv("OBS_PORT", 4455))
 OBS_PASSWORD = os.getenv("OBS_PASSWORD", "")
 SCENE_PAUSE = os.getenv("SCENE_PAUSE", os.getenv("SCENE_LIVE", "Pause screen"))
 SCENE_STREAM = os.getenv("SCENE_STREAM", os.getenv("SCENE_OFFLINE", "Stream"))
-SCENE_CONTENT_SWITCH = os.getenv("SCENE_CONTENT_SWITCH", "content-switch")
+SCENE_ROTATION_SCREEN = os.getenv("SCENE_ROTATION_SCREEN", "Rotation screen")
 VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", "Playlist")
 
 # Twitch Configuration (used for live checker)
@@ -139,7 +139,7 @@ class AutomationController:
             self.obs_controller, self.stream_manager,
             self.notification_service,
             scene_stream=SCENE_STREAM,
-            scene_content_switch=SCENE_CONTENT_SWITCH,
+            scene_rotation_screen=SCENE_ROTATION_SCREEN,
             vlc_source_name=VLC_SOURCE_NAME
         )
         # Set up callbacks for coordination
@@ -314,7 +314,7 @@ class AutomationController:
 
         try:
             # Prepare for switch
-            if not self.content_switch_handler.prepare_for_switch(SCENE_CONTENT_SWITCH, VLC_SOURCE_NAME):
+            if not self.content_switch_handler.prepare_for_switch(SCENE_ROTATION_SCREEN, VLC_SOURCE_NAME):
                 logger.error("Failed to prepare for content switch")
                 self.is_rotating = False
                 return False
@@ -495,7 +495,7 @@ class AutomationController:
                 return
             
             # Brief scene switch for VLC source update
-            self.obs_controller.switch_scene(SCENE_CONTENT_SWITCH)
+            self.obs_controller.switch_scene(SCENE_ROTATION_SCREEN)
             await asyncio.sleep(1.0)
             
             self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, pending_folder)
@@ -1066,7 +1066,7 @@ class AutomationController:
             logger.error("OBS controller not initialized")
             return
         
-        if not self.obs_controller.verify_scenes([SCENE_PAUSE, SCENE_STREAM, SCENE_CONTENT_SWITCH]):
+        if not self.obs_controller.verify_scenes([SCENE_PAUSE, SCENE_STREAM, SCENE_ROTATION_SCREEN]):
             logger.error("Missing required OBS scenes")
             return
 

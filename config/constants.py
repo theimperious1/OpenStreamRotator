@@ -28,7 +28,7 @@ DEFAULT_NEXT_ROTATION_FOLDER = 'C:/stream_videos_next/'
 # These can be overridden via environment variables
 DEFAULT_SCENE_PAUSE = "Pause screen"
 DEFAULT_SCENE_STREAM = "Stream"
-DEFAULT_SCENE_CONTENT_SWITCH = "content-switch"
+DEFAULT_SCENE_ROTATION_SCREEN = "Rotation screen"
 DEFAULT_VLC_SOURCE_NAME = "Playlist"
 
 # Playlist Constraints

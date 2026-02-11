@@ -36,7 +36,7 @@ class TempPlaybackHandler:
         stream_manager: 'StreamManager',
         notification_service: Optional[NotificationService] = None,
         scene_stream: str = "Stream",
-        scene_content_switch: str = "content-switch",
+        scene_rotation_screen: str = "Rotation screen",
         vlc_source_name: str = "Playlist"
     ):
         self.db = db
@@ -46,7 +46,7 @@ class TempPlaybackHandler:
         self.stream_manager = stream_manager
         self.notification_service = notification_service
         self.scene_stream = scene_stream
-        self.scene_content_switch = scene_content_switch
+        self.scene_rotation_screen = scene_rotation_screen
         self.vlc_source_name = vlc_source_name
         
         # State
@@ -117,9 +117,9 @@ class TempPlaybackHandler:
         settings = self.config.get_settings()
         pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
         
-        # Switch to content-switch scene briefly for VLC source update
-        if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_content_switch):
-            logger.error("Failed to switch to content-switch scene for temp playback setup")
+        # Switch to Rotation screen scene briefly for VLC source update
+        if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_rotation_screen):
+            logger.error("Failed to switch to Rotation screen scene for temp playback setup")
             return
         
         await asyncio.sleep(1.5)  # Wait for scene switch
@@ -275,9 +275,9 @@ class TempPlaybackHandler:
             
             logger.info(f"Restoring temp playback: {len(valid_playlist)} valid files from position {saved_position}")
             
-            # Switch to content-switch scene briefly for VLC source update
-            if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_content_switch):
-                logger.error("Failed to switch to content-switch scene for temp playback restore")
+            # Switch to Rotation screen scene briefly for VLC source update
+            if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_rotation_screen):
+                logger.error("Failed to switch to Rotation screen scene for temp playback restore")
                 return False
             
             await asyncio.sleep(1.5)
@@ -421,9 +421,9 @@ class TempPlaybackHandler:
         try:
             settings = self.config.get_settings()
             
-            # Switch to content-switch scene for folder operations
-            if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_content_switch):
-                logger.error("Failed to switch to content-switch scene for temp playback exit")
+            # Switch to Rotation screen scene for folder operations
+            if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_rotation_screen):
+                logger.error("Failed to switch to Rotation screen scene for temp playback exit")
                 return
             
             await asyncio.sleep(1.5)

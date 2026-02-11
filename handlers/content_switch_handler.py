@@ -177,18 +177,18 @@ class ContentSwitchHandler:
         logger.info(f"Truncated title from {len(title)} to {len(result)} chars: {result}")
         return result
     
-    def prepare_for_switch(self, scene_content_switch: str, vlc_source_name: str) -> bool:
+    def prepare_for_switch(self, scene_rotation_screen: str, vlc_source_name: str) -> bool:
         """
         Prepare for content switch (switch scene, stop VLC).
         
         Args:
-            scene_content_switch: Name of content-switch scene
+            scene_rotation_screen: Name of Rotation screen scene
             vlc_source_name: Name of VLC source
             
         Returns:
             True if successful
         """
-        self.obs_controller.switch_scene(scene_content_switch)
+        self.obs_controller.switch_scene(scene_rotation_screen)
         self.obs_controller.stop_vlc_source(vlc_source_name)
         time.sleep(3)  # Wait for file locks to release
         return True
