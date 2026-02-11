@@ -1,7 +1,8 @@
 import os
 import logging
 import time
-from typing import List, Dict, Optional
+from threading import Lock
+from typing import List, Dict, Optional, Set
 from yt_dlp import YoutubeDL
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
@@ -27,6 +28,11 @@ class VideoDownloader:
         self.db = db
         self.config = config
         self.registration_queue = registration_queue
+        
+        # Thread-safe set of filenames already registered via per-video post_hooks
+        # Prevents _register_downloaded_videos from re-registering under wrong playlist
+        self._registered_files: Set[str] = set()
+        self._registered_files_lock = Lock()
         
         # Force yt-dlp to use Deno instead of Node.js by removing Node.js from PATH
         # This prevents conflicts between Node.js and Deno JavaScript runtimes
@@ -66,7 +72,10 @@ class VideoDownloader:
         total_duration = 0
 
         for playlist in playlists:
-            result = self._download_single_playlist(playlist['youtube_url'], output_folder, max_retries, verbose=verbose)
+            result = self._download_single_playlist(
+                playlist['youtube_url'], output_folder, max_retries, verbose=verbose,
+                playlist_id=playlist['id'], playlist_name=playlist['name']
+            )
             
             if result.get('success'):
                 # Register downloaded videos in database
@@ -85,7 +94,9 @@ class VideoDownloader:
             'total_duration_seconds': total_duration
         }
 
-    def _download_single_playlist(self, playlist_url: str, output_folder: str, max_retries: int = 3, verbose: bool = False) -> Dict:
+    def _download_single_playlist(self, playlist_url: str, output_folder: str, max_retries: int = 3,
+                                   verbose: bool = False, playlist_id: Optional[int] = None,
+                                   playlist_name: Optional[str] = None) -> Dict:
         """
         Download a single YouTube playlist using yt-dlp library.
         
@@ -94,6 +105,8 @@ class VideoDownloader:
             output_folder: Folder to download to
             max_retries: Maximum retry attempts
             verbose: If True, log full yt-dlp output for debugging
+            playlist_id: Database playlist ID for per-video registration
+            playlist_name: Playlist name for per-video registration
         
         Returns:
             Dict with 'success' key (bool)
@@ -104,6 +117,33 @@ class VideoDownloader:
                 
                 # Configure yt-dlp options
                 
+                # Per-video registration hook: queue each video for DB registration
+                # immediately after yt-dlp finishes it, so it's available for category
+                # lookups even if the playlist download is still in progress
+                def _on_video_complete(filepath: str) -> None:
+                    if not os.path.exists(filepath):
+                        return
+                    filename = os.path.basename(filepath)
+                    if not VideoProcessor.is_video_file(filename):
+                        return
+                    try:
+                        if not VideoProcessor.has_valid_video_stream(filepath):
+                            return
+                        title = VideoProcessor.extract_title_from_filename(filename)
+                        duration = VideoProcessor.get_video_duration(filepath) or 0
+                        file_size_mb = int(os.path.getsize(filepath) / (1024 * 1024))
+                        if self.registration_queue and playlist_id is not None:
+                            self.registration_queue.enqueue_video(
+                                playlist_id, filename,
+                                title=title, duration_seconds=duration,
+                                file_size_mb=file_size_mb, playlist_name=playlist_name
+                            )
+                            with self._registered_files_lock:
+                                self._registered_files.add(filename)
+                            logger.debug(f"Per-video registration queued: {filename} ({duration}s) for {playlist_name}")
+                    except Exception as e:
+                        logger.debug(f"Per-video registration failed for {filename}: {e}")
+
                 ydl_opts = {
                     'quiet': not verbose,
                     'no_warnings': not verbose,
@@ -112,6 +152,7 @@ class VideoDownloader:
                     'concurrent_fragment_downloads': 5,  # Download 4 fragments in parallel
                     'http_chunk_size': 10485760,  # 10MB chunks - I tried raising this higher, doesn't work
                     'outtmpl': '%(title)s.%(ext)s',
+                    'post_hooks': [_on_video_complete],
                     # Archive file to track downloaded videos - prevents re-downloading
                     # videos that were deleted during temp playback
                     # Archive file tracks downloaded video IDs to prevent re-downloading
@@ -199,6 +240,13 @@ class VideoDownloader:
 
         for video_path in video_files:
             filename = os.path.basename(video_path)
+
+            # Skip files already registered via per-video post_hooks (prevents
+            # cross-playlist registration when multiple playlists share a folder)
+            with self._registered_files_lock:
+                if filename in self._registered_files:
+                    logger.debug(f"Already registered via post_hook, skipping batch: {filename}")
+                    continue
 
             # Validate video stream before processing (ensures file is complete, not still post-processing)
             if not VideoProcessor.has_valid_video_stream(video_path):

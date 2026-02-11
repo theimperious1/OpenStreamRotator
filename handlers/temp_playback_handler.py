@@ -479,6 +479,18 @@ class TempPlaybackHandler:
                 logger.error("Failed to switch content folders during temp playback exit")
                 return
             
+            # Rename videos with playlist ordering prefix (01_, 02_, etc.)
+            # Use next_playlists (the temp playback content) not playlists_selected (the original rotation)
+            try:
+                session = self.db.get_current_session()
+                if session:
+                    next_playlists_raw = session.get('next_playlists', '[]')
+                    next_playlist_names = json.loads(next_playlists_raw) if isinstance(next_playlists_raw, str) else (next_playlists_raw or [])
+                    if next_playlist_names:
+                        self.playlist_manager.rename_videos_with_playlist_prefix(live_folder, next_playlist_names)
+            except Exception as e:
+                logger.warning(f"Failed to rename videos with prefix during temp playback exit: {e}")
+            
             # Update OBS to stream from live folder
             await asyncio.sleep(0.5)
             if not self.obs_controller:

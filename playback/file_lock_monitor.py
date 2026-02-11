@@ -20,6 +20,7 @@ from config.constants import VIDEO_EXTENSIONS
 if TYPE_CHECKING:
     from controllers.obs_controller import OBSController
     from core.database import DatabaseManager
+    from config.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -71,10 +72,12 @@ class FileLockMonitor:
     - Videos are sorted alphabetically; prefixed with 'XX_' for playlist ordering
     """
 
-    def __init__(self, db: 'DatabaseManager', obs_controller: 'OBSController', vlc_source_name: str):
+    def __init__(self, db: 'DatabaseManager', obs_controller: 'OBSController', vlc_source_name: str,
+                 config: Optional['ConfigManager'] = None):
         self.db = db
         self.obs_controller = obs_controller
         self.vlc_source_name = vlc_source_name
+        self.config = config
         
         self.video_folder: str = ""
         self._current_video: Optional[str] = None  # Filename of currently playing video
@@ -407,6 +410,14 @@ class FileLockMonitor:
             playlist_name = video.get('playlist_name')
             if not playlist_name:
                 return None
+            
+            # Look up the actual category from playlists config
+            # Falls back to playlist_name if no config or no category field
+            if self.config:
+                playlists_config = self.config.get_playlists()
+                for p in playlists_config:
+                    if p.get('name') == playlist_name:
+                        return p.get('category') or p.get('name')
             
             return playlist_name
         except Exception as e:

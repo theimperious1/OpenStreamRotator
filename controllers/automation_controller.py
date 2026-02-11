@@ -269,6 +269,9 @@ class AutomationController:
                 self.is_rotating = False
                 return False
 
+            # Process any queued videos from downloads so they're in database before rename/category lookup
+            self._process_video_registration_queue()
+
             # Rename videos with playlist ordering prefix (01_, 02_, etc.)
             # so alphabetical ordering groups by playlist
             try:
@@ -302,9 +305,6 @@ class AutomationController:
 
             # Initialize file lock monitor for this rotation
             self._initialize_file_lock_monitor(current_folder)
-            
-            # Process any queued videos from downloads so they're in database before category lookup
-            self._process_video_registration_queue()
             
             # Update stream title and category
             try:
@@ -363,7 +363,8 @@ class AutomationController:
         
         if self.file_lock_monitor is None:
             self.file_lock_monitor = FileLockMonitor(
-                self.db, self.obs_controller, VLC_SOURCE_NAME
+                self.db, self.obs_controller, VLC_SOURCE_NAME,
+                config=self.config_manager
             )
         
         self.file_lock_monitor.initialize(str(video_folder))
@@ -574,6 +575,21 @@ class AutomationController:
                 await self.temp_playback_handler.activate(session)
                 # Re-initialize file lock monitor to watch the pending folder
                 self._initialize_file_lock_monitor(pending_folder)
+                
+                # Ensure videos are registered in DB before category lookup
+                self._process_video_registration_queue()
+                
+                # Correct the category based on the actual video VLC is playing
+                # (activate() guesses from playlist order, but VLC picks alphabetically)
+                if self.file_lock_monitor:
+                    actual_category = self.file_lock_monitor.get_category_for_current_video()
+                    if actual_category and self.stream_manager:
+                        try:
+                            await self.stream_manager.update_category(actual_category)
+                            logger.info(f"Corrected temp playback category to '{actual_category}' based on actual playing video")
+                        except Exception as e:
+                            logger.warning(f"Failed to correct temp playback category: {e}")
+                
                 return
         
         # Check if we should rotate (all content consumed + next rotation ready)
