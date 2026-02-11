@@ -319,6 +319,62 @@ class PlaylistManager:
             logger.error(f"Error copying files: {e}")
             return False
 
+    def rename_videos_with_playlist_prefix(self, folder: str, playlist_order: list[str]) -> bool:
+        """Rename video files with ordering prefix based on their source playlist.
+        
+        Files are prefixed with 'XX_' where XX is the playlist's position in the
+        rotation order (01, 02, etc.). This ensures alphabetical sorting groups
+        videos by playlist and plays them in the correct order.
+        
+        Args:
+            folder: Path to the folder containing video files to rename
+            playlist_order: Ordered list of playlist names (e.g., ['CATS', 'MW2'])
+        
+        Returns:
+            True if successful
+        """
+        if not os.path.exists(folder) or not playlist_order:
+            return True
+        
+        try:
+            # Build a lookup: playlist_name -> prefix index
+            playlist_prefix = {}
+            for i, name in enumerate(playlist_order):
+                playlist_prefix[name] = f"{i + 1:02d}"
+            
+            renamed_count = 0
+            for filename in os.listdir(folder):
+                if not filename.lower().endswith(VIDEO_EXTENSIONS):
+                    continue
+                
+                # Skip files that already have a prefix
+                if re.match(r'^\d{2}_', filename):
+                    continue
+                
+                # Look up this video's playlist in the database
+                video = self.db.get_video_by_filename(filename)
+                if not video:
+                    logger.debug(f"Video not in database, skipping prefix: {filename}")
+                    continue
+                
+                playlist_name = video.get('playlist_name', '')
+                prefix = playlist_prefix.get(playlist_name, '99')  # Default to end
+                
+                new_filename = f"{prefix}_{filename}"
+                src = os.path.join(folder, filename)
+                dst = os.path.join(folder, new_filename)
+                
+                os.rename(src, dst)
+                renamed_count += 1
+            
+            if renamed_count > 0:
+                logger.info(f"Renamed {renamed_count} videos with playlist prefix in {folder}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to rename videos with prefix: {e}")
+            return False
+
     def merge_folders_to_destination(self, source_folders: list, dest_folder: str) -> bool:
         """Merge contents from multiple source folders into destination folder."""
         try:

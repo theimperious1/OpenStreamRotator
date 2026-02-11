@@ -7,7 +7,6 @@ from typing import Optional, Tuple
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 from managers.playlist_manager import PlaylistManager
-from playback.playback_skip_detector import PlaybackSkipDetector
 from services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
@@ -17,8 +16,8 @@ class RotationHandler:
     """Handles rotation checks and transitions."""
 
     def __init__(self, db: DatabaseManager, config: ConfigManager, 
-                 playlist_manager: PlaylistManager, playback_skip_detector: Optional[PlaybackSkipDetector],
-                 notification_service: NotificationService, playback_tracker):
+                 playlist_manager: PlaylistManager,
+                 notification_service: NotificationService):
         """
         Initialize rotation handler.
         
@@ -26,43 +25,18 @@ class RotationHandler:
             db: DatabaseManager instance
             config: ConfigManager instance
             playlist_manager: PlaylistManager instance
-            playback_skip_detector: PlaybackSkipDetector instance (can be None)
             notification_service: NotificationService instance
-            playback_tracker: PlaybackTracker instance for getting total playback seconds
         """
         self.db = db
         self.config = config
         self.playlist_manager = playlist_manager
-        self.playback_skip_detector = playback_skip_detector
         self.notification_service = notification_service
-        self.playback_tracker = playback_tracker
         
         self._rotation_duration_reached_logged = False
         
         # Validation failure tracking for hybrid exclusion approach
         # Maps filename -> {failure_count, first_failure_time}
         self._validation_failures: dict = {}
-
-    def set_playback_skip_detector(self, detector: Optional[PlaybackSkipDetector]):
-        """Update the skip detector reference (called after detector is initialized)."""
-        self.playback_skip_detector = detector
-        logger.debug(f"Updated skip detector reference in rotation handler: {detector is not None}")
-
-    def check_skip_detection(self, current_session_id: Optional[int]) -> Tuple[bool, Optional[dict]]:
-        """
-        Check for playback skip and recalculate times if needed.
-        
-        Returns:
-            Tuple of (skip_detected, skip_info)
-        """
-        if not self.playback_skip_detector:
-            logger.warning("Skip detector not initialized - cannot check for skips")
-            return False, None
-        
-        skip_detected, skip_info = self.playback_skip_detector.check_for_skip(current_session_id)
-        if skip_detected and skip_info:
-            logger.info(f"Skip detection result: SKIP DETECTED - {skip_info['time_skipped_seconds']:.1f}s skipped")
-        return skip_detected, skip_info
 
     def trigger_background_download(self, next_prepared_playlists, background_download_in_progress):
         """
@@ -97,24 +71,11 @@ class RotationHandler:
         Returns:
             True if rotation duration reached, False otherwise
         """
-        # Skip rotation check during temp playback - wait for exit to recalculate finish time
-        if self.playback_skip_detector and self.playback_skip_detector._temp_playback_mode:
-            return False
-        
         if not session.get('estimated_finish_time'):
             return False
         
         finish_time = datetime.fromisoformat(session['estimated_finish_time'])
         return datetime.now() >= finish_time
-
-    def get_rotation_completion_info(self, session: dict) -> int:
-        """
-        Get info needed for rotation completion.
-        
-        Returns:
-            Total playback seconds
-        """
-        return self.playback_tracker.get_total_seconds()
 
     def log_rotation_completion(self, total_seconds: int):
         """Log rotation completion (once per session)."""

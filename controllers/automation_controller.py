@@ -17,8 +17,7 @@ from managers.stream_manager import StreamManager
 from controllers.obs_controller import OBSController
 from managers.platform_manager import PlatformManager
 from services.notification_service import NotificationService
-from playback.playback_tracker import PlaybackTracker
-from playback.playback_skip_detector import PlaybackSkipDetector
+from playback.file_lock_monitor import FileLockMonitor, strip_ordering_prefix
 from services.twitch_live_checker import TwitchLiveChecker
 from handlers.rotation_handler import RotationHandler
 from handlers.content_switch_handler import ContentSwitchHandler
@@ -70,8 +69,7 @@ class AutomationController:
 
         # Services
         self.notification_service = NotificationService(DISCORD_WEBHOOK_URL)
-        self.playback_tracker = PlaybackTracker(self.db)
-        self.playback_skip_detector: Optional[PlaybackSkipDetector] = None
+        self.file_lock_monitor: Optional[FileLockMonitor] = None
         
         # Twitch live checker
         if TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET:
@@ -92,8 +90,6 @@ class AutomationController:
         self.next_prepared_playlists = None
         self.last_stream_status = None
         self.is_rotating = False
-        self._pending_seek_position_ms = 0
-        self._seek_retry_count = 0
         self._rotation_postpone_logged = False
         self._downloads_triggered_this_rotation = False  # Track if downloads already triggered after rotation
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
@@ -120,8 +116,7 @@ class AutomationController:
         
         self.rotation_handler = RotationHandler(
             self.db, self.config_manager, self.playlist_manager,
-            self.playback_skip_detector, self.notification_service,
-            self.playback_tracker
+            self.notification_service
         )
         self.content_switch_handler = ContentSwitchHandler(
             self.db, self.config_manager, self.playlist_manager,
@@ -137,21 +132,23 @@ class AutomationController:
         # Set up callbacks for coordination
         self.temp_playback_handler.set_callbacks(
             auto_resume_downloads=self._auto_resume_pending_downloads,
-            initialize_skip_detector=self._initialize_skip_detector,
-            get_background_download_in_progress=lambda: False,
-            set_background_download_in_progress=lambda v: None,
-            trigger_next_rotation=self._trigger_next_rotation_async
+            get_background_download_in_progress=lambda: self._background_download_in_progress,
+            set_background_download_in_progress=lambda v: setattr(self, '_background_download_in_progress', v),
+            trigger_next_rotation=self._trigger_next_rotation_async,
+            reinitialize_file_lock_monitor=self._initialize_file_lock_monitor
         )
         
         logger.info("Handlers initialized successfully")
 
     def save_playback_on_exit(self):
-        """Save current playback position when program exits."""
-        self.playback_tracker.save_on_exit(self.current_session_id, self.obs_controller)
-
-    def auto_save_playback_position(self):
-        """Auto-save playback position for power loss resilience."""
-        self.playback_tracker.auto_save_position(self.current_session_id, self.obs_controller)
+        """Save current state when program exits."""
+        # Switch to pause scene on exit
+        if self.obs_controller:
+            try:
+                self.obs_controller.switch_scene(SCENE_LIVE)
+                logger.info("Switched to pause scene on exit")
+            except Exception as e:
+                logger.debug(f"Failed to switch scene on exit: {e}")
 
     def connect_obs(self) -> bool:
         """Connect to OBS WebSocket."""
@@ -251,7 +248,6 @@ class AutomationController:
         if self.temp_playback_handler:
             self.temp_playback_handler.set_session_id(self.current_session_id)
 
-        self.playback_tracker.reset()
         logger.info("Rotation session prepared, ready to switch")
         return True
 
@@ -285,6 +281,20 @@ class AutomationController:
                 self.is_rotating = False
                 return False
 
+            # Rename videos with playlist ordering prefix (01_, 02_, etc.)
+            # so alphabetical ordering groups by playlist
+            try:
+                session = self.db.get_current_session()
+                if session:
+                    playlists_selected = session.get('playlists_selected', '')
+                    if playlists_selected:
+                        playlist_ids = json.loads(playlists_selected)
+                        playlists = self.playlist_manager.get_playlists_by_ids(playlist_ids)
+                        playlist_order = [p['name'] for p in playlists]
+                        self.playlist_manager.rename_videos_with_playlist_prefix(current_folder, playlist_order)
+            except Exception as e:
+                logger.warning(f"Failed to rename videos with prefix: {e}")
+
             # Finalize (update VLC + switch scene)
             target_scene = SCENE_LIVE if self.last_stream_status == "live" else SCENE_OFFLINE
             finalize_success, vlc_playlist = self.content_switch_handler.finalize_switch(
@@ -302,15 +312,8 @@ class AutomationController:
             except Exception as e:
                 logger.warning(f"Failed to mark playlists as played: {e}")
 
-            # Initialize skip detector
-            # This will handle category updates on video transitions
-            self._initialize_skip_detector()
-            
-            # Update skip detector with the new playlist from content switch
-            # This ensures playlist tracking stays in sync with what VLC is actually playing
-            if self.playback_skip_detector and vlc_playlist:
-                self.playback_skip_detector.set_vlc_playlist(vlc_playlist)
-                logger.debug(f"Updated skip detector playlist with {len(vlc_playlist)} videos from content switch")
+            # Initialize file lock monitor for this rotation
+            self._initialize_file_lock_monitor(current_folder)
             
             # Process any queued videos from downloads so they're in database before category lookup
             self._process_video_registration_queue()
@@ -321,12 +324,15 @@ class AutomationController:
                 if session:
                     stream_title = session.get('stream_title', '')
                     
-                    # Get category from first video in rotation (with fallback to first playlist)
+                    # Get category from first video in rotation
                     category = None
-                    if self.content_switch_handler:
+                    if self.file_lock_monitor:
+                        category = self.file_lock_monitor.get_category_for_current_video()
+                    
+                    # Fallback: get category from first playlist
+                    if not category and self.content_switch_handler:
                         category = self.content_switch_handler.get_initial_rotation_category(
-                            self.playback_skip_detector, 
-                            self.playlist_manager
+                            current_folder, self.playlist_manager
                         )
                     
                     await self.stream_manager.update_stream_info(stream_title, category)
@@ -354,47 +360,25 @@ class AutomationController:
             self.is_rotating = False
             return False
 
-    def _initialize_skip_detector(self):
-        """Initialize skip detector for current session."""
+    def _initialize_file_lock_monitor(self, video_folder: Optional[str] = None):
+        """Initialize file lock monitor for current rotation.
+        
+        Args:
+            video_folder: Path to the video folder to monitor. If None, uses config default.
+        """
         if not self.obs_controller:
             return
         
-        settings = self.config_manager.get_settings()
-        video_folder = settings.get('video_folder', 'C:/stream_videos/')
+        if video_folder is None:
+            settings = self.config_manager.get_settings()
+            video_folder = settings.get('video_folder', 'C:/stream_videos/')
         
-        if self.playback_skip_detector is None:
-            self.playback_skip_detector = PlaybackSkipDetector(
-                self.db, self.obs_controller, VLC_SOURCE_NAME, video_folder,
-                self.content_switch_handler, self.stream_manager
+        if self.file_lock_monitor is None:
+            self.file_lock_monitor = FileLockMonitor(
+                self.db, self.obs_controller, VLC_SOURCE_NAME
             )
-            # Update rotation handler's reference to the newly created detector
-            assert self.rotation_handler is not None, "Rotation handler must be initialized"
-            self.rotation_handler.set_playback_skip_detector(self.playback_skip_detector)
-            # Update temp playback handler's reference
-            if self.temp_playback_handler:
-                self.temp_playback_handler.set_skip_detector(self.playback_skip_detector)
         
-        session = self.db.get_current_session()
-        if not session:
-            return
-        
-        total_duration = session.get('total_duration_seconds', 0)
-        playback_seconds = session.get('playback_seconds', 0)
-        
-        original_finish = None
-        finish_time_str = session.get('estimated_finish_time')
-        if finish_time_str:
-            try:
-                original_finish = datetime.fromisoformat(finish_time_str)
-            except (ValueError, TypeError):
-                pass
-        
-        resume_position_ms = int(playback_seconds * 1000) if playback_seconds > 0 else 0
-        self.playback_skip_detector.initialize(
-            total_duration_seconds=total_duration,
-            original_finish_time=original_finish,
-            resume_position_ms=resume_position_ms
-        )
+        self.file_lock_monitor.initialize(str(video_folder))
 
     async def _trigger_next_rotation_async(self) -> None:
         """Trigger next rotation selection and background download.
@@ -529,37 +513,21 @@ class AutomationController:
         if not session:
             return
 
-        # Check skip detection
-        skip_detected, skip_info = self.rotation_handler.check_skip_detection(self.current_session_id)
-        if skip_detected and skip_info:
-            self.notification_service.notify_playback_skip(
-                skip_info["time_skipped_seconds"],
-                skip_info["new_finish_time_str"]
-            )
+        # Check file lock monitor for video transitions
+        if self.file_lock_monitor:
+            check_result = self.file_lock_monitor.check()
             
-            # Update stream category based on current video (with proper async/await)
-            current_video = skip_info.get("current_video_filename")
-            if current_video and self.content_switch_handler and self.stream_manager:
-                try:
-                    temp_playback_active = bool(self.temp_playback_handler and self.temp_playback_handler.is_active)
-                    await self.content_switch_handler.update_category_for_video_async(
-                        current_video, self.stream_manager, temp_playback_active=temp_playback_active
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to update category on video transition: {e}")
-        
-        # Handle VLC refresh if needed during temp playback
-        # The skip detector sets _vlc_refresh_needed flag when new files are available during temp playback
-        if (self.playback_skip_detector and 
-            self.playback_skip_detector._vlc_refresh_needed and 
-            self.temp_playback_handler and self.temp_playback_handler.is_active):
-            try:
-                logger.info("Executing VLC refresh from skip detector flag")
-                await self.temp_playback_handler.refresh_vlc()
-                self.playback_skip_detector._vlc_refresh_needed = False
-            except Exception as e:
-                logger.error(f"Error executing VLC refresh: {e}")
-                self.playback_skip_detector._vlc_refresh_needed = False
+            if check_result['transition']:
+                # Video transition detected - update stream category
+                current_video = check_result.get('current_video')
+                if current_video and self.content_switch_handler and self.stream_manager:
+                    try:
+                        temp_playback_active = bool(self.temp_playback_handler and self.temp_playback_handler.is_active)
+                        await self.content_switch_handler.update_category_for_video_async(
+                            current_video, self.stream_manager, temp_playback_active=temp_playback_active
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to update category on video transition: {e}")
 
         # Trigger background download only if pending folder is empty and not already triggered
         # Skip on first loop after resume to avoid downloading when resuming into existing rotation
@@ -584,14 +552,12 @@ class AutomationController:
         if self._just_resumed_session:
             self._just_resumed_session = False
 
-        # Check if all content is consumed and prepared playlists are ready for immediate rotation
-        # Also trigger rotation if there's pending content even if prepared_playlists flag is empty (covers restart scenario)
+        # Check if all content is consumed
+        all_consumed = self.file_lock_monitor is not None and self.file_lock_monitor.all_content_consumed
         has_pending_content = not self.playlist_manager.is_folder_empty(pending_folder)
-        should_rotate = False
         
         # Check if temp playback should be activated (long playlist being downloaded)
-        if (self.playback_skip_detector is not None and 
-            self.playback_skip_detector._all_content_consumed and 
+        if (all_consumed and 
             self.temp_playback_handler and not self.temp_playback_handler.is_active):
             
             # Check if we have prepared playlists downloading but not completed yet
@@ -603,8 +569,6 @@ class AutomationController:
             next_playlists_status = json.loads(next_playlists_status_raw) if isinstance(next_playlists_status_raw, str) else (next_playlists_status_raw or {})
             
             # Get pending folder status
-            settings = self.config_manager.get_settings()
-            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
             pending_complete_files = self.playlist_manager.get_complete_video_files(pending_folder)
             pending_has_files = len(pending_complete_files) > 0
             
@@ -612,26 +576,22 @@ class AutomationController:
             pending_incomplete = False
             if next_playlists:
                 for playlist_name in next_playlists:
-                    # Check status from the next_playlists_status dict
-                    playlist_is_complete = next_playlists_status.get(playlist_name) == 'COMPLETED'
-                    if not playlist_is_complete:
+                    if next_playlists_status.get(playlist_name) != 'COMPLETED':
                         pending_incomplete = True
                         break
             
-            # Trigger temp playback if all conditions met
-            # But skip if already in temp playback mode - just refresh VLC instead
+            # Activate temp playback if downloads in progress with files ready
             if pending_has_files and pending_incomplete and self.temp_playback_handler:
-                if self.temp_playback_handler.is_active:
-                    logger.info(f"Already in temp playback, new files available ({len(pending_complete_files)} files in pending) - triggering VLC refresh")
-                    self.playback_skip_detector._vlc_refresh_needed = True
-                else:
-                    logger.info(f"Long playlist detected downloading ({len(pending_complete_files)} files ready in pending) - activating temp playback")
-                    await self.temp_playback_handler.activate(session)
+                logger.info(f"Long playlist detected downloading ({len(pending_complete_files)} files ready in pending) - activating temp playback")
+                await self.temp_playback_handler.activate(session)
+                # Re-initialize file lock monitor to watch the pending folder
+                self._initialize_file_lock_monitor(pending_folder)
                 return
         
-        if self.playback_skip_detector is not None and self.playback_skip_detector._all_content_consumed:
+        # Check if we should rotate (all content consumed + next rotation ready)
+        should_rotate = False
+        if all_consumed:
             # Only rotate on pending content if no background download is in progress
-            # This prevents triggering rotation mid-download and auto-selecting same playlists
             pending_content_ready = has_pending_content and not self._background_download_in_progress
             should_rotate = self.next_prepared_playlists or pending_content_ready
         
@@ -641,25 +601,17 @@ class AutomationController:
             else:
                 logger.info("All content consumed and pending content exists - triggering rotation (prepared from previous run)")
             
-            total_seconds = self.rotation_handler.get_rotation_completion_info(session)
-            self.rotation_handler.log_rotation_completion(total_seconds)
-            
-            # Reset flag before handling rotation
-            assert self.playback_skip_detector is not None, "playback_skip_detector must be initialized"
-            self.playback_skip_detector._all_content_consumed = False
+            self.rotation_handler.log_rotation_completion(0)
             
             # Handle rotation immediately
             await self._handle_normal_rotation()
             return
 
-        # Check rotation duration
+        # Check rotation duration (time-based fallback)
         if not self.rotation_handler.check_rotation_duration(session):
             return
 
-        total_seconds = self.rotation_handler.get_rotation_completion_info(session)
-        self.rotation_handler.log_rotation_completion(total_seconds)
-
-        # Handle normal rotation
+        self.rotation_handler.log_rotation_completion(0)
         await self._handle_normal_rotation()
 
     async def _handle_normal_rotation(self):
@@ -690,8 +642,6 @@ class AutomationController:
                 except Exception as e:
                     logger.warning(f"Failed to record current playlists: {e}")
             
-            total_seconds = self.playback_tracker.get_total_seconds()
-            self.db.update_session_playback(self.current_session_id, total_seconds)
             self.db.end_session(self.current_session_id)
 
         if self.start_rotation_session():
@@ -806,7 +756,6 @@ class AutomationController:
         elif not os.path.exists(video_folder) or not os.listdir(video_folder):
             logger.warning(f"Video folder empty/missing: {video_folder}")
             if session.get('id'):
-                self.db.update_session_playback(session['id'], self.playback_tracker.get_total_seconds())
                 self.db.end_session(session['id'])
             if self.start_rotation_session():
                 await self.execute_content_switch()
@@ -815,9 +764,7 @@ class AutomationController:
             # Keep temp playback handler in sync
             if self.temp_playback_handler:
                 self.temp_playback_handler.set_session_id(self.current_session_id)
-            playback_seconds = session.get('playback_seconds', 0)
-            self.playback_tracker.total_playback_seconds = playback_seconds
-            logger.info(f"Resuming session {self.current_session_id}, playback: {playback_seconds}s")
+            logger.info(f"Resuming session {self.current_session_id}")
             
             # Check for temp playback state that needs to be restored (crash recovery)
             temp_state = self.db.get_temp_playback_state(session['id'])
@@ -828,6 +775,10 @@ class AutomationController:
                 if restored:
                     logger.info("Successfully restored temp playback state")
                     temp_playback_restored = True
+                    # Initialize file lock monitor pointing at the pending folder
+                    pending_folder = temp_state.get('folder')
+                    if pending_folder:
+                        self._initialize_file_lock_monitor(pending_folder)
                     # Skip normal session resume - temp playback handles its own state
                 else:
                     logger.warning("Failed to restore temp playback, continuing with normal session resume")
@@ -880,11 +831,7 @@ class AutomationController:
                     assert self.stream_manager is not None, "Stream manager not initialized"
                     await self.stream_manager.update_title(session['stream_title'])
                 
-                if playback_seconds > 0:
-                    self._pending_seek_position_ms = int(playback_seconds * 1000)
-                    logger.info(f"Scheduled seek to {playback_seconds}s")
-                
-                self._initialize_skip_detector()
+                self._initialize_file_lock_monitor()
 
         # Main loop
         loop_count = 0
@@ -915,7 +862,6 @@ class AutomationController:
 
                     if is_live and self.last_stream_status != "live":
                         logger.info("Streamer is LIVE — pausing 24/7 stream")
-                        self.playback_tracker.pause_tracking()
                         if self.obs_controller:
                             self.obs_controller.switch_scene(SCENE_LIVE)
                         self.last_stream_status = "live"
@@ -926,55 +872,20 @@ class AutomationController:
                             self.obs_controller.switch_scene(SCENE_OFFLINE)
                         self.last_stream_status = "offline"
                         self._rotation_postpone_logged = False
-                        self.playback_tracker.resume_tracking()
                         self.notification_service.notify_streamer_offline()
 
-                # Every iteration: Check everything
-                if self.last_stream_status != "live" and self.playback_tracker.is_tracking():
-                    self.playback_tracker.pause_tracking()
-                    if self.current_session_id:
-                        self.playback_tracker.update_session(self.current_session_id)
-                    self.playback_tracker.resume_tracking()
-
-                self.auto_save_playback_position()
                 self._process_video_registration_queue()
                 self._process_pending_database_operations()
                 
-                # Monitor temp playback for new files and save cursor position
+                # Monitor temp playback for download completion
                 if self.temp_playback_handler and self.temp_playback_handler.is_active:
                     current_time = time.time()
                     if current_time - self.temp_playback_handler._last_folder_check >= 2.0:  # Check every 2 seconds
                         await self.temp_playback_handler.monitor()
                         self.temp_playback_handler._last_folder_check = current_time
-                        
-                        # Save cursor position for crash recovery
-                        if self.current_session_id and self.obs_controller:
-                            media_status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
-                            if media_status:
-                                cursor_ms = media_status.get('media_cursor', 0) or 0
-                                if cursor_ms > 0:
-                                    self.db.update_temp_playback_cursor(self.current_session_id, cursor_ms)
                 
-                # Only check for rotation (normal behavior)
+                # Check for rotation (normal behavior)
                 await self.check_for_rotation()
-                
-                # Handle pending seek
-                if self._pending_seek_position_ms > 0:
-                    if self._seek_retry_count == 0:
-                        self.obs_controller.play_media(VLC_SOURCE_NAME)
-                        self._seek_retry_count += 1
-                        logger.debug("Triggered play, will seek next iteration")
-                    else:
-                        if self.obs_controller.seek_media(VLC_SOURCE_NAME, self._pending_seek_position_ms):
-                            logger.info(f"Seeked VLC to {self._pending_seek_position_ms/1000:.1f}s")
-                            self._pending_seek_position_ms = 0
-                            self._seek_retry_count = 0
-                        else:
-                            self._seek_retry_count += 1
-                            if self._seek_retry_count >= 11:
-                                logger.warning("Failed to seek VLC after 10 attempts, giving up")
-                                self._pending_seek_position_ms = 0
-                                self._seek_retry_count = 0
 
                 if self.config_manager.has_config_changed():
                     logger.info("Config changed, syncing...")

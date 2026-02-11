@@ -33,7 +33,6 @@ root_logger.addHandler(console_handler)
 # Suppress DEBUG logs from libraries to reduce spam
 logging.getLogger('obsws_python').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
-logging.getLogger('services.playback_tracker').setLevel(logging.INFO)
 
 logger = logging.getLogger(__name__)
 

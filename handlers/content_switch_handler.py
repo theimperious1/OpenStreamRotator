@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import re
 import time
 from typing import Optional
 from core.database import DatabaseManager
@@ -51,10 +53,13 @@ class ContentSwitchHandler:
             return None
         
         try:
+            # Strip ordering prefix (e.g., "01_") before DB lookup
+            clean_filename = re.sub(r'^\d{2}_', '', video_filename)
+            
             # Look up the video in database to find its source playlist
-            video = self.db.get_video_by_filename(video_filename)
+            video = self.db.get_video_by_filename(clean_filename)
             if not video:
-                logger.debug(f"Video not found in database: {video_filename}")
+                logger.debug(f"Video not found in database: {clean_filename}")
                 return None
             
             playlist_name = video.get('playlist_name')
@@ -122,14 +127,14 @@ class ContentSwitchHandler:
             logger.error(f"Failed to update category for video {video_filename}: {e}")
             return False
 
-    def get_initial_rotation_category(self, skip_detector, playlist_manager) -> Optional[str]:
+    def get_initial_rotation_category(self, video_folder: str, playlist_manager) -> Optional[str]:
         """
         Get the category for the first video in rotation, with fallback to first playlist.
         
         Used during rotation startup to set the correct category for the video about to play.
         
         Args:
-            skip_detector: PlaybackSkipDetector instance to get ordered video files
+            video_folder: Path to the video folder to scan
             playlist_manager: PlaylistManager instance to get first playlist as fallback
             
         Returns:
@@ -138,15 +143,21 @@ class ContentSwitchHandler:
         category = None
         
         try:
-            # Get first video from the folder
-            if skip_detector:
-                video_files = skip_detector.get_video_files_in_order()
+            # Get first video from the folder (sorted alphabetically, matching VLC order)
+            if video_folder and os.path.isdir(video_folder):
+                video_extensions = {'.mp4', '.webm', '.mkv', '.avi', '.mov', '.flv', '.wmv'}
+                video_files = sorted([
+                    f for f in os.listdir(video_folder)
+                    if os.path.isfile(os.path.join(video_folder, f))
+                    and os.path.splitext(f)[1].lower() in video_extensions
+                ])
                 if video_files:
-                    first_video_filename = video_files[0]
-                    # Get category for this specific video
-                    category = self.get_category_for_video(first_video_filename)
+                    first_video = video_files[0]
+                    # Strip ordering prefix (e.g., "01_") before DB lookup
+                    original_name = re.sub(r'^\d{2}_', '', first_video)
+                    category = self.get_category_for_video(original_name)
                     if category:
-                        logger.info(f"Got initial rotation category from first video: {first_video_filename} -> {category}")
+                        logger.info(f"Got initial rotation category from first video: {first_video} -> {category}")
                         return category
         except Exception as e:
             logger.warning(f"Failed to get category from first video: {e}")

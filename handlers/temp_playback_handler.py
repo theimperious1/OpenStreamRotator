@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Callable, TYPE_CHECKING
 
 from config.config_manager import ConfigManager
@@ -21,7 +21,6 @@ from managers.playlist_manager import PlaylistManager
 if TYPE_CHECKING:
     from controllers.obs_controller import OBSController
     from managers.stream_manager import StreamManager
-    from playback.playback_skip_detector import PlaybackSkipDetector
 
 logger = logging.getLogger(__name__)
 
@@ -51,21 +50,16 @@ class TempPlaybackHandler:
         self._last_folder_check = 0
         
         # External references (set by automation controller)
-        self.playback_skip_detector: Optional['PlaybackSkipDetector'] = None
         self.current_session_id: Optional[int] = None
         
         # Callbacks for automation controller coordination
         self._auto_resume_downloads_callback: Optional[Callable] = None
-        self._initialize_skip_detector_callback: Optional[Callable] = None
         self._trigger_next_rotation_callback: Optional[Callable] = None
+        self._reinitialize_file_lock_monitor_callback: Optional[Callable] = None
         
         # Reference to background download flag (shared with automation controller)
         self._get_background_download_in_progress: Optional[Callable[[], bool]] = None
         self._set_background_download_in_progress: Optional[Callable[[bool], None]] = None
-
-    def set_skip_detector(self, detector: 'PlaybackSkipDetector') -> None:
-        """Set the playback skip detector reference."""
-        self.playback_skip_detector = detector
 
     def set_session_id(self, session_id: Optional[int]) -> None:
         """Update the current session ID."""
@@ -74,17 +68,17 @@ class TempPlaybackHandler:
     def set_callbacks(
         self,
         auto_resume_downloads: Optional[Callable] = None,
-        initialize_skip_detector: Optional[Callable] = None,
         get_background_download_in_progress: Optional[Callable[[], bool]] = None,
         set_background_download_in_progress: Optional[Callable[[bool], None]] = None,
-        trigger_next_rotation: Optional[Callable] = None
+        trigger_next_rotation: Optional[Callable] = None,
+        reinitialize_file_lock_monitor: Optional[Callable] = None
     ) -> None:
         """Set callbacks for coordination with automation controller."""
         self._auto_resume_downloads_callback = auto_resume_downloads
-        self._initialize_skip_detector_callback = initialize_skip_detector
         self._get_background_download_in_progress = get_background_download_in_progress
         self._set_background_download_in_progress = set_background_download_in_progress
         self._trigger_next_rotation_callback = trigger_next_rotation
+        self._reinitialize_file_lock_monitor_callback = reinitialize_file_lock_monitor
 
     @property
     def is_active(self) -> bool:
@@ -151,23 +145,6 @@ class TempPlaybackHandler:
             # Mark temp playback as active
             self._active = True
             self._last_folder_check = time.time()
-            
-            # Update skip detector to track files in pending folder
-            # This allows videos to be deleted after they finish playing
-            if self.playback_skip_detector:
-                self.playback_skip_detector.video_folder = pending_folder
-                # Reset skip detector state so it tracks fresh from pending folder
-                self.playback_skip_detector.reset()
-                # Set the VLC playlist for reliable video tracking
-                self.playback_skip_detector.set_vlc_playlist(playlist)
-                # Enable temp playback mode with refresh callback
-                self.playback_skip_detector.set_temp_playback_mode(True, self.refresh_vlc)
-                # Set position change callback for crash recovery persistence
-                session_id = self.current_session_id
-                self.playback_skip_detector.set_position_change_callback(
-                    lambda pos, sid=session_id: self.db.update_temp_playback_position(sid, pos) if sid else None
-                )
-                logger.info(f"Updated skip detector with {len(playlist)} video playlist")
             
             # Update stream title to reflect temp playback content
             # The next_playlists column contains the prepared rotation playlists
@@ -326,24 +303,6 @@ class TempPlaybackHandler:
             # Set background download flag - if we're in temp playback, downloads haven't finished
             self._set_background_download_flag(True)
             
-            # Initialize the skip detector (creates it if None, initializes state)
-            if self._initialize_skip_detector_callback:
-                self._initialize_skip_detector_callback()
-            
-            # Configure skip detector for temp playback mode
-            if self.playback_skip_detector:
-                self.playback_skip_detector.video_folder = pending_folder
-                self.playback_skip_detector.reset()
-                # Set playlist but position starts at 0 since we rebuilt the valid playlist
-                self.playback_skip_detector.set_vlc_playlist(valid_playlist)
-                self.playback_skip_detector.set_temp_playback_mode(True, self.refresh_vlc)
-                # Set position change callback for crash recovery persistence
-                session_id = self.current_session_id
-                self.playback_skip_detector.set_position_change_callback(
-                    lambda pos, sid=session_id: self.db.update_temp_playback_position(sid, pos) if sid else None
-                )
-                logger.info(f"Configured skip detector for temp playback with {len(valid_playlist)} videos")
-            
             # Update database with corrected state
             if self.current_session_id:
                 self.db.save_temp_playback_state(
@@ -439,10 +398,7 @@ class TempPlaybackHandler:
                 logger.error("Failed to switch back to Stream scene after VLC refresh")
                 return
             
-            # Update skip detector with new playlist
-            if self.playback_skip_detector:
-                self.playback_skip_detector.set_vlc_playlist(playlist)
-                logger.info(f"Refreshed VLC with {len(playlist)} videos during temp playback")
+            logger.info(f"Refreshed VLC with updated playlist during temp playback")
             
         except Exception as e:
             logger.error(f"Error during VLC refresh: {e}")
@@ -547,61 +503,9 @@ class TempPlaybackHandler:
             if self.current_session_id:
                 self.db.clear_temp_playback_state(self.current_session_id)
             
-            # Update skip detector to track files in live folder
-            if self.playback_skip_detector:
-                self.playback_skip_detector.video_folder = live_folder
-                # Disable temp playback mode
-                self.playback_skip_detector.set_temp_playback_mode(False)
-                # Set the new VLC playlist while preserving current playback position
-                # (reset_position=False because VLC is already mid-rotation, we're just updating
-                # the playlist list while maintaining the same position in the stream)
-                self.playback_skip_detector.set_vlc_playlist(playlist, reset_position=False)
-                logger.info(f"Updated skip detector to track live folder with {len(playlist)} videos")
-            
-            # Recalculate estimated finish time based on new content in live folder
-            # This accounts for what was already consumed during temp playback
-            if self.current_session_id and self.playback_skip_detector:
-                try:
-                    # Get total duration of all videos now in live folder
-                    total_duration_seconds = 0
-                    for filename in playlist:
-                        video = self.db.get_video_by_filename(filename)
-                        if video and video.get('duration_seconds'):
-                            total_duration_seconds += video['duration_seconds']
-                    
-                    # Get cumulative playback so far (includes temp playback consumption)
-                    cumulative_playback_ms = self.playback_skip_detector.cumulative_playback_ms
-                    cumulative_playback_seconds = cumulative_playback_ms / 1000
-                    
-                    # Calculate remaining duration
-                    remaining_seconds = max(0, total_duration_seconds - cumulative_playback_seconds)
-                    
-                    # Calculate new finish time
-                    current_time = datetime.now()
-                    new_finish_time = current_time + timedelta(seconds=remaining_seconds)
-                    
-                    logger.info(
-                        f"Recalculating finish time after temp playback exit: "
-                        f"total={total_duration_seconds}s, consumed={cumulative_playback_seconds:.1f}s, "
-                        f"remaining={remaining_seconds:.1f}s"
-                    )
-                    logger.info(f"New estimated finish time: {new_finish_time}")
-                    
-                    # Update session with new finish time
-                    self.db.update_session_times(
-                        self.current_session_id,
-                        new_finish_time.isoformat(),
-                        (new_finish_time - timedelta(minutes=30)).isoformat()
-                    )
-                    
-                    # Re-initialize skip detector with new duration and finish time
-                    self.playback_skip_detector.initialize(
-                        total_duration_seconds=int(remaining_seconds),
-                        original_finish_time=new_finish_time
-                    )
-                    
-                except Exception as e:
-                    logger.error(f"Error recalculating finish time after temp playback exit: {e}")
+            # Re-initialize file lock monitor to watch the live folder
+            if self._reinitialize_file_lock_monitor_callback:
+                self._reinitialize_file_lock_monitor_callback(live_folder)
             
             # Trigger next rotation selection and background download
             # This ensures the automation controller prepares the playlists after this rotation finishes
@@ -632,14 +536,6 @@ class TempPlaybackHandler:
         logger.info("Cleaning up temp playback after normal rotation")
         
         try:
-            settings = self.config.get_settings()
-            video_folder = settings.get('video_folder', 'C:/stream_videos/')
-            
-            # Step 1: Update skip detector to track live folder
-            if self.playback_skip_detector:
-                self.playback_skip_detector.video_folder = video_folder
-                logger.info("Updated skip detector to track live folder")
-            
             # Trigger next rotation
             logger.info("Triggering next rotation after temp playback cleanup")
             if self._trigger_next_rotation_callback:
