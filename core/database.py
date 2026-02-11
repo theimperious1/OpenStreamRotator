@@ -148,6 +148,19 @@ class DatabaseManager:
         except sqlite3.OperationalError:
             logger.debug("temp_playback_cursor_ms column already exists")
 
+        # Playback position tracking for crash recovery
+        try:
+            cursor.execute("ALTER TABLE rotation_sessions ADD COLUMN playback_cursor_ms INTEGER DEFAULT 0")
+            logger.info("Added playback_cursor_ms column to rotation_sessions table")
+        except sqlite3.OperationalError:
+            logger.debug("playback_cursor_ms column already exists")
+        
+        try:
+            cursor.execute("ALTER TABLE rotation_sessions ADD COLUMN playback_current_video TEXT")
+            logger.info("Added playback_current_video column to rotation_sessions table")
+        except sqlite3.OperationalError:
+            logger.debug("playback_current_video column already exists")
+
         # Playback log table - records each video transition for historical audit
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS playback_log (
@@ -381,6 +394,34 @@ class DatabaseManager:
         """, (stream_title, session_id))
         conn.commit()
         self.close()
+
+    def save_playback_position(self, session_id: int, cursor_ms: int, current_video: Optional[str] = None) -> None:
+        """Save the current playback position for crash recovery.
+        
+        Called every second from the main loop to keep position up to date.
+        
+        Args:
+            session_id: Current rotation session ID
+            cursor_ms: Current playback position in milliseconds
+            current_video: Filename of the currently playing video
+        """
+        conn = self.connect()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE rotation_sessions 
+                SET playback_cursor_ms = ?, playback_current_video = ?
+                WHERE id = ?
+            """, (cursor_ms, current_video, session_id))
+            conn.commit()
+        except Exception as e:
+            logger.debug(f"Failed to save playback position: {e}")
+        finally:
+            self.close()
+
+    def clear_playback_position(self, session_id: int) -> None:
+        """Clear saved playback position (e.g. on rotation switch)."""
+        self.save_playback_position(session_id, 0, None)
 
     def get_session_by_id(self, session_id: int) -> Optional[Dict]:
         """Get a specific session by ID."""

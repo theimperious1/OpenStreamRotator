@@ -99,6 +99,10 @@ class AutomationController:
         # Background download state (thread-safe communication from background thread)
         self._pending_db_playlists_to_initialize = None  # Playlists to initialize in DB
         self._pending_db_playlists_to_complete = None    # Playlists to mark as COMPLETED in DB
+        
+        # Deferred seek for crash recovery (applied once VLC is confirmed playing)
+        self._pending_seek_ms: Optional[int] = None
+        self._pending_seek_video: Optional[str] = None
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -143,6 +147,21 @@ class AutomationController:
 
     def save_playback_on_exit(self):
         """Save current state when program exits."""
+        # Save final playback position for crash recovery
+        if self.current_session_id and self.file_lock_monitor and self.obs_controller:
+            try:
+                status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
+                if status and status.get('media_cursor') is not None:
+                    current_video = self.file_lock_monitor.current_video_original_name
+                    self.db.save_playback_position(
+                        self.current_session_id,
+                        status['media_cursor'],
+                        current_video
+                    )
+                    logger.info(f"Saved playback position on exit: {current_video} at {status['media_cursor']}ms")
+            except Exception as e:
+                logger.debug(f"Failed to save playback position on exit: {e}")
+        
         # Switch to pause scene on exit
         if self.obs_controller:
             try:
@@ -842,6 +861,21 @@ class AutomationController:
                     await self.stream_manager.update_title(session['stream_title'])
                 
                 self._initialize_file_lock_monitor()
+                
+                # Restore playback position from crash recovery
+                saved_video = session.get('playback_current_video')
+                saved_cursor = session.get('playback_cursor_ms', 0)
+                if saved_video and saved_cursor and saved_cursor > 0:
+                    # Verify the saved video is still the current video in the folder
+                    if (self.file_lock_monitor and 
+                        self.file_lock_monitor.current_video_original_name == saved_video):
+                        # Defer the seek — VLC isn't playing yet (scene hasn't switched)
+                        # It will be applied on the first main loop tick where VLC is playing
+                        self._pending_seek_ms = saved_cursor
+                        self._pending_seek_video = saved_video
+                        logger.info(f"Pending resume: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s) — waiting for VLC to start")
+                    else:
+                        logger.debug(f"Saved video '{saved_video}' no longer current, starting from beginning")
 
         # Main loop
         loop_count = 0
@@ -886,6 +920,33 @@ class AutomationController:
 
                 self._process_video_registration_queue()
                 self._process_pending_database_operations()
+                
+                # Save playback position every tick for crash recovery
+                if self.current_session_id and self.file_lock_monitor and self.obs_controller:
+                    try:
+                        status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
+                        if status and status.get('media_cursor') is not None:
+                            current_video = self.file_lock_monitor.current_video_original_name
+                            self.db.save_playback_position(
+                                self.current_session_id,
+                                status['media_cursor'],
+                                current_video
+                            )
+                            
+                            # Apply deferred seek from crash recovery once VLC is playing
+                            if self._pending_seek_ms is not None and self.obs_controller:
+                                media_state = status.get('media_state')
+                                if media_state and 'playing' in str(media_state).lower():
+                                    # Verify the video hasn't changed since we queued the seek
+                                    if current_video == self._pending_seek_video:
+                                        self.obs_controller.seek_media(VLC_SOURCE_NAME, self._pending_seek_ms)
+                                        logger.info(f"Resumed playback: {self._pending_seek_video} at {self._pending_seek_ms}ms ({self._pending_seek_ms/1000:.1f}s)")
+                                    else:
+                                        logger.debug(f"Video changed before seek could apply, skipping")
+                                    self._pending_seek_ms = None
+                                    self._pending_seek_video = None
+                    except Exception:
+                        pass  # Non-critical, just skip this tick
                 
                 # Monitor temp playback for download completion
                 if self.temp_playback_handler and self.temp_playback_handler.is_active:
