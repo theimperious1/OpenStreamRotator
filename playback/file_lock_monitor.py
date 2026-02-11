@@ -66,6 +66,7 @@ class FileLockMonitor:
         self._all_content_consumed: bool = False
         self._temp_playback_mode: bool = False
         self._last_video_duration_seconds: int = 0  # Cached duration for last-video polling
+        self._needs_vlc_refresh: bool = False  # Signal: last video done in temp playback, new files may exist
         
         # Debounce: when a file is freed, wait one extra check cycle before deleting.
         # This avoids false positives from VLC briefly releasing a file between reads.
@@ -86,6 +87,8 @@ class FileLockMonitor:
         self.video_folder = video_folder
         self._current_video = None
         self._all_content_consumed = False
+        self._needs_vlc_refresh = False
+        self._temp_playback_mode = False
         self._pending_transition_file = None
         self._last_video_duration_seconds = 0
         
@@ -119,6 +122,7 @@ class FileLockMonitor:
         """Reset the monitor state."""
         self._current_video = None
         self._all_content_consumed = False
+        self._needs_vlc_refresh = False
         self._pending_transition_file = None
         self._last_video_duration_seconds = 0
         logger.debug("File lock monitor reset")
@@ -136,6 +140,20 @@ class FileLockMonitor:
     def all_content_consumed(self) -> bool:
         """Whether all videos have been played and the rotation is complete."""
         return self._all_content_consumed
+
+    @property
+    def needs_vlc_refresh(self) -> bool:
+        """Whether VLC needs refreshing during temp playback.
+        
+        Set when the last video finishes in temp playback mode.
+        The automation controller should refresh VLC with current folder
+        contents and reinitialize the monitor, then clear this flag.
+        """
+        return self._needs_vlc_refresh
+
+    def clear_vlc_refresh_flag(self) -> None:
+        """Clear the VLC refresh flag after the controller handles it."""
+        self._needs_vlc_refresh = False
 
     @property
     def current_video(self) -> Optional[str]:
@@ -212,6 +230,9 @@ class FileLockMonitor:
         
         # --- Last video handling: poll VLC cursor vs duration ---
         if is_last_video:
+            # Already signaled for refresh — don't re-enter (avoids duplicate transition)
+            if self._needs_vlc_refresh:
+                return result
             return self._check_last_video(result)
         
         # --- Normal handling: check if current file's lock has been freed ---
@@ -303,7 +324,22 @@ class FileLockMonitor:
                     f"(cursor={cursor_ms}ms, duration={duration_ms}ms, remaining={remaining_ms}ms)"
                 )
                 
-                # Delete the last video
+                # Log playback before any state changes
+                result['transition'] = True
+                result['previous_video'] = previous_original
+                
+                # In temp playback mode, signal for VLC refresh instead of marking consumed.
+                # New files may have been downloaded while this video was playing.
+                # The automation controller will refresh VLC at this natural transition
+                # point (no mid-video disruption) and reinitialize the monitor.
+                if self._temp_playback_mode:
+                    logger.info("Last video done in temp playback — signaling VLC refresh")
+                    self._needs_vlc_refresh = True
+                    # Don't delete or mark consumed yet — controller handles it
+                    result['current_video'] = None
+                    return result
+                
+                # Normal mode: delete the last video and mark consumed
                 if self._current_video:
                     filepath = os.path.join(self.video_folder, self._current_video)
                     # Try to delete - may fail if VLC still has lock
@@ -312,8 +348,6 @@ class FileLockMonitor:
                 
                 self._all_content_consumed = True
                 self._current_video = None
-                result['transition'] = True
-                result['previous_video'] = previous_original
                 result['current_video'] = None
                 result['all_consumed'] = True
         

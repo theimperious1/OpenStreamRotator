@@ -369,56 +369,6 @@ class TempPlaybackHandler:
                 logger.error(f"Failed to recover scene after temp playback restore error: {scene_error}")
             return False
 
-    async def refresh_vlc(self) -> None:
-        """Refresh VLC source during temp playback when playlist is exhausted but new files available.
-        
-        This is called by the skip detector when:
-        1. We're in temp playback mode
-        2. The current video is the last one in the tracked VLC playlist
-        3. There are new files in the pending folder (from ongoing downloads)
-        
-        We briefly switch to content-switch scene, refresh VLC, then switch back.
-        """
-        logger.info("===== VLC REFRESH DURING TEMP PLAYBACK =====")
-        
-        if not self._active:
-            logger.warning("VLC refresh called but temp playback not active")
-            return
-        
-        settings = self.config.get_settings()
-        pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
-        
-        try:
-            # Switch to content-switch scene briefly
-            if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_content_switch):
-                logger.error("Failed to switch to content-switch scene for VLC refresh")
-                return
-            
-            await asyncio.sleep(1.0)  # Wait for scene switch
-            
-            # Update VLC source with current pending folder contents
-            success, playlist = self.obs_controller.update_vlc_source(self.vlc_source_name, pending_folder)
-            if not success:
-                logger.error("Failed to refresh VLC source")
-                return
-            
-            # Switch back to Stream scene
-            await asyncio.sleep(0.3)
-            if not self.obs_controller.switch_scene(self.scene_stream):
-                logger.error("Failed to switch back to Stream scene after VLC refresh")
-                return
-            
-            logger.info(f"Refreshed VLC with updated playlist during temp playback")
-            
-        except Exception as e:
-            logger.error(f"Error during VLC refresh: {e}")
-            # Try to switch back to Stream scene
-            try:
-                if self.obs_controller:
-                    self.obs_controller.switch_scene(self.scene_stream)
-            except:
-                pass
-
     async def monitor(self) -> None:
         """Monitor pending folder during temp playback.
         

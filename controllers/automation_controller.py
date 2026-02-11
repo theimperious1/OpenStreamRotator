@@ -461,6 +461,72 @@ class AutomationController:
             except Exception as e:
                 logger.warning(f"Failed to update category for current video: {e}")
 
+    async def _handle_temp_playback_vlc_refresh(self) -> None:
+        """Refresh VLC source at the natural end of a video during temp playback.
+        
+        Called when the file lock monitor detects the last video finished while
+        in temp playback mode.  New files may have been downloaded since VLC was
+        last loaded — this is the safe moment to reload (video just ended, no
+        mid-video disruption for viewers).
+        
+        If new files exist  → refresh VLC, reinitialize monitor, continue playing.
+        If no new files     → delete the finished video, mark consumed, let the
+                              normal temp-playback-exit flow handle it.
+        """
+        if not self.file_lock_monitor:
+            return
+        
+        settings = self.config_manager.get_settings()
+        pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+        
+        # Delete the finished video now (monitor deferred deletion for us)
+        finished_video = self.file_lock_monitor.current_video
+        if finished_video:
+            filepath = os.path.join(pending_folder, finished_video)
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                    logger.info(f"Deleted completed temp playback video: {finished_video}")
+                except PermissionError:
+                    logger.warning(f"Cannot delete {finished_video} - still locked, will be cleaned up later")
+                except Exception as e:
+                    logger.error(f"Failed to delete temp playback video {finished_video}: {e}")
+        
+        # Check if new files are available
+        new_files = self.playlist_manager.get_complete_video_files(pending_folder)
+        
+        if new_files:
+            logger.info(f"Temp playback VLC refresh: {len(new_files)} files available in pending")
+            
+            if not self.obs_controller:
+                logger.error("No OBS controller available for temp playback VLC refresh")
+                return
+            
+            # Brief scene switch for VLC source update
+            self.obs_controller.switch_scene(SCENE_CONTENT_SWITCH)
+            await asyncio.sleep(1.0)
+            
+            self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, pending_folder)
+            
+            await asyncio.sleep(0.3)
+            self.obs_controller.switch_scene(SCENE_STREAM)
+            
+            # Reinitialize monitor to track the refreshed file list
+            self.file_lock_monitor.clear_vlc_refresh_flag()
+            self._initialize_file_lock_monitor(pending_folder)
+            if self.file_lock_monitor:
+                self.file_lock_monitor.set_temp_playback_mode(True)
+            
+            # Update category for the new video
+            await self._update_category_for_current_video()
+            
+            logger.info("Temp playback VLC refreshed — continuing playback")
+        else:
+            # No new files — mark consumed so normal exit flow kicks in
+            logger.info("No new files in pending after last temp video — marking consumed")
+            self.file_lock_monitor.clear_vlc_refresh_flag()
+            self.file_lock_monitor._all_content_consumed = True
+
     async def _trigger_next_rotation_async(self) -> None:
         """Trigger next rotation selection and background download.
         
@@ -476,9 +542,6 @@ class AutomationController:
                 logger.info(f"Auto-triggered next rotation selection after temp playback: {[p['name'] for p in next_playlists]}")
                 
                 # Start background download
-                settings = self.config_manager.get_settings()
-                next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
-                
                 self._background_download_in_progress = True
                 loop = asyncio.get_event_loop()
                 loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, next_playlists)
@@ -620,6 +683,13 @@ class AutomationController:
                             self.notification_service.notify_video_transition(current_video, category)
                     except Exception as e:
                         logger.warning(f"Failed to update category on video transition: {e}")
+            
+            # Handle VLC refresh during temp playback: last video finished but
+            # new files may have been downloaded.  Refresh VLC at this natural
+            # transition point (no mid-video disruption) and reinitialize.
+            if self.file_lock_monitor.needs_vlc_refresh:
+                await self._handle_temp_playback_vlc_refresh()
+                return
 
         # Trigger background download only if pending folder is empty and not already triggered
         # Skip on first loop after resume to avoid downloading when resuming into existing rotation
@@ -674,6 +744,8 @@ class AutomationController:
                 await self.temp_playback_handler.activate(session)
                 # Re-initialize file lock monitor to watch the pending folder
                 self._initialize_file_lock_monitor(pending_folder)
+                if self.file_lock_monitor:
+                    self.file_lock_monitor.set_temp_playback_mode(True)
                 
                 # Correct the category based on the actual video VLC is playing
                 # (activate() guesses from playlist order, but VLC picks alphabetically)
@@ -836,6 +908,8 @@ class AutomationController:
                 pending_folder = temp_state.get('folder')
                 if pending_folder:
                     self._initialize_file_lock_monitor(pending_folder)
+                    if self.file_lock_monitor:
+                        self.file_lock_monitor.set_temp_playback_mode(True)
             else:
                 logger.warning("Failed to restore temp playback, continuing with normal session resume")
                 self.db.clear_temp_playback_state(session['id'])
