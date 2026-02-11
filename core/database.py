@@ -95,10 +95,7 @@ class DatabaseManager:
                 total_videos INTEGER,
                 total_size_mb INTEGER,
                 total_duration_seconds INTEGER DEFAULT 0,
-                estimated_finish_time TIMESTAMP,
-                download_trigger_time TIMESTAMP,
                 stream_title TEXT,
-                playback_seconds INTEGER DEFAULT 0,
                 is_current BOOLEAN DEFAULT 0,
                 current_playlists TEXT,
                 next_playlists TEXT,
@@ -317,9 +314,7 @@ class DatabaseManager:
 
     def create_rotation_session(self, playlists_selected: List[int],
                                 stream_title: str,
-                                total_duration_seconds: int = 0,
-                                estimated_finish_time: Optional[datetime] = None,
-                                download_trigger_time: Optional[datetime] = None) -> Optional[int]:
+                                total_duration_seconds: int = 0) -> Optional[int]:
         """Create a new rotation session with clean state.
         
         This ensures only one session is marked as current at a time.
@@ -340,11 +335,9 @@ class DatabaseManager:
         # Create new session with clean state (next_playlists starts null)
         cursor.execute("""
             INSERT INTO rotation_sessions (playlists_selected, stream_title, total_duration_seconds, 
-                                          estimated_finish_time, download_trigger_time, is_current,
-                                          current_playlists, next_playlists)
-            VALUES (?, ?, ?, ?, ?, 1, NULL, NULL)
-        """, (json.dumps(playlists_selected), stream_title, total_duration_seconds,
-              estimated_finish_time, download_trigger_time))
+                                          is_current, current_playlists, next_playlists)
+            VALUES (?, ?, ?, 1, NULL, NULL)
+        """, (json.dumps(playlists_selected), stream_title, total_duration_seconds))
 
         conn.commit()
         session_id = cursor.lastrowid
@@ -386,34 +379,6 @@ class DatabaseManager:
         if row:
             return dict(row)
         return None
-
-    def update_session_playback(self, session_id: int, playback_seconds: int):
-        """Update the playback time for a session."""
-        conn = self.connect()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            UPDATE rotation_sessions 
-            SET playback_seconds = ?
-            WHERE id = ?
-        """, (playback_seconds, session_id))
-
-        conn.commit()
-        self.close()
-
-    def update_session_times(self, session_id: int, estimated_finish_time: str, download_trigger_time: str):
-        """Update estimated_finish_time and download_trigger_time for a session (for skip detection recalculation)."""
-        conn = self.connect()
-        cursor = conn.cursor()
-
-        cursor.execute("""
-            UPDATE rotation_sessions 
-            SET estimated_finish_time = ?, download_trigger_time = ?
-            WHERE id = ?
-        """, (estimated_finish_time, download_trigger_time, session_id))
-
-        conn.commit()
-        self.close()
 
     def end_session(self, session_id: int):
         """Mark a rotation session as ended and update playlists' last_played timestamp."""

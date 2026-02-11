@@ -6,7 +6,7 @@ import signal
 import asyncio
 import json
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from core.database import DatabaseManager
@@ -170,7 +170,6 @@ class AutomationController:
         assert self.rotation_handler is not None, "Rotation handler not initialized"
         
         logger.info("Starting new rotation session...")
-        self.rotation_handler.reset_rotation_log_flag()
 
         settings = self.config_manager.get_settings()
         next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
@@ -226,23 +225,12 @@ class AutomationController:
         playlist_names = [p['name'] for p in playlists]
         stream_title = self.playlist_manager.generate_stream_title(playlist_names)
         
-        if total_duration_seconds == 0:
-            rotation_hours = settings.get('rotation_hours', 12)
-            total_duration_seconds = rotation_hours * 3600
-            logger.info(f"Using config rotation_hours: {rotation_hours}h")
-        
-        current_time = datetime.now()
-        estimated_finish_time = current_time + timedelta(seconds=total_duration_seconds)
-        
         logger.info(f"Total rotation duration: {total_duration_seconds}s (~{total_duration_seconds // 60} minutes)")
-        logger.info(f"Estimated finish: {estimated_finish_time}")
 
         playlist_ids = [p['id'] for p in playlists]
         self.current_session_id = self.db.create_rotation_session(
             playlist_ids, stream_title,
-            total_duration_seconds=total_duration_seconds,
-            estimated_finish_time=estimated_finish_time,
-            download_trigger_time=None
+            total_duration_seconds=total_duration_seconds
         )
         # Keep temp playback handler in sync
         if self.temp_playback_handler:
@@ -601,18 +589,8 @@ class AutomationController:
             else:
                 logger.info("All content consumed and pending content exists - triggering rotation (prepared from previous run)")
             
-            self.rotation_handler.log_rotation_completion(0)
-            
-            # Handle rotation immediately
             await self._handle_normal_rotation()
             return
-
-        # Check rotation duration (time-based fallback)
-        if not self.rotation_handler.check_rotation_duration(session):
-            return
-
-        self.rotation_handler.log_rotation_completion(0)
-        await self._handle_normal_rotation()
 
     async def _handle_normal_rotation(self):
         """Handle normal rotation completion."""

@@ -89,7 +89,11 @@ class FileLockMonitor:
     def initialize(self, video_folder: str) -> None:
         """Initialize the monitor for a new rotation.
         
-        Scans the video folder and sets the first file as the current video.
+        Scans the video folder and waits for VLC to lock a file before returning.
+        This prevents the race condition where the monitor starts checking before
+        VLC has grabbed its first file, which would cause a premature deletion.
+        
+        Falls back to assuming the first file after a 10-second timeout.
         
         Args:
             video_folder: Path to the folder containing videos
@@ -101,22 +105,29 @@ class FileLockMonitor:
         self._last_video_duration_seconds = 0
         
         files = self._get_video_files()
-        if files:
-            # Find the first file that is locked (VLC is playing it)
+        if not files:
+            logger.warning("File lock monitor initialized with empty folder")
+            logger.info(f"File lock monitor tracking 0 videos in {video_folder}")
+            return
+        
+        # Poll until VLC locks a file (up to 10 seconds)
+        timeout = 10.0
+        poll_interval = 0.5
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
             for f in files:
                 filepath = os.path.join(self.video_folder, f)
                 if is_file_locked(filepath):
                     self._current_video = f
-                    logger.info(f"File lock monitor initialized: current video = {f} (locked)")
-                    break
-            
-            # If no locked file found, assume first file is current
-            if self._current_video is None:
-                self._current_video = files[0]
-                logger.info(f"File lock monitor initialized: current video = {files[0]} (assumed first)")
-        else:
-            logger.warning("File lock monitor initialized with empty folder")
+                    logger.info(f"File lock monitor initialized: current video = {f} (locked after {time.time() - start_time:.1f}s)")
+                    logger.info(f"File lock monitor tracking {len(files)} videos in {video_folder}")
+                    return
+            time.sleep(poll_interval)
         
+        # Timeout: fall back to first file
+        self._current_video = files[0]
+        logger.warning(f"File lock monitor: no file locked after {timeout}s, assuming first: {files[0]}")
         logger.info(f"File lock monitor tracking {len(files)} videos in {video_folder}")
 
     def reset(self) -> None:

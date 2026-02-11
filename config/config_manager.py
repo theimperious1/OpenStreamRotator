@@ -28,7 +28,6 @@ class ConfigManager:
                 }
             ],
             "settings": {
-                "rotation_hours": 12,
                 "video_folder": "C:/stream_videos/",
                 "next_rotation_folder": "C:/stream_videos_next/",
                 "check_config_interval": 60,
@@ -99,7 +98,7 @@ class ConfigManager:
 
         # Validate settings
         settings = config['settings']
-        required_settings = ['rotation_hours', 'video_folder', 'next_rotation_folder']
+        required_settings = ['video_folder', 'next_rotation_folder']
         for setting in required_settings:
             if setting not in settings:
                 logger.error(f"Missing required setting: {setting}")

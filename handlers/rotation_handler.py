@@ -2,7 +2,6 @@ import os
 import shutil
 import time
 import logging
-from datetime import datetime
 from typing import Optional, Tuple
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
@@ -31,8 +30,6 @@ class RotationHandler:
         self.config = config
         self.playlist_manager = playlist_manager
         self.notification_service = notification_service
-        
-        self._rotation_duration_reached_logged = False
         
         # Validation failure tracking for hybrid exclusion approach
         # Maps filename -> {failure_count, first_failure_time}
@@ -63,29 +60,6 @@ class RotationHandler:
         # Select playlists in main thread (can't be done in executor thread due to SQLite)
         playlists = self.playlist_manager.select_playlists_for_rotation()
         return playlists if playlists else None
-
-    def check_rotation_duration(self, session: dict) -> bool:
-        """
-        Check if rotation duration has been reached.
-        
-        Returns:
-            True if rotation duration reached, False otherwise
-        """
-        if not session.get('estimated_finish_time'):
-            return False
-        
-        finish_time = datetime.fromisoformat(session['estimated_finish_time'])
-        return datetime.now() >= finish_time
-
-    def log_rotation_completion(self, total_seconds: int):
-        """Log rotation completion (once per session)."""
-        if not self._rotation_duration_reached_logged:
-            logger.info(f"Rotation duration reached: {total_seconds}s")
-            self._rotation_duration_reached_logged = True
-
-    def reset_rotation_log_flag(self):
-        """Reset the rotation duration log flag for new session."""
-        self._rotation_duration_reached_logged = False
 
 
 
