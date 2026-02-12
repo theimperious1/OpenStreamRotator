@@ -92,8 +92,6 @@ All settings in this file are **hot-swappable** — you can edit and save while 
 
 ```json
 {
-  "download_buffer_minutes": 30,
-  "check_config_interval": 60,
   "min_playlists_per_rotation": 2,
   "max_playlists_per_rotation": 2,
   "download_retry_attempts": 5,
@@ -108,8 +106,6 @@ All settings in this file are **hot-swappable** — you can edit and save while 
 
 | Field | Description |
 |---|---|
-| `download_buffer_minutes` | Minutes before estimated content end to start downloading the next rotation |
-| `check_config_interval` | Seconds between config file re-reads |
 | `min_playlists_per_rotation` | Minimum playlists selected per rotation |
 | `max_playlists_per_rotation` | Maximum playlists selected per rotation |
 | `download_retry_attempts` | Number of retry attempts for failed downloads |
