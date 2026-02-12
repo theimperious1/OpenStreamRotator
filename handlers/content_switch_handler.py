@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 
 class ContentSwitchHandler:
-    """Handles content switching operations (normal rotations)."""
 
     MAX_TITLE_LENGTH = 140  # Kick's title character limit
 

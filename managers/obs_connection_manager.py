@@ -15,12 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 class OBSConnectionManager:
-    """Manages the OBS WebSocket connection lifecycle.
-
-    Handles initial connection, exponential-backoff reconnection, and
-    graceful disconnection.  Exposes the live ``OBSController`` instance
-    for the rest of the application to use.
-    """
 
     def __init__(
         self,

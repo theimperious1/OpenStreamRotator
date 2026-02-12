@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 class StreamPlatform(ABC):
-    """Base class for stream platform integrations (Twitch, Kick, etc.)"""
 
     def __init__(self, platform_name: str):
         self.platform_name = platform_name

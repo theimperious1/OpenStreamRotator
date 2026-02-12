@@ -22,7 +22,6 @@ _CONNECTION_ERROR_HINTS = (
 
 
 class OBSController:
-    """Controller for OBS WebSocket operations."""
 
     def __init__(self, obs_client: obs.ReqClient):
         self.obs_client = obs_client

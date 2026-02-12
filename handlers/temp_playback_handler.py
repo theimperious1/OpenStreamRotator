@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 
 
 class TempPlaybackHandler:
-    """Handles temporary playback mode during long playlist downloads."""
 
     def __init__(
         self,

@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 class PlatformManager:
-    """Manages multiple streaming platform integrations."""
 
     def __init__(self):
         self.platforms: List[StreamPlatform] = []

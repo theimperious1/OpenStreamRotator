@@ -21,7 +21,6 @@ _DISCORD_RATE_LIMIT_MAX = 30
 
 
 class NotificationService:
-    """Centralized service for sending notifications to various platforms."""
 
     def __init__(self, discord_webhook_url: Optional[str] = None):
         """

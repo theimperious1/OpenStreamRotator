@@ -45,14 +45,6 @@ def is_file_locked(filepath: str) -> bool:
 
 
 class FileLockMonitor:
-    """Monitors video file locks to detect playback transitions.
-    
-    Approach:
-    - Track which file VLC currently has locked (= currently playing)
-    - When that file's lock frees → VLC moved to next video → delete the freed file
-    - For the last video: poll VLC cursor vs duration to detect completion
-    - Videos are sorted alphabetically; prefixed with 'XX_' for playlist ordering
-    """
 
     def __init__(self, db: 'DatabaseManager', obs_controller: 'OBSController', vlc_source_name: str,
                  config: Optional['ConfigManager'] = None, scene_stream: str = "OSR Stream"):

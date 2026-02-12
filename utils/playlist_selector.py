@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class PlaylistSelector:
-    """Intelligently selects playlists for rotation."""
 
     def __init__(self, db: DatabaseManager, config: ConfigManager):
         """

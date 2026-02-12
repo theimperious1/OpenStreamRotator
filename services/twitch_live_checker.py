@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 
 class TwitchLiveChecker:
-    """Manages Twitch authentication and live status checking."""
 
     def __init__(self, client_id: str, client_secret: str):
         """

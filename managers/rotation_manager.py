@@ -21,12 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class RotationManager:
-    """Manages rotation session lifecycle: create, switch, resume.
-
-    Holds a back-reference to the controller for access to shared state
-    and component managers.  All state continues to live on the controller;
-    this class is purely an organisational extraction of methods.
-    """
+    """Uses a back-reference to the controller for shared state access."""
 
     def __init__(
         self,

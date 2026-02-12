@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 
 class VideoDownloader:
-    """Handles YouTube playlist downloading and video registration."""
 
     def __init__(self, db: DatabaseManager, config: ConfigManager, 
                  registration_queue: Optional[VideoRegistrationQueue] = None,

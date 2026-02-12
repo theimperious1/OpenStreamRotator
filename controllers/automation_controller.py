@@ -53,7 +53,6 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 
 class AutomationController:
-    """Main automation controller - orchestrates all components."""
 
     def __init__(self):
         # Core managers

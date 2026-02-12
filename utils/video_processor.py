@@ -20,7 +20,6 @@ _process_lock = threading.Lock()
 
 
 class VideoProcessor:
-    """Handles video file operations and metadata extraction."""
 
     @staticmethod
     def get_video_duration(file_path: str) -> int:

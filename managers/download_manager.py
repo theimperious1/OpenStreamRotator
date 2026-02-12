@@ -22,12 +22,6 @@ logger = logging.getLogger(__name__)
 
 
 class DownloadManager:
-    """Manages background playlist downloads and cross-thread DB queuing.
-
-    Owns the thread-pool executor, all download-in-progress flags, and the
-    pending-database-operation queues that let the background thread
-    communicate safely with the main (SQLite) thread.
-    """
 
     def __init__(
         self,

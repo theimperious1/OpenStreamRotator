@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 class StreamManager:
-    """Manages stream title and category updates across platforms."""
 
     def __init__(self, platform_manager: PlatformManager):
         """
