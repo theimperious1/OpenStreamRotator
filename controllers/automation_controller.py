@@ -1,5 +1,4 @@
 import time
-import obsws_python as obs
 import logging
 import os
 import signal
@@ -7,19 +6,19 @@ import asyncio
 import json
 from threading import Event
 from typing import Optional
-from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 from core.video_registration_queue import VideoRegistrationQueue
 from managers.playlist_manager import PlaylistManager
 from managers.stream_manager import StreamManager
-from controllers.obs_controller import OBSController
+from managers.obs_connection_manager import OBSConnectionManager
+from managers.download_manager import DownloadManager
+from managers.rotation_manager import RotationManager
 from managers.platform_manager import PlatformManager
 from services.notification_service import NotificationService
 from playback.file_lock_monitor import FileLockMonitor
 from services.twitch_live_checker import TwitchLiveChecker
-from handlers.rotation_handler import RotationHandler
 from handlers.content_switch_handler import ContentSwitchHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
@@ -63,17 +62,29 @@ class AutomationController:
         
         self.playlist_manager = PlaylistManager(self.db, self.config_manager, self.video_registration_queue, shutdown_event=self._shutdown_event)
 
-        # OBS
-        self.obs_client: Optional[obs.ReqClient] = None
-        self.obs_controller: Optional[OBSController] = None
-        
-        # Platforms
-        self.platform_manager = PlatformManager()
-        self.stream_manager: Optional[StreamManager] = None
+        # OBS connection manager
+        self.obs_connection = OBSConnectionManager(
+            host=OBS_HOST, port=OBS_PORT, password=OBS_PASSWORD,
+            shutdown_event=self._shutdown_event,
+        )
 
         # Services
         self.notification_service = NotificationService(DISCORD_WEBHOOK_URL)
         self.file_lock_monitor: Optional[FileLockMonitor] = None
+
+        # Download manager
+        self.download_manager = DownloadManager(
+            db=self.db,
+            config_manager=self.config_manager,
+            playlist_manager=self.playlist_manager,
+            notification_service=self.notification_service,
+            video_registration_queue=self.video_registration_queue,
+            shutdown_event=self._shutdown_event,
+        )
+        
+        # Platforms
+        self.platform_manager = PlatformManager()
+        self.stream_manager: Optional[StreamManager] = None
         
         # Twitch live checker
         if TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET:
@@ -82,34 +93,43 @@ class AutomationController:
             self.twitch_live_checker = None
 
         # Handlers (initialized in _initialize_handlers)
-        self.rotation_handler: Optional[RotationHandler] = None
         self.content_switch_handler: Optional[ContentSwitchHandler] = None
         self.temp_playback_handler: Optional[TempPlaybackHandler] = None
 
-        # Executor for background downloads
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="download_worker")
-
         # State
-        self.current_session_id = None
+        self.current_session_id: Optional[int] = None
         self.next_prepared_playlists = None
         self.last_stream_status = None
         self.is_rotating = False
         self._rotation_postpone_logged = False
-        self._downloads_triggered_this_rotation = False  # Track if downloads already triggered after rotation
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
-        self._background_download_in_progress = False  # Track if a background download is currently in progress
         self._shutdown_requested = False
-        
-        # Background download state (thread-safe communication from background thread)
-        self._pending_db_playlists_to_initialize = None  # Playlists to initialize in DB
-        self._pending_db_playlists_to_complete = None    # Playlists to mark as COMPLETED in DB
         
         # Deferred seek for crash recovery (applied once VLC is confirmed playing)
         self._pending_seek_ms: Optional[int] = None
         self._pending_seek_video: Optional[str] = None
 
+        # Rotation manager (session lifecycle)
+        self.rotation_manager = RotationManager(
+            self,
+            scene_stream=SCENE_STREAM,
+            scene_pause=SCENE_PAUSE,
+            scene_rotation_screen=SCENE_ROTATION_SCREEN,
+            vlc_source_name=VLC_SOURCE_NAME,
+        )
+
+        # Wire download manager callbacks
+        self.download_manager.set_callbacks(
+            get_current_session_id=lambda: self.current_session_id,
+            set_next_prepared_playlists=self._set_next_prepared_playlists,
+        )
+
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
+
+    def _set_next_prepared_playlists(self, playlists) -> None:
+        """Callback for download manager to set prepared playlists."""
+        self.next_prepared_playlists = playlists
 
     def signal_handler(self, sig, frame):
         """Handle shutdown signals gracefully."""
@@ -123,10 +143,6 @@ class AutomationController:
         """Initialize all handler objects after OBS and services are ready."""
         assert self.obs_controller is not None, "OBS controller must be initialized before handlers"
         
-        self.rotation_handler = RotationHandler(
-            self.db, self.config_manager, self.playlist_manager,
-            self.notification_service
-        )
         self.content_switch_handler = ContentSwitchHandler(
             self.db, self.config_manager, self.playlist_manager,
             self.obs_controller, self.notification_service
@@ -144,10 +160,10 @@ class AutomationController:
         )
         # Set up callbacks for coordination
         self.temp_playback_handler.set_callbacks(
-            auto_resume_downloads=self._auto_resume_pending_downloads,
-            get_background_download_in_progress=lambda: self._background_download_in_progress,
-            set_background_download_in_progress=lambda v: setattr(self, '_background_download_in_progress', v),
-            trigger_next_rotation=self._trigger_next_rotation_async,
+            auto_resume_downloads=self.download_manager.auto_resume_pending_downloads,
+            get_background_download_in_progress=lambda: self.download_manager.background_download_in_progress,
+            set_background_download_in_progress=lambda v: setattr(self.download_manager, 'background_download_in_progress', v),
+            trigger_next_rotation=self.download_manager.trigger_next_rotation_async,
             reinitialize_file_lock_monitor=self._initialize_file_lock_monitor,
             update_category_after_switch=self._update_category_for_current_video
         )
@@ -219,242 +235,23 @@ class AutomationController:
             except Exception as e:
                 logger.debug(f"Failed to switch scene on exit: {e}")
 
-    def connect_obs(self) -> bool:
-        """Connect to OBS WebSocket."""
-        try:
-            self.obs_client = obs.ReqClient(host=OBS_HOST, port=OBS_PORT, password=OBS_PASSWORD, timeout=3)
-            self.obs_controller = OBSController(self.obs_client)
-            logger.info("Connected to OBS successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to connect to OBS: {e}")
-            return False
+    # ------------------------------------------------------------------
+    # OBS convenience properties (delegate to OBSConnectionManager)
+    # ------------------------------------------------------------------
 
-    def reconnect_obs(self, max_retries: int = 0, base_delay: float = 2.0, max_delay: float = 60.0) -> bool:
-        """Reconnect to OBS with exponential backoff.
+    @property
+    def obs_controller(self):
+        """Shortcut to the live OBSController instance."""
+        return self.obs_connection.controller
 
-        Args:
-            max_retries: Maximum retry attempts (0 = unlimited until shutdown).
-            base_delay: Starting delay in seconds between retries.
-            max_delay: Maximum delay cap in seconds.
-
-        Returns:
-            True if reconnected, False if shutdown was requested before reconnecting.
-        """
-        attempt = 0
-        delay = base_delay
-        while not self._shutdown_event.is_set():
-            attempt += 1
-            if max_retries and attempt > max_retries:
-                logger.error(f"OBS reconnect failed after {max_retries} attempts")
-                return False
-            logger.info(f"OBS reconnect attempt {attempt} (waiting {delay:.0f}s)...")
-            # Use shutdown event for interruptible sleep
-            if self._shutdown_event.wait(timeout=delay):
-                return False  # Shutdown requested
-            if self.connect_obs():
-                logger.info(f"OBS reconnected after {attempt} attempt(s)")
-                return True
-            delay = min(delay * 2, max_delay)
-        return False
+    @property
+    def obs_client(self):
+        """Shortcut to the raw OBS WebSocket client."""
+        return self.obs_connection.client
 
     def setup_platforms(self):
         """Initialize enabled streaming platforms."""
         self.platform_manager.setup(self.twitch_live_checker)
-
-    def start_rotation_session(self, manual_playlists=None) -> bool:
-        """Start a new rotation session."""
-        assert self.rotation_handler is not None, "Rotation handler not initialized"
-        
-        logger.info("Starting new rotation session...")
-
-        settings = self.config_manager.get_settings()
-        next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
-
-        # Use prepared playlists or select new ones
-        using_prepared = False
-        if self.next_prepared_playlists:
-            playlists = self.next_prepared_playlists
-            self.next_prepared_playlists = None
-            using_prepared = True
-            logger.info(f"Using prepared playlists: {[p['name'] for p in playlists]}")
-        else:
-            playlists = self.playlist_manager.select_playlists_for_rotation(manual_playlists)
-        
-        if not playlists:
-            logger.error("No playlists selected for rotation")
-            self.notification_service.notify_rotation_error("No playlists available")
-            return False
-
-        # Download if not already prepared
-        if not using_prepared:
-            logger.info(f"Downloading {len(playlists)} playlists...")
-            self.notification_service.notify_rotation_started([p['name'] for p in playlists])
-            
-            # Check for verbose yt-dlp logging
-            settings = self.config_manager.get_settings()
-            verbose_download = settings.get('yt_dlp_verbose', False)
-            
-            download_result = self.playlist_manager.download_playlists(playlists, next_folder, verbose=verbose_download)
-            total_duration_seconds = download_result.get('total_duration_seconds', 0)
-
-            if not download_result.get('success'):
-                logger.error("Failed to download all playlists")
-                self.notification_service.notify_download_warning(
-                    "Some playlists failed to download, continuing with available content"
-                )
-        else:
-            logger.info("Using pre-downloaded playlists, skipping download step")
-            total_duration_seconds = 0
-            for playlist in playlists:
-                playlist_id = playlist.get('id')
-                if playlist_id:
-                    videos = self.db.get_videos_by_playlist(playlist_id)
-                    for video in videos:
-                        total_duration_seconds += video.get('duration_seconds', 0)
-
-        # Validate and create session
-        if not self.playlist_manager.validate_downloads(next_folder):
-            logger.error("Download validation failed")
-            self.notification_service.notify_rotation_error("Download validation failed")
-            return False
-
-        playlist_names = [p['name'] for p in playlists]
-        stream_title = self.playlist_manager.generate_stream_title(playlist_names)
-        
-        logger.info(f"Total rotation duration: {total_duration_seconds}s (~{total_duration_seconds // 60} minutes)")
-
-        playlist_ids = [p['id'] for p in playlists]
-        self.current_session_id = self.db.create_rotation_session(
-            playlist_ids, stream_title,
-            total_duration_seconds=total_duration_seconds
-        )
-        # Keep temp playback handler in sync
-        if self.temp_playback_handler:
-            self.temp_playback_handler.set_session_id(self.current_session_id)
-
-        logger.info("Rotation session prepared, ready to switch")
-        return True
-
-    async def execute_content_switch(self) -> bool:
-        """Execute content switch using handler."""
-        assert self.content_switch_handler is not None, "Content switch handler not initialized"
-        assert self.stream_manager is not None, "Stream manager not initialized"
-        
-        # Safety guard: never execute content switch while temp playback is active.
-        # Temp playback streams from the pending folder — switching content would
-        # destroy the live folder and disrupt playback.
-        if self.temp_playback_handler and self.temp_playback_handler.is_active:
-            logger.error("execute_content_switch called while temp playback is active — aborting")
-            return False
-        
-        if not self.obs_controller:
-            logger.error("OBS controller not initialized")
-            return False
-
-        logger.info(f"Executing content switch")
-        self.is_rotating = True
-
-        settings = self.config_manager.get_settings()
-        current_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
-        next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
-
-        try:
-            # Prepare for switch
-            if not self.content_switch_handler.prepare_for_switch(SCENE_ROTATION_SCREEN, VLC_SOURCE_NAME):
-                logger.error("Failed to prepare for content switch")
-                self.is_rotating = False
-                return False
-
-            # Execute folder operations
-            if not self.content_switch_handler.execute_switch(
-                current_folder, next_folder
-            ):
-                self.is_rotating = False
-                return False
-
-            # Process any queued videos from downloads so they're in database before rename/category lookup
-            self._process_video_registration_queue()
-
-            # Rename videos with playlist ordering prefix (01_, 02_, etc.)
-            # so alphabetical ordering groups by playlist
-            try:
-                session = self.db.get_current_session()
-                if session:
-                    playlists_selected = session.get('playlists_selected', '')
-                    if playlists_selected:
-                        playlist_ids = json.loads(playlists_selected)
-                        playlists = self.playlist_manager.get_playlists_by_ids(playlist_ids)
-                        playlist_order = [p['name'] for p in playlists]
-                        self.playlist_manager.rename_videos_with_playlist_prefix(current_folder, playlist_order)
-            except Exception as e:
-                logger.warning(f"Failed to rename videos with prefix: {e}")
-
-            # Finalize (update VLC + switch scene)
-            target_scene = SCENE_PAUSE if self.last_stream_status == "live" else SCENE_STREAM
-            finalize_success, vlc_playlist = self.content_switch_handler.finalize_switch(
-                current_folder, VLC_SOURCE_NAME, target_scene, SCENE_STREAM, self.last_stream_status
-            )
-            if not finalize_success:
-                self.is_rotating = False
-                return False
-
-            # Initialize file lock monitor for this rotation
-            self._initialize_file_lock_monitor(current_folder)
-            
-            # Update stream title and category based on current video
-            try:
-                session = self.db.get_current_session()
-                if session:
-                    stream_title = session.get('stream_title', '')
-                    
-                    # Get category from first video in rotation
-                    category = None
-                    if self.file_lock_monitor:
-                        category = self.file_lock_monitor.get_category_for_current_video()
-                    
-                    # Fallback: get category from first playlist
-                    if not category and self.content_switch_handler:
-                        category = self.content_switch_handler.get_initial_rotation_category(
-                            current_folder, self.playlist_manager
-                        )
-                    
-                    await self.stream_manager.update_stream_info(stream_title, category)
-                    logger.info(f"Updated stream: title='{stream_title}', category='{category}'")
-            except Exception as e:
-                logger.warning(f"Failed to update stream metadata: {e}")
-
-            # If temp playback was active, the normal rotation has completed the consolidation
-            # Complete temp playback cleanup properly
-            if self.temp_playback_handler and self.temp_playback_handler.is_active:
-                await self.temp_playback_handler.cleanup_after_rotation()
-            
-            # Clean up temporary download files from the previous rotation
-            # Safe to do now that content switch is complete
-            settings = self.config_manager.get_settings()
-            pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
-            self.playlist_manager.cleanup_temp_downloads(pending_folder)
-            
-            # Notify rotation switched with playlist names
-            try:
-                session = self.db.get_current_session()
-                if session:
-                    playlists_selected = session.get('playlists_selected', '')
-                    if playlists_selected:
-                        pids = json.loads(playlists_selected)
-                        pls = self.playlist_manager.get_playlists_by_ids(pids)
-                        self.notification_service.notify_rotation_switched([p['name'] for p in pls])
-            except Exception:
-                pass  # Non-critical
-            
-            self.is_rotating = False
-            logger.info("Content switch completed successfully")
-            return True
-
-        except Exception as e:
-            logger.error(f"Content switch failed: {e}", exc_info=True)
-            self.is_rotating = False
-            return False
 
     def _initialize_file_lock_monitor(self, video_folder: Optional[str] = None):
         """Initialize file lock monitor for current rotation.
@@ -490,7 +287,7 @@ class AutomationController:
             return
         
         # Ensure any pending video registrations are in DB first
-        self._process_video_registration_queue()
+        self.download_manager.process_video_registration_queue()
         
         category = self.file_lock_monitor.get_category_for_current_video()
         if category:
@@ -620,130 +417,8 @@ class AutomationController:
             self.file_lock_monitor.clear_vlc_refresh_flag()
             self.file_lock_monitor._all_content_consumed = True
 
-    async def _trigger_next_rotation_async(self) -> None:
-        """Trigger next rotation selection and background download.
-        
-        Called when temp playback exits to immediately prepare the next rotation
-        instead of waiting for the current rotation to finish playing.
-        """
-        try:
-            # Select the next 2 playlists for rotation
-            # The selector automatically excludes currently playing and preparing playlists
-            next_playlists = self.playlist_manager.select_playlists_for_rotation()
-            
-            if next_playlists:
-                logger.info(f"Auto-triggered next rotation selection after temp playback: {[p['name'] for p in next_playlists]}")
-                
-                # Mark downloads triggered so check_for_rotation() doesn't also trigger them
-                self._downloads_triggered_this_rotation = True
-                self._background_download_in_progress = True
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, next_playlists)
-            else:
-                logger.warning("Failed to auto-select next rotation after temp playback")
-        except Exception as e:
-            logger.error(f"Error triggering next rotation after temp playback exit: {e}")
-    
-    def _sync_background_download_next_rotation(self, playlists):
-        """Synchronous wrapper for executor.
-        
-        NOTE: This runs in a background thread and must NOT call database methods directly
-        due to SQLite's thread safety requirements. Instead, set flags that the main thread
-        will process.
-        """
-        try:
-            logger.info(f"Downloading next rotation in thread: {[p['name'] for p in playlists]}")
-            settings = self.config_manager.get_settings()
-            next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
-            
-            # Queue database initialization to be done in main thread
-            self._pending_db_playlists_to_initialize = [p['name'] for p in playlists]
-            
-            # Check for verbose yt-dlp logging
-            verbose_download = settings.get('yt_dlp_verbose', False)
-            
-            download_result = self.playlist_manager.download_playlists(playlists, next_folder, verbose=verbose_download)
-            
-            if download_result.get('success'):
-                self.next_prepared_playlists = playlists
-                logger.info(f"Background download completed: {[p['name'] for p in playlists]}")
-                
-                # Queue database status update to be done in main thread
-                self._pending_db_playlists_to_complete = [p['name'] for p in playlists]
-                
-                self.notification_service.notify_next_rotation_ready([p['name'] for p in playlists])
-            else:
-                logger.warning("Background download had failures")
-                self.notification_service.notify_background_download_warning()
-        except Exception as e:
-            logger.error(f"Background download error: {e}")
-            self.notification_service.notify_background_download_error(str(e))
-        finally:
-            # Clear flag when download completes (success or failure)
-            self._background_download_in_progress = False
-
-    def _process_video_registration_queue(self):
-        """Process pending videos from background download registration queue.
-        
-        This method runs in the main thread and safely registers queued videos
-        that were discovered by background download threads.
-        """
-        if not self.video_registration_queue.has_pending_videos():
-            return
-        
-        pending_videos = self.video_registration_queue.get_pending_videos()
-        if not pending_videos:
-            return
-        
-        logger.info(f"Processing {len(pending_videos)} queued videos for database registration")
-        
-        registered_count = 0
-        total_duration = 0
-        
-        for video_data in pending_videos:
-            try:
-                self.db.add_video(
-                    video_data['playlist_id'],
-                    video_data['filename'],
-                    title=video_data['title'],
-                    duration_seconds=video_data['duration_seconds'],
-                    file_size_mb=video_data['file_size_mb'],
-                    playlist_name=video_data.get('playlist_name')
-                )
-                registered_count += 1
-                total_duration += video_data['duration_seconds']
-                logger.debug(f"Registered queued video: {video_data['filename']} ({video_data['duration_seconds']}s)")
-            except Exception as e:
-                # Check if it's a duplicate constraint error
-                if "UNIQUE constraint failed" in str(e) or "already exists" in str(e):
-                    logger.debug(f"Video already exists in database: {video_data['filename']}, skipping")
-                else:
-                    logger.error(f"Error registering queued video {video_data['filename']}: {e}")
-        
-        if registered_count > 0:
-            logger.info(f"Registered {registered_count} queued videos from background download, total: {total_duration}s")
-
-    def _process_pending_database_operations(self):
-        """Process database operations queued by background download thread.
-        
-        This method runs in the main thread and safely applies database changes
-        that were set as flags by the background download thread (which cannot
-        directly access the database due to SQLite thread safety).
-        """
-        # Initialize next_playlists if background thread queued it
-        if self._pending_db_playlists_to_initialize is not None and self.current_session_id:
-            self.db.initialize_next_playlists(self.current_session_id, self._pending_db_playlists_to_initialize)
-            self._pending_db_playlists_to_initialize = None
-        
-        # Mark playlists as COMPLETED if background thread queued it
-        if self._pending_db_playlists_to_complete is not None and self.current_session_id:
-            self.db.complete_next_playlists(self.current_session_id, self._pending_db_playlists_to_complete)
-            self._pending_db_playlists_to_complete = None
-
     async def check_for_rotation(self):
         """Check if rotation is needed and handle it."""
-        assert self.rotation_handler is not None, "Rotation handler not initialized"
-        
         if self.is_rotating:
             return
 
@@ -792,20 +467,11 @@ class AutomationController:
         pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
         temp_active = self.temp_playback_handler is not None and self.temp_playback_handler.is_active
         if (not temp_active and
-            not self._downloads_triggered_this_rotation and 
+            not self.download_manager.downloads_triggered_this_rotation and 
             self.playlist_manager.is_folder_empty(pending_folder) and 
-            not self._background_download_in_progress and
+            not self.download_manager.background_download_in_progress and
             not self._just_resumed_session):
-            
-            playlists = self.rotation_handler.trigger_background_download(
-                self.next_prepared_playlists, self._background_download_in_progress
-            )
-            if playlists:
-                self._downloads_triggered_this_rotation = True
-                self._background_download_in_progress = True
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, playlists)
-                logger.debug("Download triggered (pending folder empty)")
+            self.download_manager.maybe_start_background_download(self.next_prepared_playlists)
         
         # Clear the resume flag after first loop iteration
         if self._just_resumed_session:
@@ -855,7 +521,7 @@ class AutomationController:
         should_rotate = False
         if all_consumed and not temp_active:
             # Only rotate on pending content if no background download is in progress
-            pending_content_ready = has_pending_content and not self._background_download_in_progress
+            pending_content_ready = has_pending_content and not self.download_manager.background_download_in_progress
             should_rotate = self.next_prepared_playlists or pending_content_ready
         
         if should_rotate:
@@ -864,219 +530,8 @@ class AutomationController:
             else:
                 logger.info("All content consumed and pending content exists - triggering rotation (prepared from previous run)")
             
-            await self._handle_normal_rotation()
+            await self.rotation_manager.handle_normal_rotation()
             return
-
-    async def _handle_normal_rotation(self):
-        """Handle normal rotation completion."""
-        # Don't rotate if stream is live
-        if self.last_stream_status == "live":
-            if not self._rotation_postpone_logged:
-                logger.info("Stream is live, postponing rotation until stream goes offline")
-                self._rotation_postpone_logged = True
-            return
-
-        if self.current_session_id:
-            # Before ending session, get the current playlist info for audit trail
-            session = self.db.get_current_session()
-            current_playlist_names = []
-            
-            if session:
-                try:
-                    playlists_selected = session.get('playlists_selected', '')
-                    if playlists_selected:
-                        playlist_ids = json.loads(playlists_selected)
-                        playlists = self.playlist_manager.get_playlists_by_ids(playlist_ids)
-                        if playlists:
-                            current_playlist_names = [p['name'] for p in playlists]
-                            # Record what was just played
-                            self.db.set_current_playlists(self.current_session_id, current_playlist_names)
-                            logger.info(f"Recorded current playlists: {current_playlist_names}")
-                except Exception as e:
-                    logger.warning(f"Failed to record current playlists: {e}")
-            
-            self.db.end_session(self.current_session_id)
-
-        if self.start_rotation_session():
-            # Record the new playlists being prepared
-            try:
-                session = self.db.get_current_session()
-                if session and self.next_prepared_playlists:
-                    next_playlist_names = [p['name'] for p in self.next_prepared_playlists]
-                    self.db.set_next_playlists(session['id'], next_playlist_names)
-                    logger.info(f"Recorded next playlists for session {session['id']}: {next_playlist_names}")
-            except Exception as e:
-                logger.warning(f"Failed to record next playlists: {e}")
-            
-            # Reset download flag when starting new rotation
-            self._downloads_triggered_this_rotation = False
-            self._background_download_in_progress = False
-            await self.execute_content_switch()
-
-    async def _auto_resume_pending_downloads(self, session_id: int, pending_playlists: list, status_dict: dict) -> None:
-        """Auto-resume interrupted playlist downloads on startup.
-        
-        When a session resumes with PENDING playlists, automatically trigger their
-        downloads immediately instead of waiting for the next rotation trigger.
-        Uses yt-dlp's built-in --continue flag to resume from partial downloads.
-        
-        Args:
-            session_id: Database session ID
-            pending_playlists: List of playlist names with PENDING status
-            status_dict: Dictionary mapping playlist names to their status
-        """
-        try:
-            settings = self.config_manager.get_settings()
-            next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
-            
-            # Ensure folder exists
-            os.makedirs(next_folder, exist_ok=True)
-            
-            # Get playlist objects from database with IDs
-            playlist_objects = self.db.get_playlists_with_ids_by_names(pending_playlists)
-            if not playlist_objects:
-                logger.warning(f"Could not fetch playlist objects for auto-resume: {pending_playlists}")
-                return
-            
-            logger.info(f"Auto-resuming {len(playlist_objects)} interrupted playlist downloads on startup")
-            
-            # Trigger downloads in background thread (non-blocking)
-            def resume_downloads():
-                try:
-                    # Download playlists with --continue flag (enabled by default in yt-dlp)
-                    # and --write-info-json for metadata-aware resumption
-                    verbose_download = settings.get('yt_dlp_verbose', False)
-                    result = self.playlist_manager.download_playlists(playlist_objects, next_folder, verbose=verbose_download)
-                    
-                    if result.get('success'):
-                        logger.info(f"Auto-resumed downloads completed for: {pending_playlists}")
-                        # Update status for completed playlists
-                        for playlist in pending_playlists:
-                            self.db.update_playlist_status(session_id, playlist, "COMPLETED")
-                        # Signal that background downloads are complete
-                        self._background_download_in_progress = False
-                    else:
-                        logger.warning(f"Auto-resumed downloads had failures for: {pending_playlists}")
-                        self.notification_service.notify_background_download_warning()
-                        # Still mark as complete even if there were failures, so we don't get stuck
-                        self._background_download_in_progress = False
-                except Exception as e:
-                    logger.error(f"Error during auto-resume of downloads: {e}")
-                    self.notification_service.notify_background_download_error(str(e))
-                    # Still mark as complete on error so we don't get stuck
-                    self._background_download_in_progress = False
-            
-            # Run in background thread
-            self._background_download_in_progress = True
-            loop = asyncio.get_event_loop()
-            loop.run_in_executor(self.executor, resume_downloads)
-            logger.info("Auto-resume background task started")
-            
-        except Exception as e:
-            logger.error(f"Failed to initiate auto-resume of pending downloads: {e}")
-
-    async def _resume_existing_session(self, session: dict, settings: dict):
-        """Resume an existing session on startup (including crash recovery).
-
-        Handles temp-playback restoration, prepared-playlist validation,
-        playback position recovery, and stream-title restoration.
-        """
-        self.current_session_id = session['id']
-        if self.temp_playback_handler:
-            self.temp_playback_handler.set_session_id(self.current_session_id)
-        logger.info(f"Resuming session {self.current_session_id}")
-
-        # Notify crash recovery / session resume
-        saved_video = session.get('playback_current_video')
-        saved_cursor = session.get('playback_cursor_ms', 0)
-        self.notification_service.notify_session_resumed(
-            self.current_session_id,
-            video=saved_video,
-            cursor_s=(saved_cursor / 1000) if saved_cursor else None
-        )
-
-        # Check for temp playback state that needs to be restored (crash recovery)
-        temp_state = self.db.get_temp_playback_state(session['id'])
-        temp_playback_restored = False
-        if temp_state and temp_state.get('active') and self.temp_playback_handler:
-            logger.info("Detected interrupted temp playback session, attempting recovery...")
-            restored = await self.temp_playback_handler.restore(session, temp_state)
-            if restored:
-                logger.info("Successfully restored temp playback state")
-                temp_playback_restored = True
-                pending_folder = temp_state.get('folder')
-                if pending_folder:
-                    self._initialize_file_lock_monitor(pending_folder)
-                    if self.file_lock_monitor:
-                        self.file_lock_monitor.set_temp_playback_mode(True)
-            else:
-                logger.warning("Failed to restore temp playback, continuing with normal session resume")
-                self.db.clear_temp_playback_state(session['id'])
-
-        if temp_playback_restored:
-            # Temp playback owns the pending folder — prevent check_for_rotation
-            # from starting new downloads into it while temp playback is active.
-            self._downloads_triggered_this_rotation = True
-            return
-
-        # Normal session resume
-        self._downloads_triggered_this_rotation = False
-        self._just_resumed_session = True
-
-        # Restore prepared playlists from database
-        await self._restore_prepared_playlists(session, settings)
-
-        if session.get('stream_title'):
-            assert self.stream_manager is not None, "Stream manager not initialized"
-            await self.stream_manager.update_title(session['stream_title'])
-
-        self._initialize_file_lock_monitor()
-        await self._update_category_for_current_video()
-
-        # Restore playback position from crash recovery
-        saved_video = session.get('playback_current_video')
-        saved_cursor = session.get('playback_cursor_ms', 0)
-        if saved_video and saved_cursor and saved_cursor > 0:
-            if (self.file_lock_monitor and
-                self.file_lock_monitor.current_video_original_name == saved_video):
-                self._pending_seek_ms = saved_cursor
-                self._pending_seek_video = saved_video
-                logger.info(f"Pending resume: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s) — waiting for VLC to start")
-            else:
-                logger.debug(f"Saved video '{saved_video}' no longer current, starting from beginning")
-
-    async def _restore_prepared_playlists(self, session: dict, settings: dict):
-        """Restore prepared playlists from database on session resume."""
-        next_playlists = session.get('next_playlists')
-        next_playlists_status = session.get('next_playlists_status')
-
-        if not next_playlists:
-            return
-
-        try:
-            playlist_list = DatabaseManager.parse_json_field(next_playlists, [])
-            status_dict: dict = DatabaseManager.parse_json_field(next_playlists_status, {})
-            all_completed = all(status_dict.get(pl) == "COMPLETED" for pl in playlist_list)
-
-            if all_completed:
-                next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
-                files_exist = self.db.validate_prepared_playlists_exist(session['id'], next_folder)
-
-                if files_exist:
-                    playlist_objects = self.db.get_playlists_with_ids_by_names(playlist_list)
-                    if playlist_objects:
-                        self.next_prepared_playlists = playlist_objects
-                        logger.info(f"Restored prepared playlists from database: {playlist_list}")
-                    else:
-                        logger.warning(f"Could not fetch playlist objects for: {playlist_list}")
-                else:
-                    logger.warning(f"Prepared playlist files missing from pending folder, clearing: {playlist_list}")
-                    self.db.set_next_playlists(session['id'], [])
-            else:
-                logger.info(f"Prepared playlists not fully downloaded, auto-resuming downloads now: {status_dict}")
-                await self._auto_resume_pending_downloads(session['id'], playlist_list, status_dict)
-        except Exception as e:
-            logger.error(f"Failed to restore prepared playlists: {e}")
 
     def _check_live_status(self, debug_mode: bool) -> None:
         """Check if the streamer is live and toggle pause/stream scenes accordingly."""
@@ -1160,13 +615,9 @@ class AutomationController:
                 except Exception as e:
                     logger.debug(f"Async platform close warning (non-critical): {e}")
 
-        if self.obs_client:
-            self.obs_client.disconnect()
+        self.obs_connection.disconnect()
 
-        self.executor.shutdown(wait=False, cancel_futures=True)
-        if self._background_download_in_progress:
-            logger.info("Waiting up to 5s for download thread to notice shutdown...")
-            self._shutdown_event.wait(5)
+        self.download_manager.shutdown()
 
         logger.info("Thread executor shutdown complete")
         self.db.close()
@@ -1177,7 +628,7 @@ class AutomationController:
         logger.info("Starting 24/7 Stream Automation")
 
         # Connect and initialize
-        if not self.connect_obs():
+        if not self.obs_connection.connect():
             logger.error("Cannot start without OBS connection")
             return
 
@@ -1211,8 +662,8 @@ class AutomationController:
 
         if not session:
             logger.info("No active session, starting initial rotation")
-            if self.start_rotation_session():
-                await self.execute_content_switch()
+            if self.rotation_manager.start_session():
+                await self.rotation_manager.execute_content_switch()
         elif not os.path.exists(video_folder) or not os.listdir(video_folder):
             logger.warning(f"Video folder empty/missing: {video_folder}")
             # Before starting fresh, check if session has completed prepared
@@ -1247,10 +698,10 @@ class AutomationController:
                     logger.warning(f"Failed to check pending playlists: {e}")
             if session.get('id'):
                 self.db.end_session(session['id'])
-            if self.start_rotation_session():
-                await self.execute_content_switch()
+            if self.rotation_manager.start_session():
+                await self.rotation_manager.execute_content_switch()
         else:
-            await self._resume_existing_session(session, settings)
+            await self.rotation_manager.resume_existing_session(session, settings)
 
         # Main loop
         loop_count = 0
@@ -1268,8 +719,8 @@ class AutomationController:
                 if loop_count % 60 == 0 or debug_mode_changed:
                     self._check_live_status(debug_mode)
 
-                self._process_video_registration_queue()
-                self._process_pending_database_operations()
+                self.download_manager.process_video_registration_queue()
+                self.download_manager.process_pending_database_operations()
                 self._tick_save_playback()
 
                 # Proactive OBS health check — detect disconnect even though
@@ -1277,7 +728,7 @@ class AutomationController:
                 if self.obs_controller and not self.obs_controller.is_connected:
                     logger.warning("OBS connection lost (detected via health check)")
                     self.notification_service.notify_automation_error("OBS disconnected, attempting reconnect...")
-                    if self.reconnect_obs():
+                    if self.obs_connection.reconnect():
                         self._reinitialize_after_obs_reconnect()
                         logger.info("OBS reconnected, handlers re-initialized")
                         continue
@@ -1309,7 +760,7 @@ class AutomationController:
                 if any(hint in error_msg.lower() for hint in ('websocket', 'connection', 'socket', 'connect')):
                     logger.warning(f"OBS connection lost: {e}")
                     self.notification_service.notify_automation_error(f"OBS disconnected: {error_msg}")
-                    if self.reconnect_obs():
+                    if self.obs_connection.reconnect():
                         self._reinitialize_after_obs_reconnect()
                         logger.info("OBS reconnected, handlers re-initialized")
                         continue
