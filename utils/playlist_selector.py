@@ -9,6 +9,8 @@ from typing import List, Dict, Optional
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 
+from config.constants import DEFAULT_MIN_PLAYLISTS, DEFAULT_MAX_PLAYLISTS
+
 logger = logging.getLogger(__name__)
 
 
@@ -131,8 +133,8 @@ class PlaylistSelector:
             excluded_names = set()
         
         settings = self.config.get_settings()
-        min_playlists = settings.get('min_playlists_per_rotation', 2)
-        max_playlists = settings.get('max_playlists_per_rotation', 4)
+        min_playlists = settings.get('min_playlists_per_rotation', DEFAULT_MIN_PLAYLISTS)
+        max_playlists = settings.get('max_playlists_per_rotation', DEFAULT_MAX_PLAYLISTS)
 
         all_playlists = self.db.get_enabled_playlists()
         

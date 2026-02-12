@@ -28,7 +28,12 @@ from services.twitch_live_checker import TwitchLiveChecker
 from handlers.content_switch_handler import ContentSwitchHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
-from config.constants import DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER, DEFAULT_PAUSE_IMAGE, DEFAULT_ROTATION_IMAGE
+from config.constants import (
+    DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER,
+    DEFAULT_PAUSE_IMAGE, DEFAULT_ROTATION_IMAGE,
+    DEFAULT_SCENE_PAUSE, DEFAULT_SCENE_STREAM,
+    DEFAULT_SCENE_ROTATION_SCREEN, DEFAULT_VLC_SOURCE_NAME,
+)
 
 # Load environment variables
 load_dotenv()
@@ -39,10 +44,10 @@ logger = logging.getLogger(__name__)
 OBS_HOST = os.getenv("OBS_HOST", "127.0.0.1")
 OBS_PORT = int(os.getenv("OBS_PORT", 4455))
 OBS_PASSWORD = os.getenv("OBS_PASSWORD", "")
-SCENE_PAUSE = os.getenv("SCENE_PAUSE", os.getenv("SCENE_LIVE", "OSR Pause screen"))
-SCENE_STREAM = os.getenv("SCENE_STREAM", os.getenv("SCENE_OFFLINE", "OSR Stream"))
-SCENE_ROTATION_SCREEN = os.getenv("SCENE_ROTATION_SCREEN", "OSR Rotation screen")
-VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", "OSR Playlist")
+SCENE_PAUSE = os.getenv("SCENE_PAUSE", os.getenv("SCENE_LIVE", DEFAULT_SCENE_PAUSE))
+SCENE_STREAM = os.getenv("SCENE_STREAM", os.getenv("SCENE_OFFLINE", DEFAULT_SCENE_STREAM))
+SCENE_ROTATION_SCREEN = os.getenv("SCENE_ROTATION_SCREEN", DEFAULT_SCENE_ROTATION_SCREEN)
+VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", DEFAULT_VLC_SOURCE_NAME)
 
 # Twitch Configuration (used for live checker)
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")

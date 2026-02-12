@@ -11,17 +11,6 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Kick Platform
 KICK_FALLBACK_CATEGORY_ID = 15  # "Just Chatting" category ID on Kick
 
-# API Timeouts (seconds)
-API_TIMEOUT_GENERAL = 10
-API_TIMEOUT_DOWNLOAD = 3600  # 1 hour for yt-dlp downloads
-
-# Check Intervals (seconds)
-CHECK_INTERVAL_MAIN_LOOP = 1  # Main loop responsiveness
-CHECK_INTERVAL_TWITCH_API = 60  # Twitch live status checks
-
-# Playback Skip Detection
-SKIP_DETECTION_MARGIN_MS = 5000  # 5 second margin for VLC/OBS reporting variations
-
 # Video File Extensions
 VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
 
@@ -36,7 +25,7 @@ DEFAULT_ROTATION_IMAGE = os.path.join(_PROJECT_ROOT, 'content', 'rotation', 'def
 DEFAULT_SCENE_PAUSE = "OSR Pause screen"
 DEFAULT_SCENE_STREAM = "OSR Stream"
 DEFAULT_SCENE_ROTATION_SCREEN = "OSR Rotation screen"
-DEFAULT_VLC_SOURCE_NAME = "Playlist"
+DEFAULT_VLC_SOURCE_NAME = "OSR Playlist"
 
 # Playlist Constraints
 DEFAULT_MIN_PLAYLISTS = 2
