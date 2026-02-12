@@ -342,7 +342,7 @@ class TempPlaybackHandler:
                         logger.info(f"Resuming {len(pending_playlists)} pending downloads after temp playback restore")
                         if self._auto_resume_downloads_callback:
                             await self._auto_resume_downloads_callback(
-                                self.current_session_id, pending_playlists, status_dict
+                                self.current_session_id, pending_playlists
                             )
                     else:
                         logger.info("All playlists already downloaded (no PENDING status found)")
@@ -463,6 +463,9 @@ class TempPlaybackHandler:
                         if playlist_objects:
                             playlist_ids = [p['id'] for p in playlist_objects]
                             self.db.update_session_playlists_selected(self.current_session_id, playlist_ids)
+                            # Mark playlists as played so the selector rotates through them
+                            for pid in playlist_ids:
+                                self.db.update_playlist_played(pid)
                             logger.info(f"Updated playlists_selected to match temp playback content: {next_playlist_names}")
                 except Exception as e:
                     logger.warning(f"Failed to update playlists_selected after temp playback exit: {e}")

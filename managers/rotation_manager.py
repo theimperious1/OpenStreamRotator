@@ -225,13 +225,15 @@ class RotationManager:
             pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
             ctrl.playlist_manager.cleanup_temp_downloads(pending_folder)
 
-            # Notify rotation switched with playlist names
+            # Mark playlists as played so the selector rotates through them
             try:
                 session = ctrl.db.get_current_session()
                 if session:
                     playlists_selected = session.get('playlists_selected', '')
                     if playlists_selected:
                         pids = json.loads(playlists_selected)
+                        for pid in pids:
+                            ctrl.db.update_playlist_played(pid)
                         pls = ctrl.playlist_manager.get_playlists_by_ids(pids)
                         ctrl.notification_service.notify_rotation_switched([p['name'] for p in pls])
             except Exception:

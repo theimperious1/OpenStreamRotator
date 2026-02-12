@@ -17,8 +17,10 @@ class ConfigManager:
         config_dir = os.path.dirname(os.path.abspath(__file__))
         self.config_path = config_path or os.path.join(config_dir, "playlists.json")
         self.settings_path = settings_path or os.path.join(config_dir, "settings.json")
-        self.last_config_mtime: float = 0
-        self.last_settings_mtime: float = 0
+        # Seed with actual mtimes so the first has_config_changed() call
+        # doesn't spuriously report a change on startup.
+        self.last_config_mtime: float = self._safe_mtime(self.config_path)
+        self.last_settings_mtime: float = self._safe_mtime(self.settings_path)
         # Mtime-based caches — re-read only when file changes on disk
         self._cached_settings: Optional[Dict] = None
         self._cached_playlists: Optional[List[Dict]] = None
@@ -187,3 +189,12 @@ class ConfigManager:
             return False
 
         return True
+    
+    @staticmethod
+    def _safe_mtime(path: str) -> float:
+        """Return the file's mtime, or 0 if it doesn't exist yet."""
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0
+        
