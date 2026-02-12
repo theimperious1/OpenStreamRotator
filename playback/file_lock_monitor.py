@@ -55,11 +55,12 @@ class FileLockMonitor:
     """
 
     def __init__(self, db: 'DatabaseManager', obs_controller: 'OBSController', vlc_source_name: str,
-                 config: Optional['ConfigManager'] = None):
+                 config: Optional['ConfigManager'] = None, scene_stream: str = "OSR Stream"):
         self.db = db
         self.obs_controller = obs_controller
         self.vlc_source_name = vlc_source_name
         self.config = config
+        self.scene_stream = scene_stream
         
         self.video_folder: str = ""
         self._current_video: Optional[str] = None  # Filename of currently playing video
@@ -134,6 +135,8 @@ class FileLockMonitor:
             enabled: Whether temp playback is active
         """
         self._temp_playback_mode = enabled
+        # Clear stale debounce state to prevent false transitions from old data
+        self._pending_transition_file = None
         logger.info(f"File lock monitor temp playback mode: {'enabled' if enabled else 'disabled'}")
 
     @property
@@ -198,6 +201,15 @@ class FileLockMonitor:
         # the connection is restored by the main-loop reconnect logic.
         if self.obs_controller and not self.obs_controller.is_connected:
             return result
+
+        # If we're not on the stream scene (pause screen, manual switch, etc.),
+        # skip all transition detection and deletion.  VLC keeps playing in the
+        # background, so when we return to the stream scene monitoring resumes
+        # with whatever VLC is currently on.
+        if self.obs_controller:
+            current_scene = self.obs_controller.get_current_scene()
+            if current_scene and current_scene != self.scene_stream:
+                return result
         
         if not self._current_video:
             # No current video tracked - try to find one
@@ -235,9 +247,37 @@ class FileLockMonitor:
                 return result
             return self._check_last_video(result)
         
+        # Already signaled for VLC refresh — wait for controller to handle it
+        if self._needs_vlc_refresh:
+            return result
+        
         # --- Normal handling: check if current file's lock has been freed ---
         if is_file_locked(filepath):
-            # Still playing, no transition
+            # Still playing, no transition.
+            # In temp playback mode, VLC may have fewer files in its playlist
+            # than what's on disk (new downloads arrived after VLC was loaded).
+            # If VLC's cursor is near the end and the file is still locked,
+            # VLC is looping its last known video — signal a VLC refresh so
+            # the new files get picked up at this natural transition point.
+            if self._temp_playback_mode and self.obs_controller:
+                media_status = self.obs_controller.get_media_input_status(self.vlc_source_name)
+                if media_status:
+                    cursor_ms = media_status.get('media_cursor')
+                    duration_ms = media_status.get('media_duration')
+                    if (cursor_ms is not None and duration_ms is not None
+                            and duration_ms > 0 and (duration_ms - cursor_ms) <= 1500):
+                        previous_original = strip_ordering_prefix(self._current_video) if self._current_video else None
+                        logger.info(
+                            f"Temp playback: VLC looping video near end while file locked — "
+                            f"signaling VLC refresh: {previous_original} "
+                            f"(cursor={cursor_ms}ms, duration={duration_ms}ms)"
+                        )
+                        self._needs_vlc_refresh = True
+                        result['transition'] = True
+                        result['previous_video'] = previous_original
+                        result['current_video'] = None
+                        return result
+
             self._pending_transition_file = None
             return result
         

@@ -53,10 +53,10 @@ cp .env.example .env
 | `OBS_HOST` | No | `localhost` | OBS WebSocket host |
 | `OBS_PORT` | No | `4455` | OBS WebSocket port |
 | `OBS_PASSWORD` | Yes | — | OBS WebSocket password |
-| `SCENE_PAUSE` | No | `Pause screen` | OBS scene shown when target streamer is live (pauses 24/7 content) |
-| `SCENE_STREAM` | No | `Stream` | OBS scene for normal 24/7 playback |
-| `SCENE_ROTATION_SCREEN` | No | `Rotation screen` | OBS scene shown during rotation transitions |
-| `VLC_SOURCE_NAME` | No | `Playlist` | Name of the VLC media source in OBS |
+| `SCENE_PAUSE` | No | `OSR Pause screen` | OBS scene shown when target streamer is live (pauses 24/7 content) |
+| `SCENE_STREAM` | No | `OSR Stream` | OBS scene for normal 24/7 playback |
+| `SCENE_ROTATION_SCREEN` | No | `OSR Rotation screen` | OBS scene shown during rotation transitions |
+| `VLC_SOURCE_NAME` | No | `OSR Playlist` | Name of the VLC media source in OBS |
 | `DISCORD_WEBHOOK_URL` | No | — | Discord webhook for notifications |
 | `VIDEO_FOLDER` | No | `content/live/` | Path to the live playback folder (VLC reads from here) |
 | `NEXT_ROTATION_FOLDER` | No | `content/pending/` | Path to the pending/download folder |
@@ -167,19 +167,25 @@ Want to stop a playlist from being selected in future rotations? Open `config/pl
 
 ## OBS Setup
 
-You need **three scenes** and one **VLC media source**:
+On first startup, the system automatically creates any missing scenes and sources in OBS:
+
+- **`OSR Stream`** — with a VLC Video Source named `Playlist` pointing to your video folder
+- **`OSR Pause screen`** — with an Image source pointing to `content/pause/default.png`
+- **`OSR Rotation screen`** — with an Image source pointing to `content/rotation/default.png`
+
+All sources are automatically sized to fill the canvas. You can replace the default images with your own, add overlays, or customize the scenes in OBS as needed.
 
 ### Scenes
 
-1. **`Stream`** (default name, configurable via `SCENE_STREAM`) — The main playback scene. Should contain your VLC media source and any overlays. This is what viewers see during normal 24/7 operation.
-2. **`Pause screen`** (default name, configurable via `SCENE_PAUSE`) — Shown when the target streamer goes live. Typically a static image telling viewers the main stream is live.
-3. **`Rotation screen`** (default name, configurable via `SCENE_ROTATION_SCREEN`) — Brief transition scene shown while content folders are being swapped. Can be a loading animation or static image.
+1. **`OSR Stream`** (default name, configurable via `SCENE_STREAM`) — The main playback scene. Contains your VLC media source and any overlays. This is what viewers see during normal 24/7 operation.
+2. **`OSR Pause screen`** (default name, configurable via `SCENE_PAUSE`) — Shown when the target streamer goes live. Typically a static image telling viewers the main stream is live.
+3. **`OSR Rotation screen`** (default name, configurable via `SCENE_ROTATION_SCREEN`) — Brief transition scene shown while content folders are being swapped. Can be a loading animation or static image.
 
 ### VLC Media Source
 
-Add a **VLC Video Source** (not a regular Media Source) named **`Playlist`** (configurable via `VLC_SOURCE_NAME`) to your `Stream` scene with these settings:
+The VLC source is created automatically inside the `OSR Stream` scene. If you need to configure it manually, add a **VLC Video Source** (not a regular Media Source) named **`OSR Playlist`** (configurable via `VLC_SOURCE_NAME`) to your stream scene with these settings:
 
-- **Playlist directory**: Point it to your `VIDEO_FOLDER` path from `.env`
+- **Playlist directory**: Point it to your `VIDEO_FOLDER` path
 - **Loop**: Enabled (the system handles advancement by deleting played files; loop ensures VLC keeps playing)
 - **Shuffle**: Disabled (the system controls ordering via filename prefixes)
 
@@ -219,7 +225,7 @@ python main.py
 
 The system will:
 1. Connect to OBS via WebSocket
-2. Verify all required scenes and sources exist
+2. Create any missing scenes and sources in OBS (or verify existing ones)
 3. Sync playlist configuration to the database
 4. Resume any interrupted session or start a new rotation
 5. Begin the main automation loop

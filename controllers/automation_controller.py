@@ -24,7 +24,7 @@ from handlers.rotation_handler import RotationHandler
 from handlers.content_switch_handler import ContentSwitchHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
-from config.constants import DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER
+from config.constants import DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER, DEFAULT_PAUSE_IMAGE, DEFAULT_ROTATION_IMAGE
 
 # Load environment variables
 load_dotenv()
@@ -35,10 +35,10 @@ logger = logging.getLogger(__name__)
 OBS_HOST = os.getenv("OBS_HOST", "127.0.0.1")
 OBS_PORT = int(os.getenv("OBS_PORT", 4455))
 OBS_PASSWORD = os.getenv("OBS_PASSWORD", "")
-SCENE_PAUSE = os.getenv("SCENE_PAUSE", os.getenv("SCENE_LIVE", "Pause screen"))
-SCENE_STREAM = os.getenv("SCENE_STREAM", os.getenv("SCENE_OFFLINE", "Stream"))
-SCENE_ROTATION_SCREEN = os.getenv("SCENE_ROTATION_SCREEN", "Rotation screen")
-VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", "Playlist")
+SCENE_PAUSE = os.getenv("SCENE_PAUSE", os.getenv("SCENE_LIVE", "OSR Pause screen"))
+SCENE_STREAM = os.getenv("SCENE_STREAM", os.getenv("SCENE_OFFLINE", "OSR Stream"))
+SCENE_ROTATION_SCREEN = os.getenv("SCENE_ROTATION_SCREEN", "OSR Rotation screen")
+VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", "OSR Playlist")
 
 # Twitch Configuration (used for live checker)
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
@@ -154,6 +154,46 @@ class AutomationController:
         )
         
         logger.info("Handlers initialized successfully")
+
+    def _reinitialize_after_obs_reconnect(self):
+        """Re-initialize handlers after OBS reconnect, preserving temp playback state.
+        
+        When OBS disconnects and reconnects, we need new handler instances that
+        reference the fresh OBS controller.  However, if temp playback was active,
+        the new TempPlaybackHandler must inherit the active state — otherwise the
+        system loses track of temp playback and may corrupt the pending folder.
+        """
+        # Capture temp playback state before handlers are replaced
+        temp_was_active = (
+            self.temp_playback_handler is not None
+            and self.temp_playback_handler.is_active
+        )
+        temp_session_id = (
+            self.temp_playback_handler.current_session_id
+            if temp_was_active and self.temp_playback_handler else None
+        )
+
+        # Capture file lock monitor temp mode
+        monitor_was_temp = (
+            self.file_lock_monitor is not None
+            and self.file_lock_monitor._temp_playback_mode
+        )
+
+        self._initialize_handlers()
+
+        # Restore temp playback state on the new handler instance
+        if temp_was_active and self.temp_playback_handler:
+            self.temp_playback_handler._active = True
+            if temp_session_id is not None:
+                self.temp_playback_handler.set_session_id(temp_session_id)
+            logger.info("Preserved temp playback active state across OBS reconnect")
+
+        self._initialize_file_lock_monitor()
+
+        # Restore temp mode on the new file lock monitor
+        if monitor_was_temp and self.file_lock_monitor:
+            self.file_lock_monitor.set_temp_playback_mode(True)
+            logger.info("Preserved file lock monitor temp playback mode across OBS reconnect")
 
     def save_playback_on_exit(self):
         """Save current state when program exits."""
@@ -302,6 +342,13 @@ class AutomationController:
         assert self.content_switch_handler is not None, "Content switch handler not initialized"
         assert self.stream_manager is not None, "Stream manager not initialized"
         
+        # Safety guard: never execute content switch while temp playback is active.
+        # Temp playback streams from the pending folder — switching content would
+        # destroy the live folder and disrupt playback.
+        if self.temp_playback_handler and self.temp_playback_handler.is_active:
+            logger.error("execute_content_switch called while temp playback is active — aborting")
+            return False
+        
         if not self.obs_controller:
             logger.error("OBS controller not initialized")
             return False
@@ -426,7 +473,7 @@ class AutomationController:
         if self.file_lock_monitor is None:
             self.file_lock_monitor = FileLockMonitor(
                 self.db, self.obs_controller, VLC_SOURCE_NAME,
-                config=self.config_manager
+                config=self.config_manager, scene_stream=SCENE_STREAM
             )
         else:
             # Update reference after OBS reconnect (new OBSController instance)
@@ -472,8 +519,16 @@ class AutomationController:
         settings = self.config_manager.get_settings()
         pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
         
+        # Stop VLC to release file locks before deleting the finished video.
+        # A scene switch alone doesn't release VLC's grip on the file.
+        if self.obs_controller:
+            self.obs_controller.switch_scene(SCENE_ROTATION_SCREEN)
+            self.obs_controller.stop_vlc_source(VLC_SOURCE_NAME)
+            await asyncio.sleep(0.5)
+        
         # Delete the finished video now (monitor deferred deletion for us)
         finished_video = self.file_lock_monitor.current_video
+        undeletable_file = None
         if finished_video:
             filepath = os.path.join(pending_folder, finished_video)
             if os.path.exists(filepath):
@@ -481,12 +536,16 @@ class AutomationController:
                     os.remove(filepath)
                     logger.info(f"Deleted completed temp playback video: {finished_video}")
                 except PermissionError:
-                    logger.warning(f"Cannot delete {finished_video} - still locked, will be cleaned up later")
+                    logger.warning(f"Cannot delete {finished_video} - still locked, excluding from refresh")
+                    undeletable_file = finished_video
                 except Exception as e:
                     logger.error(f"Failed to delete temp playback video {finished_video}: {e}")
+                    undeletable_file = finished_video
         
-        # Check if new files are available
+        # Check if new files are available (exclude the undeletable finished video)
         new_files = self.playlist_manager.get_complete_video_files(pending_folder)
+        if undeletable_file and undeletable_file in new_files:
+            new_files.remove(undeletable_file)
         
         if new_files:
             logger.info(f"Temp playback VLC refresh: {len(new_files)} files available in pending")
@@ -494,10 +553,6 @@ class AutomationController:
             if not self.obs_controller:
                 logger.error("No OBS controller available for temp playback VLC refresh")
                 return
-            
-            # Brief scene switch for VLC source update
-            self.obs_controller.switch_scene(SCENE_ROTATION_SCREEN)
-            await asyncio.sleep(1.0)
             
             self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, pending_folder)
             
@@ -534,7 +589,8 @@ class AutomationController:
             if next_playlists:
                 logger.info(f"Auto-triggered next rotation selection after temp playback: {[p['name'] for p in next_playlists]}")
                 
-                # Start background download
+                # Mark downloads triggered so check_for_rotation() doesn't also trigger them
+                self._downloads_triggered_this_rotation = True
                 self._background_download_in_progress = True
                 loop = asyncio.get_event_loop()
                 loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, next_playlists)
@@ -686,9 +742,12 @@ class AutomationController:
 
         # Trigger background download only if pending folder is empty and not already triggered
         # Skip on first loop after resume to avoid downloading when resuming into existing rotation
+        # Skip entirely during temp playback — pending folder is in use for playback
         settings = self.config_manager.get_settings()
         pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
-        if (not self._downloads_triggered_this_rotation and 
+        temp_active = self.temp_playback_handler is not None and self.temp_playback_handler.is_active
+        if (not temp_active and
+            not self._downloads_triggered_this_rotation and 
             self.playlist_manager.is_folder_empty(pending_folder) and 
             not self._background_download_in_progress and
             not self._just_resumed_session):
@@ -747,8 +806,9 @@ class AutomationController:
                 return
         
         # Check if we should rotate (all content consumed + next rotation ready)
+        # Skip during temp playback — monitor() -> exit() handles the proper sequencing
         should_rotate = False
-        if all_consumed:
+        if all_consumed and not temp_active:
             # Only rotate on pending content if no background download is in progress
             pending_content_ready = has_pending_content and not self._background_download_in_progress
             should_rotate = self.next_prepared_playlists or pending_content_ready
@@ -862,6 +922,7 @@ class AutomationController:
                     self._background_download_in_progress = False
             
             # Run in background thread
+            self._background_download_in_progress = True
             loop = asyncio.get_event_loop()
             loop.run_in_executor(self.executor, resume_downloads)
             logger.info("Auto-resume background task started")
@@ -908,6 +969,9 @@ class AutomationController:
                 self.db.clear_temp_playback_state(session['id'])
 
         if temp_playback_restored:
+            # Temp playback owns the pending folder — prevent check_for_rotation
+            # from starting new downloads into it while temp playback is active.
+            self._downloads_triggered_this_rotation = True
             return
 
         # Normal session resume
@@ -1067,8 +1131,16 @@ class AutomationController:
             logger.error("OBS controller not initialized")
             return
         
-        if not self.obs_controller.verify_scenes([SCENE_PAUSE, SCENE_STREAM, SCENE_ROTATION_SCREEN]):
-            logger.error("Missing required OBS scenes")
+        if not self.obs_controller.ensure_scenes(
+            scene_stream=SCENE_STREAM,
+            scene_pause=SCENE_PAUSE,
+            scene_rotation=SCENE_ROTATION_SCREEN,
+            vlc_source_name=VLC_SOURCE_NAME,
+            video_folder=self.config_manager.video_folder,
+            pause_image=DEFAULT_PAUSE_IMAGE,
+            rotation_image=DEFAULT_ROTATION_IMAGE,
+        ):
+            logger.error("Failed to set up required OBS scenes")
             return
 
         self.setup_platforms()
@@ -1122,8 +1194,7 @@ class AutomationController:
                     logger.warning("OBS connection lost (detected via health check)")
                     self.notification_service.notify_automation_error("OBS disconnected, attempting reconnect...")
                     if self.reconnect_obs():
-                        self._initialize_handlers()
-                        self._initialize_file_lock_monitor()
+                        self._reinitialize_after_obs_reconnect()
                         logger.info("OBS reconnected, handlers re-initialized")
                         continue
                     else:
@@ -1154,8 +1225,7 @@ class AutomationController:
                     logger.warning(f"OBS connection lost: {e}")
                     self.notification_service.notify_automation_error(f"OBS disconnected: {error_msg}")
                     if self.reconnect_obs():
-                        self._initialize_handlers()
-                        self._initialize_file_lock_monitor()
+                        self._reinitialize_after_obs_reconnect()
                         logger.info("OBS reconnected, handlers re-initialized")
                         continue
                     else:

@@ -27,8 +27,8 @@ if "!NEXT_FOLDER!"=="" (
 )
 
 REM Final defaults
-if "!VIDEO_FOLDER!"=="" set "VIDEO_FOLDER=videos/live"
-if "!NEXT_FOLDER!"=="" set "NEXT_FOLDER=videos/pending"
+if "!VIDEO_FOLDER!"=="" set "VIDEO_FOLDER=content/live"
+if "!NEXT_FOLDER!"=="" set "NEXT_FOLDER=content/pending"
 
 REM Cleanup path formatting (remove trailing slashes)
 if "!VIDEO_FOLDER:~-1!"=="\" set "VIDEO_FOLDER=!VIDEO_FOLDER:~0,-1!"

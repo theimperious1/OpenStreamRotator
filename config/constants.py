@@ -28,12 +28,14 @@ VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
 # Default Paths (can be overridden in config)
 DEFAULT_VIDEO_FOLDER = os.path.join(_PROJECT_ROOT, 'content', 'live', '')
 DEFAULT_NEXT_ROTATION_FOLDER = os.path.join(_PROJECT_ROOT, 'content', 'pending', '')
+DEFAULT_PAUSE_IMAGE = os.path.join(_PROJECT_ROOT, 'content', 'pause', 'default.png')
+DEFAULT_ROTATION_IMAGE = os.path.join(_PROJECT_ROOT, 'content', 'rotation', 'default.png')
 
 # OBS Scene Names (must match OBS configuration)
 # These can be overridden via environment variables
-DEFAULT_SCENE_PAUSE = "Pause screen"
-DEFAULT_SCENE_STREAM = "Stream"
-DEFAULT_SCENE_ROTATION_SCREEN = "Rotation screen"
+DEFAULT_SCENE_PAUSE = "OSR Pause screen"
+DEFAULT_SCENE_STREAM = "OSR Stream"
+DEFAULT_SCENE_ROTATION_SCREEN = "OSR Rotation screen"
 DEFAULT_VLC_SOURCE_NAME = "Playlist"
 
 # Playlist Constraints

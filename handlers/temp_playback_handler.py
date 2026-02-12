@@ -36,9 +36,9 @@ class TempPlaybackHandler:
         obs_controller: 'OBSController',
         stream_manager: 'StreamManager',
         notification_service: Optional[NotificationService] = None,
-        scene_stream: str = "Stream",
-        scene_rotation_screen: str = "Rotation screen",
-        vlc_source_name: str = "Playlist"
+        scene_stream: str = "OSR Stream",
+        scene_rotation_screen: str = "OSR Rotation screen",
+        vlc_source_name: str = "OSR Playlist"
     ):
         self.db = db
         self.config = config
@@ -521,6 +521,7 @@ class TempPlaybackHandler:
         This method handles:
         1. Update skip detector back to live folder
         2. Clear temp playback flag
+        3. Clear temp playback state from database (prevents stale crash recovery)
         """
         logger.info("Cleaning up temp playback after normal rotation")
         
@@ -530,11 +531,21 @@ class TempPlaybackHandler:
             if self._trigger_next_rotation_callback:
                 await self._trigger_next_rotation_callback()
             
-            # Step 3: Clear temp playback flag
+            # Clear temp playback flag
             self._active = False
+            
+            # Clear temp playback state from database (crash recovery no longer needed)
+            if self.current_session_id:
+                self.db.clear_temp_playback_state(self.current_session_id)
+            
             logger.info("Temp playback cleanup completed")
             
         except Exception as e:
             logger.error(f"Error during temp playback cleanup: {e}")
             # Ensure flag is cleared even on error
             self._active = False
+            if self.current_session_id:
+                try:
+                    self.db.clear_temp_playback_state(self.current_session_id)
+                except Exception:
+                    pass

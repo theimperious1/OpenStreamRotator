@@ -170,10 +170,6 @@ class ContentSwitchHandler:
                 # This playlist would make it too long, stop
                 break
         
-        # Ensure we always end with the separator for consistency
-        if not result.endswith(' | ') and len(result) + 3 <= self.MAX_TITLE_LENGTH:
-            result += ' | '
-        
         logger.info(f"Truncated title from {len(title)} to {len(result)} chars: {result}")
         return result
     
@@ -186,10 +182,14 @@ class ContentSwitchHandler:
             vlc_source_name: Name of VLC source
             
         Returns:
-            True if successful
+            True if successful, False if scene switch or VLC stop failed
         """
-        self.obs_controller.switch_scene(scene_rotation_screen)
-        self.obs_controller.stop_vlc_source(vlc_source_name)
+        if not self.obs_controller.switch_scene(scene_rotation_screen):
+            logger.error(f"Failed to switch to rotation screen scene: {scene_rotation_screen}")
+            return False
+        if not self.obs_controller.stop_vlc_source(vlc_source_name):
+            logger.error(f"Failed to stop VLC source: {vlc_source_name}")
+            return False
         time.sleep(3)  # Wait for file locks to release
         return True
 
