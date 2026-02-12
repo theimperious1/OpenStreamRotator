@@ -157,6 +157,9 @@ class VideoDownloader:
                 ydl_opts = {
                     'quiet': not verbose,
                     'no_warnings': not verbose,
+                    'ignoreerrors': True,  # Skip unavailable/private videos after retries instead of failing entire playlist
+                    'extractor_retries': 3,  # Retry extraction errors (private/unavailable) 3 times per video before skipping
+                    'retries': 5,  # Retry download HTTP errors 5 times per video before skipping
                     'extract_flat': False,  # Extract video URLs
                     'fragment_retries': 6,
                     'concurrent_fragment_downloads': 5,  # Download 4 fragments in parallel
