@@ -216,6 +216,19 @@ class AutomationController:
             self.file_lock_monitor.set_temp_playback_mode(True)
             logger.info("Preserved file lock monitor temp playback mode across OBS reconnect")
 
+        # Restore playback position — VLC restarts from the beginning after
+        # OBS reconnects, so use the deferred-seek mechanism (same as crash
+        # recovery) to jump back to where we left off.
+        if self.current_session_id:
+            session = self.db.get_current_session()
+            if session:
+                saved_video = session.get('playback_current_video')
+                saved_cursor = session.get('playback_cursor_ms', 0)
+                if saved_video and saved_cursor and saved_cursor > 0:
+                    self._pending_seek_ms = saved_cursor
+                    self._pending_seek_video = saved_video
+                    logger.info(f"Pending seek after OBS reconnect: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s)")
+
     def save_playback_on_exit(self):
         """Save current state when program exits."""
         # Save final playback position for crash recovery
