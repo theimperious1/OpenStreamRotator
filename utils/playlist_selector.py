@@ -1,3 +1,8 @@
+"""Playlist selector for rotation scheduling.
+
+Selects playlists for each rotation using priority weights,
+play history, and exclusion rules to avoid repetition.
+"""
 import logging
 import json
 from typing import List, Dict, Optional
@@ -8,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class PlaylistSelector:
-    """Intelligently selects playlists for rotation."""
 
     def __init__(self, db: DatabaseManager, config: ConfigManager):
         """

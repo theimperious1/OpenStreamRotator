@@ -1,3 +1,8 @@
+"""SQLite database manager for application state.
+
+Manages playlists, videos, rotation sessions, playback tracking,
+temp playback state, and platform token storage.
+"""
 import sqlite3
 import json
 import os

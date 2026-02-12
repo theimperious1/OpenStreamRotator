@@ -1,3 +1,8 @@
+"""Streaming platform manager.
+
+Sets up and coordinates multiple streaming platform integrations
+(Twitch, Kick) based on environment configuration.
+"""
 import logging
 import os
 from typing import Optional, List
@@ -9,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 class PlatformManager:
-    """Manages multiple streaming platform integrations."""
 
     def __init__(self):
         self.platforms: List[StreamPlatform] = []

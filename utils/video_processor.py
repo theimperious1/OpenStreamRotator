@@ -1,3 +1,8 @@
+"""Video file utilities.
+
+Provides duration extraction via ffprobe, ordering-prefix
+renaming for playlist grouping, and temp file cleanup.
+"""
 import subprocess
 import os
 import logging
@@ -15,7 +20,6 @@ _process_lock = threading.Lock()
 
 
 class VideoProcessor:
-    """Handles video file operations and metadata extraction."""
 
     @staticmethod
     def get_video_duration(file_path: str) -> int:

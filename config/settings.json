@@ -1,10 +1,8 @@
 {
-  "download_buffer_minutes": 30,
-  "check_config_interval": 60,
   "min_playlists_per_rotation": 2,
   "max_playlists_per_rotation": 2,
   "download_retry_attempts": 5,
-  "stream_title_template": "24/7 TEST FOR @Asmongold247 | {GAMES} | ",
+  "stream_title_template": "24/7 OpenStreamRotator testing for @Asmongold247| {GAMES} | UwU",
   "yt_dlp_verbose": false,
   "notify_video_transitions": true,
   "debug_mode": true,

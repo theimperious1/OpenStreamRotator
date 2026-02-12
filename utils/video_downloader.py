@@ -1,3 +1,8 @@
+"""YouTube playlist downloader via yt-dlp.
+
+Downloads playlists with per-video retry logic, post-processing
+hooks for duration extraction, and archive-based deduplication.
+"""
 import os
 import logging
 from threading import Event, Lock
@@ -12,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 
 class VideoDownloader:
-    """Handles YouTube playlist downloading and video registration."""
 
     def __init__(self, db: DatabaseManager, config: ConfigManager, 
                  registration_queue: Optional[VideoRegistrationQueue] = None,

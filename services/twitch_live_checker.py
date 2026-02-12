@@ -1,3 +1,8 @@
+"""Twitch live status checker.
+
+Acquires Twitch app access tokens via client credentials and
+checks whether specified channels are currently streaming.
+"""
 import requests
 import time
 import logging
@@ -7,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 
 class TwitchLiveChecker:
-    """Manages Twitch authentication and live status checking."""
 
     def __init__(self, client_id: str, client_secret: str):
         """

@@ -1,3 +1,8 @@
+"""Configuration manager for playlists and application settings.
+
+Loads and saves playlists.json and settings.json with mtime-based
+change detection for live-reload in the main loop.
+"""
 import json
 import os
 import logging
@@ -12,8 +17,10 @@ class ConfigManager:
         config_dir = os.path.dirname(os.path.abspath(__file__))
         self.config_path = config_path or os.path.join(config_dir, "playlists.json")
         self.settings_path = settings_path or os.path.join(config_dir, "settings.json")
-        self.last_config_mtime: float = 0
-        self.last_settings_mtime: float = 0
+        # Seed with actual mtimes so the first has_config_changed() call
+        # doesn't spuriously report a change on startup.
+        self.last_config_mtime: float = self._safe_mtime(self.config_path)
+        self.last_settings_mtime: float = self._safe_mtime(self.settings_path)
         # Mtime-based caches — re-read only when file changes on disk
         self._cached_settings: Optional[Dict] = None
         self._cached_playlists: Optional[List[Dict]] = None
@@ -47,11 +54,10 @@ class ConfigManager:
     def _create_default_settings(self):
         """Create a default settings configuration file."""
         default_settings = {
-            "check_config_interval": 60,
             "min_playlists_per_rotation": 2,
             "max_playlists_per_rotation": 4,
             "download_retry_attempts": 3,
-            "stream_title_template": "24/7 @example1 / @example2 | {GAMES} | !playlist !streamtime !new",
+            "stream_title_template": "My OpenStreamRotator 24/7 channel! | {GAMES} | lorem epsum",
             "debug_mode": False,
             "yt_dlp_use_cookies": False,
             "yt_dlp_browser_for_cookies": "firefox"
@@ -182,3 +188,12 @@ class ConfigManager:
             return False
 
         return True
+    
+    @staticmethod
+    def _safe_mtime(path: str) -> float:
+        """Return the file's mtime, or 0 if it doesn't exist yet."""
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0
+        

@@ -2,6 +2,9 @@
 content/live/
 content/pending/
 stream_data.db
+stream_data.db-journal
+stream_data.db-wal
+stream_data.db-shm
 kick_tokens.db
 twitch_tokens.db
 .idea/

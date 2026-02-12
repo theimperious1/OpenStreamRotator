@@ -1,4 +1,9 @@
 import logging
+"""Abstract base class for streaming platform integrations.
+
+Defines the common interface for title and category updates
+that all platform implementations must provide.
+"""
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -6,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 
 class StreamPlatform(ABC):
-    """Base class for stream platform integrations (Twitch, Kick, etc.)"""
 
     def __init__(self, platform_name: str):
         self.platform_name = platform_name

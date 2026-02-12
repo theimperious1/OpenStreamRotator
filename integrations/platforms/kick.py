@@ -1,3 +1,8 @@
+"""Kick.com platform integration.
+
+Handles OAuth authentication, stream title and category updates,
+and category search via the kickpython API wrapper.
+"""
 import asyncio
 import logging
 import os
@@ -16,7 +21,6 @@ from lib.kickpython.kickpython.api import KickAPI
 KICK_AVAILABLE = True
 
 class KickUpdater(StreamPlatform):
-    """Kick platform integration using kickpython library."""
 
     def __init__(self, client_id: str, client_secret: str, channel_id: str,
                  redirect_uri: str = "http://localhost:8080/callback",

@@ -1,3 +1,8 @@
+"""Twitch platform integration.
+
+Handles OAuth token management with SQLite-backed storage,
+stream title and category updates via the Helix API.
+"""
 import logging
 import os
 import re

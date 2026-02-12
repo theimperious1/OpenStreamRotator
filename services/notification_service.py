@@ -1,3 +1,8 @@
+"""Discord webhook notification service.
+
+Sends rich embed notifications for rotation events, errors,
+and status changes with local rate-limit tracking.
+"""
 import requests
 import time
 import logging
@@ -16,7 +21,6 @@ _DISCORD_RATE_LIMIT_MAX = 30
 
 
 class NotificationService:
-    """Centralized service for sending notifications to various platforms."""
 
     def __init__(self, discord_webhook_url: Optional[str] = None):
         """

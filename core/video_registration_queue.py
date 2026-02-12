@@ -7,7 +7,6 @@ logger = logging.getLogger(__name__)
 
 
 class VideoRegistrationQueue:
-    """Thread-safe queue for queueing videos to be registered in the database."""
     
     def __init__(self):
         """Initialize the video registration queue."""

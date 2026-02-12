@@ -1,3 +1,8 @@
+"""Content switch handler for rotation transitions.
+
+Manages the folder swap, VLC source reload, scene switching,
+and stream metadata updates during a content rotation.
+"""
 import json
 import logging
 import time
@@ -13,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 
 class ContentSwitchHandler:
-    """Handles content switching operations (normal rotations)."""
 
     MAX_TITLE_LENGTH = 140  # Kick's title character limit
 

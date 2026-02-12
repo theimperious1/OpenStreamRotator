@@ -1,3 +1,8 @@
+"""Playlist operations — selection, downloading, and folder management.
+
+Facade over PlaylistSelector and VideoDownloader, plus folder
+operations like content switching, validation, and cleanup.
+"""
 import os
 import logging
 import shutil
