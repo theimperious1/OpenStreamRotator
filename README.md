@@ -39,17 +39,18 @@ cp .env.example .env
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `ENABLE_TWITCH` | No | `false` | Enable Twitch integration |
+| `ENABLE_TWITCH` | No | `false` | Enable Twitch integration (optional — not required if only using Kick) |
 | `TWITCH_CLIENT_ID` | If Twitch enabled | — | Twitch application client ID |
 | `TWITCH_CLIENT_SECRET` | If Twitch enabled | — | Twitch application client secret |
 | `TWITCH_USER_LOGIN` | If Twitch enabled | — | Your 24/7 Twitch channel username |
 | `TWITCH_REDIRECT_URI` | No | `http://localhost:8080/callback` | OAuth redirect URI for Twitch |
 | `TARGET_TWITCH_STREAMER` | No | *(empty)* | Streamer whose live status pauses the rerun. If empty, live detection is disabled — ideal for pure 24/7 streams. |
-| `ENABLE_KICK` | No | `false` | Enable Kick integration |
+| `ENABLE_KICK` | No | `false` | Enable Kick integration (optional — not required if only using Twitch) |
 | `KICK_CLIENT_ID` | If Kick enabled | — | Kick application client ID |
 | `KICK_CLIENT_SECRET` | If Kick enabled | — | Kick application client secret |
 | `KICK_CHANNEL_ID` | If Kick enabled | — | Your 24/7 Kick channel ID |
 | `KICK_REDIRECT_URI` | If Kick enabled | `http://localhost:8080/callback` | OAuth redirect URI for Kick |
+| `TARGET_KICK_STREAMER` | No | *(empty)* | Kick channel slug whose live status pauses the rerun. If empty, Kick live detection is disabled. |
 | `OBS_HOST` | No | `localhost` | OBS WebSocket host |
 | `OBS_PORT` | No | `4455` | OBS WebSocket port |
 | `OBS_PASSWORD` | Yes | — | OBS WebSocket password |
@@ -280,16 +281,19 @@ If `DISCORD_WEBHOOK_URL` is set, the system sends notifications for:
 - **Streamer live/offline** — target streamer status changes
 - **Automation errors** — unexpected exceptions
 
-## Twitch Live Detection
+## Live Detection
 
-When `ENABLE_TWITCH` is set to `true` **and** `TARGET_TWITCH_STREAMER` is set, the system polls the Twitch API every 60 seconds to check if the target streamer is live:
+The system polls configured platforms every 60 seconds to check if the target streamer is live:
+
+- **Twitch** — set `TARGET_TWITCH_STREAMER` to a Twitch username (requires `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET`)
+- **Kick** — set `TARGET_KICK_STREAMER` to a Kick channel slug (requires `KICK_CLIENT_ID` / `KICK_CLIENT_SECRET`)
+
+If both are configured, either platform being live triggers the pause. If neither is set, live detection is skipped entirely — ideal for pure 24/7 streams (e.g., music or ambient content) that should never pause.
 
 - **Streamer goes live** → OBS switches to the pause scene, rotations are postponed
 - **Streamer goes offline** → OBS switches back to the playback scene, normal operation resumes
 
 This is designed for 24/7 rerun channels that should yield to the main streamer.
-
-If `TARGET_TWITCH_STREAMER` is left empty, live detection is skipped entirely. This is ideal for pure 24/7 streams (e.g., music or ambient content) that should never pause.
 
 ## Reset State
 

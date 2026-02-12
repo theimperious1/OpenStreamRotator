@@ -25,6 +25,7 @@ from managers.platform_manager import PlatformManager
 from services.notification_service import NotificationService
 from playback.file_lock_monitor import FileLockMonitor
 from services.twitch_live_checker import TwitchLiveChecker
+from services.kick_live_checker import KickLiveChecker
 from handlers.content_switch_handler import ContentSwitchHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
@@ -52,6 +53,10 @@ VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", DEFAULT_VLC_SOURCE_NAME)
 # Twitch Configuration (used for live checker)
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET", "")
+
+# Kick Configuration (used for live checker)
+KICK_CLIENT_ID = os.getenv("KICK_CLIENT_ID", "")
+KICK_CLIENT_SECRET = os.getenv("KICK_CLIENT_SECRET", "")
 
 # Discord Configuration
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
@@ -101,6 +106,12 @@ class AutomationController:
             self.twitch_live_checker = TwitchLiveChecker(TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET)
         else:
             self.twitch_live_checker = None
+
+        # Kick live checker
+        if KICK_CLIENT_ID and KICK_CLIENT_SECRET:
+            self.kick_live_checker = KickLiveChecker(KICK_CLIENT_ID, KICK_CLIENT_SECRET)
+        else:
+            self.kick_live_checker = None
 
         # Handlers (initialized in _initialize_handlers)
         self.content_switch_handler: Optional[ContentSwitchHandler] = None
@@ -559,22 +570,48 @@ class AutomationController:
     def _check_live_status(self, debug_mode: bool) -> None:
         """Check if the streamer is live and toggle pause/stream scenes accordingly.
 
-        Skipped entirely when TARGET_TWITCH_STREAMER is not set, allowing
-        pure 24/7 streams that never pause for a live streamer.
+        Checks both Twitch and Kick if configured. Either platform being live
+        triggers a pause. Skipped entirely when neither TARGET_TWITCH_STREAMER
+        nor TARGET_KICK_STREAMER is set.
         """
-        target_streamer = os.getenv("TARGET_TWITCH_STREAMER", "").strip()
-        if not target_streamer:
+        target_twitch = os.getenv("TARGET_TWITCH_STREAMER", "").split("#")[0].strip()
+        target_kick = os.getenv("TARGET_KICK_STREAMER", "").split("#")[0].strip()
+
+        # Warn once at startup if a target is set but credentials are missing
+        if target_twitch and not self.twitch_live_checker:
+            if self.last_stream_status is None:
+                logger.warning("TARGET_TWITCH_STREAMER is set but TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET are missing — Twitch live detection disabled")
+        if target_kick and not self.kick_live_checker:
+            if self.last_stream_status is None:
+                logger.warning("TARGET_KICK_STREAMER is set but KICK_CLIENT_ID/KICK_CLIENT_SECRET are missing — Kick live detection disabled")
+
+        if not target_twitch and not target_kick:
+            # No live detection configured — ensure we're on the stream scene
+            if self.last_stream_status != "offline":
+                if self.obs_controller:
+                    self.obs_controller.switch_scene(SCENE_STREAM)
+                self.last_stream_status = "offline"
             return
 
-        if self.twitch_live_checker:
+        # Refresh tokens for whichever platform(s) are configured
+        if target_twitch and self.twitch_live_checker:
             try:
                 self.twitch_live_checker.refresh_token_if_needed()
             except Exception as e:
                 logger.warning(f"Failed to refresh Twitch app token: {e}")
 
+        if target_kick and self.kick_live_checker:
+            try:
+                self.kick_live_checker.refresh_token_if_needed()
+            except Exception as e:
+                logger.warning(f"Failed to refresh Kick app token: {e}")
+
+        # Check live status on each configured platform
         is_live = False
-        if self.twitch_live_checker:
-            is_live = self.twitch_live_checker.is_stream_live(target_streamer)
+        if target_twitch and self.twitch_live_checker:
+            is_live = self.twitch_live_checker.is_stream_live(target_twitch)
+        if not is_live and target_kick and self.kick_live_checker:
+            is_live = self.kick_live_checker.is_stream_live(target_kick)
 
         if debug_mode:
             is_live = False
