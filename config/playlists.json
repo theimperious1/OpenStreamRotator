@@ -48,6 +48,20 @@
       "category": "Final Fantasy XIV",
       "enabled": true,
       "priority": 1
+    },
+    {
+      "name": "Hytale",
+      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjnzKfefPZN11m15xTotRsjD",
+      "category": "Hytale",
+      "enabled": true,
+      "priority": 1
+    },
+    {
+      "name": "TESIV: Oblivion Remastered",
+      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjnfz8DnG6NbyCSjp8-TyMgc",
+      "category": "The Elder Scrolls IV: Oblivion Remastered",
+      "enabled": true,
+      "priority": 1
     }
   ]
 }

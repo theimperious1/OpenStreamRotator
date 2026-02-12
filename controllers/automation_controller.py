@@ -18,7 +18,6 @@ from controllers.obs_controller import OBSController
 from managers.platform_manager import PlatformManager
 from services.notification_service import NotificationService
 from playback.file_lock_monitor import FileLockMonitor
-from utils.video_utils import strip_ordering_prefix
 from services.twitch_live_checker import TwitchLiveChecker
 from handlers.rotation_handler import RotationHandler
 from handlers.content_switch_handler import ContentSwitchHandler

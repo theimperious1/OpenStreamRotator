@@ -154,31 +154,22 @@ class TempPlaybackHandler:
             self._active = True
             self._last_folder_check = time.time()
             
-            # Update stream title to reflect temp playback content
-            # The next_playlists column contains the prepared rotation playlists
+            # Update stream title and category to reflect temp playback content.
+            # Resolve category BEFORE the API call so Kick gets the correct
+            # category in a single request instead of falling back to Just Chatting.
             if session and session.get('next_playlists'):
                 try:
                     next_playlist_names = DatabaseManager.parse_json_field(session.get('next_playlists'), [])
                     if next_playlist_names:
                         new_title = self.playlist_manager.generate_stream_title(next_playlist_names)
-                        if self.stream_manager:
-                            await self.stream_manager.update_title(new_title)
-                        logger.info(f"Updated stream title for temp playback: {new_title}")
-                        
+
                         # Determine category from first video's playlist
-                        # Since videos haven't been registered in DB yet, we'll identify
-                        # which next_playlist each file belongs to by checking the database
-                        # or falling back to sequential assignment based on download order
                         category = None
-                        
+
                         if complete_files:
-                            # Try to get category from first video's playlist metadata
+                            # Try DB lookup first (may work if videos were pre-registered)
                             first_video = complete_files[0]
-                            # Check each next_playlist to see which one this video likely belongs to
-                            # by checking if we can find it in the database
                             playlists_config = self.config.get_playlists()
-                            
-                            # Try database lookup first (may work if videos were pre-registered)
                             try:
                                 video_data = self.db.get_video_by_filename(first_video)
                                 if video_data and video_data.get('playlist_name'):
@@ -190,9 +181,8 @@ class TempPlaybackHandler:
                                             break
                             except Exception as e:
                                 logger.debug(f"First video not in DB yet (expected during active download): {e}")
-                        
-                        # Fallback: if first video not in DB, use first next_playlist
-                        # This assumes videos are downloaded in order from next_playlists
+
+                        # Fallback: use first next_playlist's category
                         if not category and next_playlist_names:
                             try:
                                 playlists_config = self.config.get_playlists()
@@ -203,11 +193,15 @@ class TempPlaybackHandler:
                                         break
                             except Exception as e:
                                 logger.warning(f"Failed to get category from next_playlists: {e}")
-                        
-                        # Update category if determined
-                        if category and self.stream_manager:
-                            await self.stream_manager.update_stream_info(new_title, category)
-                            logger.info(f"Updated stream category for temp playback: {category}")
+
+                        # Single API call with both title + category
+                        if self.stream_manager:
+                            if category:
+                                await self.stream_manager.update_stream_info(new_title, category)
+                                logger.info(f"Updated stream title and category for temp playback: {new_title} / {category}")
+                            else:
+                                await self.stream_manager.update_title(new_title)
+                                logger.info(f"Updated stream title for temp playback: {new_title}")
                 except Exception as e:
                     logger.warning(f"Failed to update stream title/category during temp playback: {e}")
             
