@@ -48,6 +48,13 @@
       "category": "Final Fantasy XIV",
       "enabled": true,
       "priority": 1
+    },
+    {
+      "name": "FFXIV Long",
+      "url": "https://www.youtube.com/playlist?list=PLDqPWQChjL87pBUP100xBN8f2UZnlRVgp",
+      "category": "Final Fantasy XIV",
+      "enabled": true,
+      "priority": 1
     }
   ]
 }

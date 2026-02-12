@@ -161,7 +161,7 @@ class VideoDownloader:
                     'fragment_retries': 6,
                     'concurrent_fragment_downloads': 5,  # Download 4 fragments in parallel
                     'http_chunk_size': 10485760,  # 10MB chunks - I tried raising this higher, doesn't work
-                    'outtmpl': '%(title)s.%(ext)s',
+                    'outtmpl': '%(playlist)s_%(playlist_index)03d_%(title)s.%(ext)s',
                     'post_hooks': [_on_video_complete],
                     # Archive file to track downloaded videos - prevents re-downloading
                     # videos that were deleted during temp playback
@@ -261,6 +261,14 @@ class VideoDownloader:
                 if filename in self._registered_files:
                     logger.debug(f"Already registered via post_hook, skipping batch: {filename}")
                     continue
+
+            # Also check the database — after a restart _registered_files is empty,
+            # but files from other playlists may already be registered in the DB.
+            # Without this check, batch registration would assign them to the wrong playlist.
+            existing = self.db.get_video_by_filename(filename)
+            if existing:
+                logger.debug(f"Already in database (playlist={existing.get('playlist_name')}), skipping batch: {filename}")
+                continue
 
             # Validate video stream before processing (ensures file is complete, not still post-processing)
             if not VideoProcessor.has_valid_video_stream(video_path):
