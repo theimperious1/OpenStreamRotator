@@ -1142,7 +1142,7 @@ class AutomationController:
         except Exception:
             pass  # Non-critical, just skip this tick
 
-    def _shutdown_cleanup(self) -> None:
+    async def _shutdown_cleanup(self) -> None:
         """Perform graceful shutdown: save state, disconnect, stop threads."""
         logger.info("Shutdown event detected, cleaning up...")
         self.notification_service.notify_automation_shutdown()
@@ -1152,6 +1152,15 @@ class AutomationController:
             self.platform_manager.cleanup()
         except Exception as e:
             logger.debug(f"Platform cleanup warning (non-critical): {e}")
+
+        # Close async platform resources (e.g., aiohttp sessions in Kick API)
+        for platform in self.platform_manager.platforms:
+            if hasattr(platform, 'async_close'):
+                try:
+                    await platform.async_close()  # type: ignore[attr-defined]
+                except Exception as e:
+                    logger.debug(f"Async platform close warning (non-critical): {e}")
+
         if self.obs_client:
             self.obs_client.disconnect()
 
@@ -1207,6 +1216,36 @@ class AutomationController:
                 await self.execute_content_switch()
         elif not os.path.exists(video_folder) or not os.listdir(video_folder):
             logger.warning(f"Video folder empty/missing: {video_folder}")
+            # Before starting fresh, check if session has completed prepared
+            # playlists sitting in pending/ — rotate to those instead of
+            # re-selecting and re-downloading brand-new playlists.
+            next_pl = session.get('next_playlists')
+            next_pl_status = session.get('next_playlists_status')
+            if next_pl and next_pl_status:
+                try:
+                    playlist_list = DatabaseManager.parse_json_field(next_pl, [])
+                    status_dict = DatabaseManager.parse_json_field(next_pl_status, {})
+                    all_completed = all(
+                        status_dict.get(pl) == "COMPLETED" for pl in playlist_list
+                    )
+                    if all_completed:
+                        next_folder = settings.get(
+                            'next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER
+                        )
+                        if self.db.validate_prepared_playlists_exist(
+                            session['id'], next_folder
+                        ):
+                            objs = self.db.get_playlists_with_ids_by_names(
+                                playlist_list
+                            )
+                            if objs:
+                                self.next_prepared_playlists = objs
+                                logger.info(
+                                    f"Found completed prepared playlists in "
+                                    f"pending, will rotate to: {playlist_list}"
+                                )
+                except Exception as e:
+                    logger.warning(f"Failed to check pending playlists: {e}")
             if session.get('id'):
                 self.db.end_session(session['id'])
             if self.start_rotation_session():
@@ -1262,7 +1301,7 @@ class AutomationController:
                     await self._apply_config_changes_to_stream()
 
                 if self._shutdown_requested:
-                    self._shutdown_cleanup()
+                    await self._shutdown_cleanup()
                     break
 
             except Exception as e:

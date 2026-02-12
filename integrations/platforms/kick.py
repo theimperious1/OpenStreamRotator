@@ -330,6 +330,17 @@ class KickUpdater(StreamPlatform):
             self.log_error("Update stream info", e)
             return False
 
+    async def async_close(self):
+        """Close the Kick API aiohttp sessions gracefully."""
+        try:
+            if self.api:
+                await self.api.close()
+            if self.public_api:
+                await self.public_api.close()
+            logger.debug("Kick API sessions closed")
+        except Exception as e:
+            logger.debug(f"Error closing Kick API sessions: {e}")
+
     def close(self):
-        """No-op — asyncio.run() handles event loop cleanup automatically."""
+        """Synchronous no-op — use async_close() for proper cleanup."""
         pass

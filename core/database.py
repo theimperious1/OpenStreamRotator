@@ -58,6 +58,8 @@ class DatabaseManager:
         Uses RLock so nested calls (e.g., log_playback -> get_video_by_filename) are safe.
         """
         with self._lock:
+            if self.conn is None:
+                raise RuntimeError("Database connection is closed")
             cursor = self.conn.cursor()
             try:
                 yield cursor
@@ -394,6 +396,19 @@ class DatabaseManager:
             cursor.execute("""
                 UPDATE rotation_sessions SET stream_title = ? WHERE id = ?
             """, (stream_title, session_id))
+
+    def update_session_playlists_selected(self, session_id: int, playlist_ids: list) -> None:
+        """Update the playlists_selected field for a rotation session.
+
+        Called when temp playback exits so the session reflects the content
+        that is actually playing (the prepared playlists), not the original
+        rotation playlists.  This prevents config-change title regeneration
+        from reverting to the old playlist names.
+        """
+        with self._cursor() as cursor:
+            cursor.execute("""
+                UPDATE rotation_sessions SET playlists_selected = ? WHERE id = ?
+            """, (json.dumps(playlist_ids), session_id))
 
     def save_playback_position(self, session_id: int, cursor_ms: int, current_video: Optional[str] = None) -> None:
         """Save the current playback position for crash recovery.

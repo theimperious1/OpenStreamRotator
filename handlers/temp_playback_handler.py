@@ -460,6 +460,18 @@ class TempPlaybackHandler:
                     logger.info(f"Updated stream title after temp playback exit: {new_title}")
                 except Exception as e:
                     logger.warning(f"Failed to update stream title after temp playback exit: {e}")
+
+                # Also update playlists_selected so config-change title regeneration
+                # uses the actual playing playlists, not the original session playlists.
+                try:
+                    if self.current_session_id:
+                        playlist_objects = self.db.get_playlists_with_ids_by_names(next_playlist_names)
+                        if playlist_objects:
+                            playlist_ids = [p['id'] for p in playlist_objects]
+                            self.db.update_session_playlists_selected(self.current_session_id, playlist_ids)
+                            logger.info(f"Updated playlists_selected to match temp playback content: {next_playlist_names}")
+                except Exception as e:
+                    logger.warning(f"Failed to update playlists_selected after temp playback exit: {e}")
             
             # Update OBS to stream from live folder
             await asyncio.sleep(0.5)
