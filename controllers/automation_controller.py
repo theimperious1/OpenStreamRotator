@@ -571,6 +571,20 @@ class AutomationController:
 
         if is_live and self.last_stream_status != "live":
             logger.info("Streamer is LIVE — pausing 24/7 stream")
+            # Save playback position before pausing so we can resume later
+            if self.current_session_id and self.file_lock_monitor and self.obs_controller:
+                try:
+                    status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
+                    if status and status.get('media_cursor') is not None:
+                        current_video = self.file_lock_monitor.current_video_original_name
+                        self.db.save_playback_position(
+                            self.current_session_id,
+                            status['media_cursor'],
+                            current_video
+                        )
+                        logger.info(f"Saved playback position before pause: {current_video} at {status['media_cursor']}ms")
+                except Exception as e:
+                    logger.debug(f"Failed to save playback position before pause: {e}")
             if self.obs_controller:
                 self.obs_controller.switch_scene(SCENE_PAUSE)
             if self.file_lock_monitor:
@@ -581,6 +595,16 @@ class AutomationController:
             logger.info("Streamer is OFFLINE — resuming 24/7 stream")
             if self.obs_controller:
                 self.obs_controller.switch_scene(SCENE_STREAM)
+            # Restore playback position — VLC may have lost its cursor while paused
+            if self.current_session_id:
+                session = self.db.get_current_session()
+                if session:
+                    saved_video = session.get('playback_current_video')
+                    saved_cursor = session.get('playback_cursor_ms', 0)
+                    if saved_video and saved_cursor and saved_cursor > 0:
+                        self._pending_seek_ms = saved_cursor
+                        self._pending_seek_video = saved_video
+                        logger.info(f"Pending seek after unpause: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s)")
             self.last_stream_status = "offline"
             self._rotation_postpone_logged = False
             self.notification_service.notify_streamer_offline()
