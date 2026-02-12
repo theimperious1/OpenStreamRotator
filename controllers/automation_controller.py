@@ -557,7 +557,15 @@ class AutomationController:
             return
 
     def _check_live_status(self, debug_mode: bool) -> None:
-        """Check if the streamer is live and toggle pause/stream scenes accordingly."""
+        """Check if the streamer is live and toggle pause/stream scenes accordingly.
+
+        Skipped entirely when TARGET_TWITCH_STREAMER is not set, allowing
+        pure 24/7 streams that never pause for a live streamer.
+        """
+        target_streamer = os.getenv("TARGET_TWITCH_STREAMER", "").strip()
+        if not target_streamer:
+            return
+
         if self.twitch_live_checker:
             try:
                 self.twitch_live_checker.refresh_token_if_needed()
@@ -566,9 +574,7 @@ class AutomationController:
 
         is_live = False
         if self.twitch_live_checker:
-            is_live = self.twitch_live_checker.is_stream_live(
-                os.getenv("TARGET_TWITCH_STREAMER", "zackrawrr")
-            )
+            is_live = self.twitch_live_checker.is_stream_live(target_streamer)
 
         if debug_mode:
             is_live = False

@@ -47,7 +47,7 @@ While `settings.json` and `playlists.json` are hot-reloaded (changes are picked 
 Kick enforces a 140-character limit on stream titles. If your title template combined with playlist names exceeds this, playlist names are dropped from the end of the title until it fits. With many playlists in a single rotation, some names may not appear in the displayed title.
 
 ### Node.js is removed from PATH during runtime
-The system automatically removes Node.js from the process PATH at startup to force yt-dlp to use Deno instead, preventing JavaScript runtime conflicts. If you rely on Node.js for other tools running alongside the bot in the same process, be aware it won't be available.
+The system automatically removes Node.js from the process PATH at startup to force yt-dlp to use Deno instead, preventing JavaScript runtime conflicts. If you rely on Node.js for other tools running alongside the program in the same process, be aware it won't be available.
 
 ---
 

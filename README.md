@@ -44,7 +44,7 @@ cp .env.example .env
 | `TWITCH_CLIENT_SECRET` | If Twitch enabled | — | Twitch application client secret |
 | `TWITCH_USER_LOGIN` | If Twitch enabled | — | Your 24/7 Twitch channel username |
 | `TWITCH_REDIRECT_URI` | No | `http://localhost:8080/callback` | OAuth redirect URI for Twitch |
-| `TARGET_TWITCH_STREAMER` | No | `zackrawrr` | Streamer whose live status pauses the rerun |
+| `TARGET_TWITCH_STREAMER` | No | *(empty)* | Streamer whose live status pauses the rerun. If empty, live detection is disabled — ideal for pure 24/7 streams. |
 | `ENABLE_KICK` | No | `false` | Enable Kick integration |
 | `KICK_CLIENT_ID` | If Kick enabled | — | Kick application client ID |
 | `KICK_CLIENT_SECRET` | If Kick enabled | — | Kick application client secret |
@@ -130,7 +130,7 @@ Both `config/settings.json` and `config/playlists.json` can be changed **while t
 
 **Example — Recovering from YouTube 403 errors mid-download:**
 
-If downloads start failing with 403 (Forbidden) errors — common when YouTube detects automated requests — you can enable cookie-based authentication on the fly without stopping the bot:
+If downloads start failing with 403 (Forbidden) errors — common when YouTube detects automated requests — you can enable cookie-based authentication on the fly without stopping the program:
 
 1. Open `config/settings.json` in any text editor.
 2. Change `"yt_dlp_use_cookies"` from `false` to `true`:
@@ -189,7 +189,7 @@ The VLC source is created automatically inside the `OSR Stream` scene. If you ne
 
 ## Kick Setup
 
-When Kick integration is enabled, the bot uses OAuth for authentication:
+When Kick integration is enabled, the program uses OAuth for authentication:
 
 1. On first startup, a browser window opens automatically to the Kick authorization page.
 2. Log in and authorize the application.
@@ -270,7 +270,7 @@ Press `Ctrl+C` to stop. The system handles the interrupt cleanly and shuts down.
 
 If `DISCORD_WEBHOOK_URL` is set, the system sends notifications for:
 
-- **Automation Started / Shutting Down** — bot lifecycle events
+- **Automation Started / Shutting Down** — program lifecycle events
 - **Now Playing** — playlist names after a content switch completes
 - **Session Resumed** — crash recovery with video name and timestamp
 - **Temp Playback Activated / Complete** — long download handling
@@ -282,12 +282,14 @@ If `DISCORD_WEBHOOK_URL` is set, the system sends notifications for:
 
 ## Twitch Live Detection
 
-When `ENABLE_TWITCH` is set to `true`, the system polls the Twitch API every 60 seconds to check if `TARGET_TWITCH_STREAMER` is live:
+When `ENABLE_TWITCH` is set to `true` **and** `TARGET_TWITCH_STREAMER` is set, the system polls the Twitch API every 60 seconds to check if the target streamer is live:
 
 - **Streamer goes live** → OBS switches to the pause scene, rotations are postponed
 - **Streamer goes offline** → OBS switches back to the playback scene, normal operation resumes
 
 This is designed for 24/7 rerun channels that should yield to the main streamer.
+
+If `TARGET_TWITCH_STREAMER` is left empty, live detection is skipped entirely. This is ideal for pure 24/7 streams (e.g., music or ambient content) that should never pause.
 
 ## Reset State
 

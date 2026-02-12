@@ -104,7 +104,7 @@ class TwitchLiveChecker:
             logger.error(f"Failed to get broadcaster ID: {e}")
             return ""
 
-    def is_stream_live(self, username: str = "zackrawrr") -> bool:
+    def is_stream_live(self, username: str) -> bool:
         """
         Check if a Twitch user is live.
         
