@@ -501,6 +501,52 @@ class AutomationController:
             except Exception as e:
                 logger.warning(f"Failed to update category for current video: {e}")
 
+    async def _apply_config_changes_to_stream(self) -> None:
+        """Immediately push category and title updates when playlists.json or settings.json change.
+        
+        Called from the main loop when has_config_changed() fires.
+        - Category: re-resolves from fresh config for the current video.
+        - Title: regenerates from the fresh template + current session playlists;
+          only pushes if the result actually changed.
+        """
+        if not self.stream_manager:
+            return
+
+        # --- Category ---
+        await self._update_category_for_current_video()
+
+        # --- Title ---
+        try:
+            session = self.db.get_current_session()
+            if not session or not self.current_session_id:
+                return
+
+            playlists_json = session.get('playlists_selected')
+            if not playlists_json:
+                return
+
+            playlist_ids = json.loads(playlists_json)
+            playlist_names = []
+            for pid in playlist_ids:
+                p = self.db.get_playlist(pid)
+                if p:
+                    playlist_names.append(p['name'])
+
+            if not playlist_names:
+                return
+
+            new_title = self.playlist_manager.generate_stream_title(playlist_names)
+            old_title = session.get('stream_title', '')
+
+            if new_title != old_title:
+                await self.stream_manager.update_title(new_title)
+                self.db.update_session_stream_title(self.current_session_id, new_title)
+                logger.info(f"Stream title updated on config change: '{old_title}' -> '{new_title}'")
+            else:
+                logger.debug("Config changed but stream title unchanged, skipping title update")
+        except Exception as e:
+            logger.warning(f"Failed to update stream title on config change: {e}")
+
     async def _handle_temp_playback_vlc_refresh(self) -> None:
         """Refresh VLC source at the natural end of a video during temp playback.
         
@@ -1213,6 +1259,7 @@ class AutomationController:
                 if self.config_manager.has_config_changed():
                     logger.info("Config changed, syncing...")
                     self.db.sync_playlists_from_config(self.config_manager.get_playlists())
+                    await self._apply_config_changes_to_stream()
 
                 if self._shutdown_requested:
                     self._shutdown_cleanup()
