@@ -3,6 +3,8 @@ import os
 import logging
 from typing import Dict, List, Optional
 
+from config.constants import DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER
+
 logger = logging.getLogger(__name__)
 
 class ConfigManager:
@@ -10,8 +12,13 @@ class ConfigManager:
         config_dir = os.path.dirname(os.path.abspath(__file__))
         self.config_path = config_path or os.path.join(config_dir, "playlists.json")
         self.settings_path = settings_path or os.path.join(config_dir, "settings.json")
-        self.last_config_mtime = 0
-        self.last_settings_mtime = 0
+        self.last_config_mtime: float = 0
+        self.last_settings_mtime: float = 0
+        # Mtime-based caches — re-read only when file changes on disk
+        self._cached_settings: Optional[Dict] = None
+        self._cached_playlists: Optional[List[Dict]] = None
+        self._settings_cache_mtime: float = 0
+        self._playlists_cache_mtime: float = 0
 
         # Create default files if they don't exist
         if not os.path.exists(self.config_path):
@@ -96,35 +103,63 @@ class ConfigManager:
         return changed
 
     def get_playlists(self) -> List[Dict]:
-        """Get playlist configurations."""
+        """Get playlist configurations (cached, re-read on file change)."""
+        try:
+            current_mtime = os.path.getmtime(self.config_path)
+        except OSError:
+            current_mtime = 0
+
+        if self._cached_playlists is not None and current_mtime == self._playlists_cache_mtime:
+            return self._cached_playlists
+
+        self._playlists_cache_mtime = current_mtime
         config = self.load_config()
-        if config:
-            return config.get('playlists', [])
-        return []
+        self._cached_playlists = config.get('playlists', []) if config else []
+        return self._cached_playlists
 
     def get_settings(self) -> Dict:
-        """Get application settings from settings.json.
+        """Get application settings from settings.json (cached, re-read on file change).
         
         Folder paths (video_folder, next_rotation_folder) are read from
         environment variables (VIDEO_FOLDER, NEXT_ROTATION_FOLDER) and injected
         into the settings dict so all existing callers continue to work.
         
-        All settings in settings.json are hot-swappable — the file is re-read
-        on every call.
+        All settings in settings.json are hot-swappable — the cache is
+        invalidated whenever the file's mtime changes.
         """
+        try:
+            current_mtime = os.path.getmtime(self.settings_path)
+        except OSError:
+            current_mtime = 0
+
+        if self._cached_settings is not None and current_mtime == self._settings_cache_mtime:
+            return self._cached_settings
+
+        self._settings_cache_mtime = current_mtime
         settings = self._load_json(self.settings_path) or {}
 
         # Inject env-var folder paths into settings dict (env overrides json fallback)
         settings['video_folder'] = os.getenv(
             'VIDEO_FOLDER',
-            settings.get('video_folder', 'C:/stream_videos/')
+            settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
         )
         settings['next_rotation_folder'] = os.getenv(
             'NEXT_ROTATION_FOLDER',
-            settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
         )
 
+        self._cached_settings = settings
         return settings
+
+    @property
+    def video_folder(self) -> str:
+        """Get the live video folder path."""
+        return self.get_settings().get('video_folder', DEFAULT_VIDEO_FOLDER)
+
+    @property
+    def next_rotation_folder(self) -> str:
+        """Get the pending/next rotation folder path."""
+        return self.get_settings().get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
 
     def validate_config(self) -> bool:
         """Validate configuration file structures."""

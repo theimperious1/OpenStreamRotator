@@ -25,8 +25,8 @@ if [ -z "$NEXT_FOLDER" ]; then
 fi
 
 # Final defaults
-[ -z "$VIDEO_FOLDER" ] && VIDEO_FOLDER="videos/live"
-[ -z "$NEXT_FOLDER" ] && NEXT_FOLDER="videos/pending"
+[ -z "$VIDEO_FOLDER" ] && VIDEO_FOLDER="content/live"
+[ -z "$NEXT_FOLDER" ] && NEXT_FOLDER="content/pending"
 
 # Cleanup path formatting (remove trailing slashes)
 VIDEO_FOLDER="${VIDEO_FOLDER%/}"

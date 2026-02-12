@@ -2,8 +2,17 @@ import requests
 import time
 import logging
 from typing import Optional
+from config.constants import (
+    COLOR_SUCCESS, COLOR_ERROR, COLOR_WARNING, COLOR_INFO,
+    COLOR_STREAM_LIVE, COLOR_ROTATION_START, COLOR_NEXT_READY,
+    COLOR_MUTED,
+)
 
 logger = logging.getLogger(__name__)
+
+# Discord webhooks: 30 messages per 60 seconds per webhook
+_DISCORD_RATE_LIMIT_WINDOW = 60.0
+_DISCORD_RATE_LIMIT_MAX = 30
 
 
 class NotificationService:
@@ -17,18 +26,26 @@ class NotificationService:
             discord_webhook_url: Discord webhook URL for notifications
         """
         self.discord_webhook_url = discord_webhook_url
+        self._discord_send_times: list[float] = []
 
-    def send_discord(self, title: str, description: str, color: int = 0x00FF00):
+    def send_discord(self, title: str, description: str, color: int = COLOR_SUCCESS):
         """
-        Send a Discord notification via webhook.
+        Send a Discord notification via webhook with rate-limit awareness.
         
         Args:
             title: Embed title
             description: Embed description
-            color: Hex color code (default green = 0x00FF00)
+            color: Hex color code (default green)
         """
         if not self.discord_webhook_url:
             logger.debug("Discord webhook not configured, skipping notification")
+            return
+
+        # Pre-flight rate limit check (local)
+        now = time.time()
+        self._discord_send_times = [t for t in self._discord_send_times if now - t < _DISCORD_RATE_LIMIT_WINDOW]
+        if len(self._discord_send_times) >= _DISCORD_RATE_LIMIT_MAX:
+            logger.warning(f"Discord rate limit reached ({_DISCORD_RATE_LIMIT_MAX}/{_DISCORD_RATE_LIMIT_WINDOW}s), dropping notification: {title}")
             return
 
         payload = {
@@ -42,6 +59,11 @@ class NotificationService:
         
         try:
             response = requests.post(self.discord_webhook_url, json=payload, timeout=10)
+            self._discord_send_times.append(time.time())
+            if response.status_code == 429:
+                retry_after = response.json().get('retry_after', 1.0)
+                logger.warning(f"Discord 429 rate limited, retry_after={retry_after}s — dropping: {title}")
+                return
             response.raise_for_status()
             logger.debug(f"Discord notification sent: {title}")
         except requests.RequestException as e:
@@ -52,7 +74,7 @@ class NotificationService:
         self.send_discord(
             f"{platform} Title Update Failed",
             f"Failed to update title on {platform}",
-            color=0xFF0000
+            color=COLOR_ERROR
         )
 
     def notify_stream_info_update_failed(self, platform: str):
@@ -60,7 +82,7 @@ class NotificationService:
         self.send_discord(
             f"{platform} Stream Update Failed",
             f"Failed to update stream info on {platform}",
-            color=0xFF0000
+            color=COLOR_ERROR
         )
 
     def notify_rotation_started(self, playlist_names: list[str]):
@@ -68,7 +90,7 @@ class NotificationService:
         self.send_discord(
             "Content Rotation Started",
             f"Downloading: {', '.join(playlist_names)}",
-            color=0xFFA500
+            color=COLOR_ROTATION_START
         )
 
     def notify_rotation_error(self, message: str):
@@ -76,7 +98,7 @@ class NotificationService:
         self.send_discord(
             "Rotation Error",
             message,
-            color=0xFF0000
+            color=COLOR_ERROR
         )
 
     def notify_download_warning(self, message: str):
@@ -84,7 +106,7 @@ class NotificationService:
         self.send_discord(
             "Download Warning",
             message,
-            color=0xFF0000
+            color=COLOR_WARNING
         )
 
     def notify_next_rotation_ready(self, playlist_names: list[str]):
@@ -92,7 +114,7 @@ class NotificationService:
         self.send_discord(
             "Next Rotation Ready",
             f"Downloaded: {', '.join(playlist_names)}",
-            color=0x00FF00
+            color=COLOR_NEXT_READY
         )
 
     def notify_background_download_warning(self):
@@ -100,7 +122,7 @@ class NotificationService:
         self.send_discord(
             "Background Download Warning",
             "Some playlists failed to download in background",
-            color=0xFF9900
+            color=COLOR_WARNING
         )
 
     def notify_background_download_error(self, error_message: str):
@@ -108,7 +130,7 @@ class NotificationService:
         self.send_discord(
             "Background Download Error",
             f"Failed to download next rotation: {error_message}",
-            color=0xFF0000
+            color=COLOR_ERROR
         )
 
     def notify_rotation_switched(self, playlist_names: list[str]):
@@ -116,7 +138,7 @@ class NotificationService:
         self.send_discord(
             "Now Playing",
             f"Switched to: **{', '.join(playlist_names)}**",
-            color=0x00FF00
+            color=COLOR_SUCCESS
         )
 
     def notify_temp_playback_activated(self, file_count: int):
@@ -124,7 +146,7 @@ class NotificationService:
         self.send_discord(
             "Temp Playback Activated",
             f"Long download detected — streaming {file_count} ready files while download continues",
-            color=0xFFA500
+            color=COLOR_ROTATION_START
         )
 
     def notify_temp_playback_exited(self, playlist_names: list[str]):
@@ -132,7 +154,7 @@ class NotificationService:
         self.send_discord(
             "Temp Playback Complete",
             f"Download finished, switched to: **{', '.join(playlist_names)}**",
-            color=0x00FF00
+            color=COLOR_SUCCESS
         )
 
     def notify_session_resumed(self, session_id: int, video: Optional[str] = None, cursor_s: Optional[float] = None):
@@ -144,7 +166,7 @@ class NotificationService:
         self.send_discord(
             "Session Resumed",
             desc,
-            color=0x0099FF
+            color=COLOR_INFO
         )
 
     def notify_video_transition(self, video_name: str, category: Optional[str] = None):
@@ -155,7 +177,7 @@ class NotificationService:
         self.send_discord(
             "Video Transition",
             desc,
-            color=0x808080
+            color=COLOR_MUTED
         )
 
     def notify_automation_started(self):
@@ -163,7 +185,7 @@ class NotificationService:
         self.send_discord(
             "Automation Started",
             "24/7 stream automation is online",
-            color=0x00FF00
+            color=COLOR_SUCCESS
         )
 
     def notify_automation_shutdown(self):
@@ -171,7 +193,7 @@ class NotificationService:
         self.send_discord(
             "Automation Shutting Down",
             "24/7 stream automation is going offline",
-            color=0xFF9900
+            color=COLOR_WARNING
         )
 
     def notify_streamer_live(self):
@@ -179,7 +201,7 @@ class NotificationService:
         self.send_discord(
             "Streamer is LIVE!",
             "24/7 stream paused",
-            color=0x9146FF
+            color=COLOR_STREAM_LIVE
         )
 
     def notify_streamer_offline(self):
@@ -187,7 +209,7 @@ class NotificationService:
         self.send_discord(
             "Streamer is OFFLINE",
             "24/7 stream resumed",
-            color=0x00FF00
+            color=COLOR_SUCCESS
         )
 
     def notify_automation_error(self, error_message: str):
@@ -195,5 +217,5 @@ class NotificationService:
         self.send_discord(
             "Automation Error",
             f"Unexpected error: {error_message}",
-            color=0xFF0000
+            color=COLOR_ERROR
         )

@@ -1,6 +1,7 @@
 import logging
 import time
 import obsws_python as obs
+from obsws_python.error import OBSSDKRequestError
 from typing import Optional
 import os
 from config.constants import VIDEO_EXTENSIONS
@@ -8,11 +9,32 @@ from config.constants import VIDEO_EXTENSIONS
 logger = logging.getLogger(__name__)
 
 
+# Errors that indicate a dead/disconnected OBS WebSocket
+_CONNECTION_ERROR_HINTS = (
+    'websocket', 'connection', 'socket', 'timed out', 'timeout',
+    'winerror', 'forcibly closed', 'expecting value',
+)
+
+
 class OBSController:
     """Controller for OBS WebSocket operations."""
 
     def __init__(self, obs_client: obs.ReqClient):
         self.obs_client = obs_client
+        self._is_connected = True
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether the OBS WebSocket connection is believed to be alive."""
+        return self._is_connected
+
+    def _check_connection_error(self, error: Exception) -> None:
+        """Mark connection as dead if the error looks like a connectivity failure."""
+        msg = str(error).lower()
+        if any(hint in msg for hint in _CONNECTION_ERROR_HINTS):
+            if self._is_connected:
+                logger.warning("OBS connection lost (detected from error)")
+            self._is_connected = False
 
     def switch_scene(self, scene_name: str) -> bool:
         """Switch OBS to specified scene."""
@@ -21,6 +43,7 @@ class OBSController:
             logger.info(f"Switched to scene: {scene_name}")
             return True
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to switch scene: {e}")
             return False
 
@@ -30,6 +53,7 @@ class OBSController:
             response = self.obs_client.get_current_program_scene()
             return response.current_program_scene_name  # type: ignore
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to get current scene: {e}")
             return None
 
@@ -47,6 +71,7 @@ class OBSController:
             logger.info(f"Stopped VLC source: {source_name}")
             return True
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to stop VLC source: {e}")
             return False
 
@@ -99,6 +124,7 @@ class OBSController:
             return True, video_filenames
 
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to update VLC source: {e}")
             return False, []
 
@@ -117,8 +143,211 @@ class OBSController:
             logger.info("All required scenes verified in OBS.")
             return True
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to verify scenes: {e}")
             return False
+
+    def ensure_scenes(
+        self,
+        scene_stream: str,
+        scene_pause: str,
+        scene_rotation: str,
+        vlc_source_name: str,
+        video_folder: str,
+        pause_image: str,
+        rotation_image: str,
+    ) -> bool:
+        """Ensure all required OBS scenes and sources exist, creating any that are missing.
+
+        Args:
+            scene_stream: Name of the main playback scene (e.g. "OSR Stream")
+            scene_pause: Name of the pause scene
+            scene_rotation: Name of the rotation screen scene
+            vlc_source_name: Name of the VLC video source inside the stream scene
+            video_folder: Path to the live video folder for VLC source
+            pause_image: Absolute path to the default pause image
+            rotation_image: Absolute path to the default rotation image
+
+        Returns:
+            True if all scenes/sources are ready, False on fatal error.
+        """
+        try:
+            scenes_response = self.obs_client.get_scene_list()
+            existing_scenes = {s['sceneName'] for s in scenes_response.scenes}  # type: ignore
+        except Exception as e:
+            self._check_connection_error(e)
+            logger.error(f"Failed to query OBS scenes: {e}")
+            return False
+
+        # Get canvas resolution for fullscreen transforms
+        canvas_width, canvas_height = self._get_canvas_size()
+
+        # --- Stream scene ---
+        if scene_stream not in existing_scenes:
+            if not self._create_scene(scene_stream):
+                return False
+            self._add_vlc_source(scene_stream, vlc_source_name, video_folder, canvas_width, canvas_height)
+        else:
+            # Scene exists — make sure VLC source is present
+            if not self._scene_has_input(scene_stream, vlc_source_name):
+                self._add_vlc_source(scene_stream, vlc_source_name, video_folder, canvas_width, canvas_height)
+
+        # --- Pause scene ---
+        if scene_pause not in existing_scenes:
+            if not self._create_scene(scene_pause):
+                return False
+            self._add_image_source(scene_pause, f"{scene_pause} Image", pause_image, canvas_width, canvas_height)
+        
+        # --- Rotation scene ---
+        if scene_rotation not in existing_scenes:
+            if not self._create_scene(scene_rotation):
+                return False
+            self._add_image_source(scene_rotation, f"{scene_rotation} Image", rotation_image, canvas_width, canvas_height)
+        
+        logger.info("All required OBS scenes and sources are ready")
+        return True
+
+    # ------------------------------------------------------------------
+    # Private helpers for scene / source creation
+    # ------------------------------------------------------------------
+
+    def _get_canvas_size(self) -> tuple[int, int]:
+        """Return the OBS base (canvas) resolution as (width, height)."""
+        try:
+            video_settings = self.obs_client.get_video_settings()
+            return video_settings.base_width, video_settings.base_height  # type: ignore
+        except Exception as e:
+            logger.warning(f"Could not get OBS canvas size, defaulting to 1920x1080: {e}")
+            return 1920, 1080
+
+    def _create_scene(self, scene_name: str) -> bool:
+        """Create a new OBS scene."""
+        try:
+            self.obs_client.create_scene(scene_name)
+            logger.info(f"Created OBS scene: {scene_name}")
+            return True
+        except Exception as e:
+            self._check_connection_error(e)
+            logger.error(f"Failed to create scene '{scene_name}': {e}")
+            return False
+
+    def _scene_has_input(self, scene_name: str, input_name: str) -> bool:
+        """Check whether a scene already contains a specific input source."""
+        try:
+            items = self.obs_client.get_scene_item_list(scene_name)
+            for item in items.scene_items:  # type: ignore
+                if item.get('sourceName') == input_name:
+                    return True
+            return False
+        except Exception as e:
+            logger.debug(f"Could not enumerate items in scene '{scene_name}': {e}")
+            return False
+
+    def _add_vlc_source(
+        self, scene_name: str, source_name: str, video_folder: str,
+        canvas_width: int, canvas_height: int,
+    ) -> None:
+        """Add a VLC Video Source to a scene and set it to fill the canvas."""
+        try:
+            # Build an initial playlist from the video folder
+            playlist_entries: list[dict] = []
+            if os.path.exists(video_folder):
+                for fn in sorted(os.listdir(video_folder)):
+                    if fn.lower().endswith(VIDEO_EXTENSIONS):
+                        playlist_entries.append({"value": os.path.abspath(os.path.join(video_folder, fn))})
+
+            try:
+                self.obs_client.create_input(
+                    sceneName=scene_name,
+                    inputName=source_name,
+                    inputKind="vlc_source",
+                    inputSettings={
+                        "loop": True,
+                        "shuffle": False,
+                        "playlist": playlist_entries,
+                    },
+                    sceneItemEnabled=True,
+                )
+            except OBSSDKRequestError as req_err:
+                if req_err.code == 601:
+                    # Input already exists globally — add it to this scene
+                    logger.info(f"VLC source '{source_name}' already exists, adding to scene '{scene_name}'")
+                    self.obs_client.create_scene_item(scene_name, source_name, enabled=True)
+                else:
+                    raise
+            logger.info(f"Added VLC source '{source_name}' to scene '{scene_name}'")
+
+            # Stretch to fill canvas
+            self._set_source_fullscreen(scene_name, source_name, canvas_width, canvas_height)
+        except Exception as e:
+            self._check_connection_error(e)
+            logger.error(f"Failed to add VLC source to '{scene_name}': {e}")
+
+    def _add_image_source(
+        self, scene_name: str, source_name: str, image_path: str,
+        canvas_width: int, canvas_height: int,
+    ) -> None:
+        """Add an Image source to a scene and set it to fill the canvas."""
+        if not os.path.exists(image_path):
+            logger.warning(
+                f"Default image not found at {image_path} — scene '{scene_name}' created "
+                f"without a source. Drop an image there and restart, or add a source manually."
+            )
+            return
+        try:
+            try:
+                self.obs_client.create_input(
+                    sceneName=scene_name,
+                    inputName=source_name,
+                    inputKind="image_source",
+                    inputSettings={"file": os.path.abspath(image_path)},
+                    sceneItemEnabled=True,
+                )
+            except OBSSDKRequestError as req_err:
+                if req_err.code == 601:
+                    # Input already exists globally — add it to this scene
+                    logger.info(f"Image source '{source_name}' already exists, adding to scene '{scene_name}'")
+                    self.obs_client.create_scene_item(scene_name, source_name, enabled=True)
+                else:
+                    raise
+            logger.info(f"Added image source '{source_name}' to scene '{scene_name}'")
+
+            self._set_source_fullscreen(scene_name, source_name, canvas_width, canvas_height)
+        except Exception as e:
+            self._check_connection_error(e)
+            logger.error(f"Failed to add image source to '{scene_name}': {e}")
+
+    def _set_source_fullscreen(
+        self, scene_name: str, source_name: str,
+        canvas_width: int, canvas_height: int,
+    ) -> None:
+        """Set a scene item's transform to fill the entire canvas."""
+        try:
+            # Find the scene item ID
+            items = self.obs_client.get_scene_item_list(scene_name)
+            item_id = None
+            for item in items.scene_items:  # type: ignore
+                if item.get('sourceName') == source_name:
+                    item_id = item.get('sceneItemId')
+                    break
+            if item_id is None:
+                logger.warning(f"Could not find '{source_name}' in scene '{scene_name}' to set transform")
+                return
+
+            self.obs_client.set_scene_item_transform(
+                scene_name=scene_name,
+                item_id=item_id,
+                transform={
+                    "boundsType": "OBS_BOUNDS_STRETCH",
+                    "boundsWidth": float(canvas_width),
+                    "boundsHeight": float(canvas_height),
+                    "positionX": 0.0,
+                    "positionY": 0.0,
+                },
+            )
+            logger.debug(f"Set '{source_name}' in '{scene_name}' to {canvas_width}x{canvas_height} fullscreen")
+        except Exception as e:
+            logger.warning(f"Failed to set fullscreen transform for '{source_name}': {e}")
 
     def get_media_input_status(self, source_name: str) -> Optional[dict]:
         """Get playback status of a media input source (VLC).
@@ -138,6 +367,7 @@ class OBSController:
                 'media_duration': response.media_duration,  # type: ignore (milliseconds)
             }
         except Exception as e:
+            self._check_connection_error(e)
             logger.debug(f"Failed to get media input status for {source_name}: {e}")
             return None
 
@@ -159,6 +389,7 @@ class OBSController:
             logger.info(f"Seeked {source_name} to {position_ms}ms ({position_ms/1000:.1f}s)")
             return True
         except Exception as e:
+            self._check_connection_error(e)
             logger.error(f"Failed to seek media {source_name}: {e}")
             return False
 
@@ -179,6 +410,7 @@ class OBSController:
             logger.info(f"Triggered play on {source_name}")
             return True
         except Exception as e:
+            self._check_connection_error(e)
             logger.debug(f"Failed to trigger play on {source_name}: {e}")
             return False
 
@@ -197,20 +429,20 @@ class OBSController:
             time.sleep(wait_seconds)
         return success
 
-    def prepare_for_content_switch(self, scene_content_switch: str, 
+    def prepare_for_content_switch(self, scene_rotation_screen: str, 
                                    vlc_source_name: str, wait_seconds: float = 3.0) -> bool:
-        """Prepare for content switch (switch to content-switch scene and stop VLC).
+        """Prepare for content switch (switch to Rotation screen scene and stop VLC).
         
         Args:
-            scene_content_switch: Name of content-switch scene
+            scene_rotation_screen: Name of Rotation screen scene
             vlc_source_name: Name of VLC source
             wait_seconds: Seconds to wait for OS to release file locks
         
         Returns:
             True if successful
         """
-        # Switch to content-switch scene
-        if not self.switch_scene(scene_content_switch):
+        # Switch to Rotation screen scene
+        if not self.switch_scene(scene_rotation_screen):
             return False
         
         # Stop VLC source

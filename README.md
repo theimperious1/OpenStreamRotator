@@ -53,13 +53,13 @@ cp .env.example .env
 | `OBS_HOST` | No | `localhost` | OBS WebSocket host |
 | `OBS_PORT` | No | `4455` | OBS WebSocket port |
 | `OBS_PASSWORD` | Yes | — | OBS WebSocket password |
-| `SCENE_LIVE` | No | `Pause screen` | OBS scene shown when target streamer is live |
-| `SCENE_OFFLINE` | No | `Stream` | OBS scene for normal 24/7 playback |
-| `SCENE_CONTENT_SWITCH` | No | `content-switch` | OBS scene shown during rotation transitions |
-| `VLC_SOURCE_NAME` | No | `Playlist` | Name of the VLC media source in OBS |
+| `SCENE_PAUSE` | No | `OSR Pause screen` | OBS scene shown when target streamer is live (pauses 24/7 content) |
+| `SCENE_STREAM` | No | `OSR Stream` | OBS scene for normal 24/7 playback |
+| `SCENE_ROTATION_SCREEN` | No | `OSR Rotation screen` | OBS scene shown during rotation transitions |
+| `VLC_SOURCE_NAME` | No | `OSR Playlist` | Name of the VLC media source in OBS |
 | `DISCORD_WEBHOOK_URL` | No | — | Discord webhook for notifications |
-| `VIDEO_FOLDER` | Yes | `C:/stream_videos/` | Absolute path to the live playback folder (VLC reads from here) |
-| `NEXT_ROTATION_FOLDER` | Yes | `C:/stream_videos_next/` | Absolute path to the pending/download folder |
+| `VIDEO_FOLDER` | No | `content/live/` | Path to the live playback folder (VLC reads from here) |
+| `NEXT_ROTATION_FOLDER` | No | `content/pending/` | Path to the pending/download folder |
 | `BROADCASTER_ID` | No | — | Twitch broadcaster ID (auto-resolved from `TWITCH_USER_LOGIN` if empty) |
 
 ### Playlists (`config/playlists.json`)
@@ -167,19 +167,25 @@ Want to stop a playlist from being selected in future rotations? Open `config/pl
 
 ## OBS Setup
 
-You need **three scenes** and one **VLC media source**:
+On first startup, the system automatically creates any missing scenes and sources in OBS:
+
+- **`OSR Stream`** — with a VLC Video Source named `Playlist` pointing to your video folder
+- **`OSR Pause screen`** — with an Image source pointing to `content/pause/default.png`
+- **`OSR Rotation screen`** — with an Image source pointing to `content/rotation/default.png`
+
+All sources are automatically sized to fill the canvas. You can replace the default images with your own, add overlays, or customize the scenes in OBS as needed.
 
 ### Scenes
 
-1. **`Stream`** (default name, configurable via `SCENE_OFFLINE`) — The main playback scene. Should contain your VLC media source and any overlays. This is what viewers see during normal 24/7 operation.
-2. **`Pause screen`** (default name, configurable via `SCENE_LIVE`) — Shown when the target streamer goes live. Typically a static image telling viewers the main stream is live.
-3. **`content-switch`** (default name, configurable via `SCENE_CONTENT_SWITCH`) — Brief transition scene shown while content folders are being swapped. Can be a loading animation or static image.
+1. **`OSR Stream`** (default name, configurable via `SCENE_STREAM`) — The main playback scene. Contains your VLC media source and any overlays. This is what viewers see during normal 24/7 operation.
+2. **`OSR Pause screen`** (default name, configurable via `SCENE_PAUSE`) — Shown when the target streamer goes live. Typically a static image telling viewers the main stream is live.
+3. **`OSR Rotation screen`** (default name, configurable via `SCENE_ROTATION_SCREEN`) — Brief transition scene shown while content folders are being swapped. Can be a loading animation or static image.
 
 ### VLC Media Source
 
-Add a **VLC Video Source** (not a regular Media Source) named **`Playlist`** (configurable via `VLC_SOURCE_NAME`) to your `Stream` scene with these settings:
+The VLC source is created automatically inside the `OSR Stream` scene. If you need to configure it manually, add a **VLC Video Source** (not a regular Media Source) named **`OSR Playlist`** (configurable via `VLC_SOURCE_NAME`) to your stream scene with these settings:
 
-- **Playlist directory**: Point it to your `VIDEO_FOLDER` path from `.env`
+- **Playlist directory**: Point it to your `VIDEO_FOLDER` path
 - **Loop**: Enabled (the system handles advancement by deleting played files; loop ensures VLC keeps playing)
 - **Shuffle**: Disabled (the system controls ordering via filename prefixes)
 
@@ -219,7 +225,7 @@ python main.py
 
 The system will:
 1. Connect to OBS via WebSocket
-2. Verify all required scenes and sources exist
+2. Create any missing scenes and sources in OBS (or verify existing ones)
 3. Sync playlist configuration to the database
 4. Resume any interrupted session or start a new rotation
 5. Begin the main automation loop
@@ -228,7 +234,7 @@ The system will:
 
 1. Playlists are selected (least-recently-played first, excluding currently playing and currently downloading playlists)
 2. Videos are downloaded via yt-dlp into the pending folder
-3. When downloads complete, OBS switches to the content-switch scene
+3. When downloads complete, OBS switches to the Rotation screen scene
 4. The live folder is cleared and pending content is moved in
 5. Videos are renamed with ordering prefixes (`01_video.mp4`, `02_video.mp4`, etc.) so VLC plays them grouped by playlist
 6. VLC reloads, OBS switches back to the playback scene
@@ -346,7 +352,7 @@ OpenStreamRotator/
     ├── pending/                     # Next rotation downloads
     │   ├── archive.txt              # yt-dlp download archive (prevents re-downloads)
     │   └── temp/                    # yt-dlp partial download fragments
-    └── content-switch/              # Assets for the content-switch OBS scene
+    └── rotation/              # Assets for the Rotation Screen OBS scene
 ```
 
 ## Credits

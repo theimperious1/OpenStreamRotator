@@ -302,7 +302,7 @@ class TwitchUpdater(StreamPlatform):
             self.log_error("Update title", e)
             return False
 
-    def update_category(self, category_name: str) -> bool:
+    async def update_category(self, category_name: str) -> bool:
         """Update Twitch stream category/game."""
         game_id = self._get_game_id(category_name)
         if not game_id:

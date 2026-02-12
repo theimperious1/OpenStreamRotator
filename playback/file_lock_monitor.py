@@ -11,11 +11,11 @@ VLC loops the last video (never releasing the lock).
 
 import logging
 import os
-import re
 import time
 from typing import Optional, TYPE_CHECKING
 
 from config.constants import VIDEO_EXTENSIONS
+from utils.video_utils import strip_ordering_prefix, resolve_category_for_video
 
 if TYPE_CHECKING:
     from controllers.obs_controller import OBSController
@@ -23,24 +23,6 @@ if TYPE_CHECKING:
     from config.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
-
-# Prefix pattern: "XX_" where XX is a 2-digit number
-PREFIX_PATTERN = re.compile(r'^\d{2}_')
-
-
-def strip_ordering_prefix(filename: str) -> str:
-    """Strip the ordering prefix (e.g., '01_') from a video filename.
-    
-    Used to recover the original filename for database lookups,
-    since videos are stored in the database without the prefix.
-    
-    Args:
-        filename: Filename with optional ordering prefix (e.g., '01_CATS Being the Boss.webm')
-    
-    Returns:
-        Original filename without prefix (e.g., 'CATS Being the Boss.webm')
-    """
-    return PREFIX_PATTERN.sub('', filename)
 
 
 def is_file_locked(filepath: str) -> bool:
@@ -73,17 +55,19 @@ class FileLockMonitor:
     """
 
     def __init__(self, db: 'DatabaseManager', obs_controller: 'OBSController', vlc_source_name: str,
-                 config: Optional['ConfigManager'] = None):
+                 config: Optional['ConfigManager'] = None, scene_stream: str = "OSR Stream"):
         self.db = db
         self.obs_controller = obs_controller
         self.vlc_source_name = vlc_source_name
         self.config = config
+        self.scene_stream = scene_stream
         
         self.video_folder: str = ""
         self._current_video: Optional[str] = None  # Filename of currently playing video
         self._all_content_consumed: bool = False
         self._temp_playback_mode: bool = False
         self._last_video_duration_seconds: int = 0  # Cached duration for last-video polling
+        self._needs_vlc_refresh: bool = False  # Signal: last video done in temp playback, new files may exist
         
         # Debounce: when a file is freed, wait one extra check cycle before deleting.
         # This avoids false positives from VLC briefly releasing a file between reads.
@@ -104,6 +88,8 @@ class FileLockMonitor:
         self.video_folder = video_folder
         self._current_video = None
         self._all_content_consumed = False
+        self._needs_vlc_refresh = False
+        self._temp_playback_mode = False
         self._pending_transition_file = None
         self._last_video_duration_seconds = 0
         
@@ -137,6 +123,7 @@ class FileLockMonitor:
         """Reset the monitor state."""
         self._current_video = None
         self._all_content_consumed = False
+        self._needs_vlc_refresh = False
         self._pending_transition_file = None
         self._last_video_duration_seconds = 0
         logger.debug("File lock monitor reset")
@@ -148,12 +135,28 @@ class FileLockMonitor:
             enabled: Whether temp playback is active
         """
         self._temp_playback_mode = enabled
+        # Clear stale debounce state to prevent false transitions from old data
+        self._pending_transition_file = None
         logger.info(f"File lock monitor temp playback mode: {'enabled' if enabled else 'disabled'}")
 
     @property
     def all_content_consumed(self) -> bool:
         """Whether all videos have been played and the rotation is complete."""
         return self._all_content_consumed
+
+    @property
+    def needs_vlc_refresh(self) -> bool:
+        """Whether VLC needs refreshing during temp playback.
+        
+        Set when the last video finishes in temp playback mode.
+        The automation controller should refresh VLC with current folder
+        contents and reinitialize the monitor, then clear this flag.
+        """
+        return self._needs_vlc_refresh
+
+    def clear_vlc_refresh_flag(self) -> None:
+        """Clear the VLC refresh flag after the controller handles it."""
+        self._needs_vlc_refresh = False
 
     @property
     def current_video(self) -> Optional[str]:
@@ -192,6 +195,21 @@ class FileLockMonitor:
         if not self.video_folder or self._all_content_consumed:
             result['all_consumed'] = self._all_content_consumed
             return result
+
+        # If OBS is disconnected, VLC releases all file locks — every video
+        # would appear "finished" and get deleted.  Pause monitoring until
+        # the connection is restored by the main-loop reconnect logic.
+        if self.obs_controller and not self.obs_controller.is_connected:
+            return result
+
+        # If we're not on the stream scene (pause screen, manual switch, etc.),
+        # skip all transition detection and deletion.  VLC keeps playing in the
+        # background, so when we return to the stream scene monitoring resumes
+        # with whatever VLC is currently on.
+        if self.obs_controller:
+            current_scene = self.obs_controller.get_current_scene()
+            if current_scene and current_scene != self.scene_stream:
+                return result
         
         if not self._current_video:
             # No current video tracked - try to find one
@@ -224,11 +242,42 @@ class FileLockMonitor:
         
         # --- Last video handling: poll VLC cursor vs duration ---
         if is_last_video:
+            # Already signaled for refresh — don't re-enter (avoids duplicate transition)
+            if self._needs_vlc_refresh:
+                return result
             return self._check_last_video(result)
+        
+        # Already signaled for VLC refresh — wait for controller to handle it
+        if self._needs_vlc_refresh:
+            return result
         
         # --- Normal handling: check if current file's lock has been freed ---
         if is_file_locked(filepath):
-            # Still playing, no transition
+            # Still playing, no transition.
+            # In temp playback mode, VLC may have fewer files in its playlist
+            # than what's on disk (new downloads arrived after VLC was loaded).
+            # If VLC's cursor is near the end and the file is still locked,
+            # VLC is looping its last known video — signal a VLC refresh so
+            # the new files get picked up at this natural transition point.
+            if self._temp_playback_mode and self.obs_controller:
+                media_status = self.obs_controller.get_media_input_status(self.vlc_source_name)
+                if media_status:
+                    cursor_ms = media_status.get('media_cursor')
+                    duration_ms = media_status.get('media_duration')
+                    if (cursor_ms is not None and duration_ms is not None
+                            and duration_ms > 0 and (duration_ms - cursor_ms) <= 1500):
+                        previous_original = strip_ordering_prefix(self._current_video) if self._current_video else None
+                        logger.info(
+                            f"Temp playback: VLC looping video near end while file locked — "
+                            f"signaling VLC refresh: {previous_original} "
+                            f"(cursor={cursor_ms}ms, duration={duration_ms}ms)"
+                        )
+                        self._needs_vlc_refresh = True
+                        result['transition'] = True
+                        result['previous_video'] = previous_original
+                        result['current_video'] = None
+                        return result
+
             self._pending_transition_file = None
             return result
         
@@ -315,7 +364,22 @@ class FileLockMonitor:
                     f"(cursor={cursor_ms}ms, duration={duration_ms}ms, remaining={remaining_ms}ms)"
                 )
                 
-                # Delete the last video
+                # Log playback before any state changes
+                result['transition'] = True
+                result['previous_video'] = previous_original
+                
+                # In temp playback mode, signal for VLC refresh instead of marking consumed.
+                # New files may have been downloaded while this video was playing.
+                # The automation controller will refresh VLC at this natural transition
+                # point (no mid-video disruption) and reinitialize the monitor.
+                if self._temp_playback_mode:
+                    logger.info("Last video done in temp playback — signaling VLC refresh")
+                    self._needs_vlc_refresh = True
+                    # Don't delete or mark consumed yet — controller handles it
+                    result['current_video'] = None
+                    return result
+                
+                # Normal mode: delete the last video and mark consumed
                 if self._current_video:
                     filepath = os.path.join(self.video_folder, self._current_video)
                     # Try to delete - may fail if VLC still has lock
@@ -324,8 +388,6 @@ class FileLockMonitor:
                 
                 self._all_content_consumed = True
                 self._current_video = None
-                result['transition'] = True
-                result['previous_video'] = previous_original
                 result['current_video'] = None
                 result['all_consumed'] = True
         
@@ -390,36 +452,9 @@ class FileLockMonitor:
     def get_category_for_current_video(self) -> Optional[str]:
         """Get the stream category for the currently playing video.
         
-        Strips ordering prefix, looks up original filename in database,
-        finds the source playlist, and returns the playlist's category.
-        
         Returns:
             Category name, or None if unable to determine
         """
-        if not self._current_video:
+        if not self._current_video or not self.config:
             return None
-        
-        original_name = strip_ordering_prefix(self._current_video)
-        
-        try:
-            video = self.db.get_video_by_filename(original_name)
-            if not video:
-                logger.debug(f"Video not found in database: {original_name}")
-                return None
-            
-            playlist_name = video.get('playlist_name')
-            if not playlist_name:
-                return None
-            
-            # Look up the actual category from playlists config
-            # Falls back to playlist_name if no config or no category field
-            if self.config:
-                playlists_config = self.config.get_playlists()
-                for p in playlists_config:
-                    if p.get('name') == playlist_name:
-                        return p.get('category') or p.get('name')
-            
-            return playlist_name
-        except Exception as e:
-            logger.error(f"Error getting category for video {original_name}: {e}")
-            return None
+        return resolve_category_for_video(self._current_video, self.db, self.config)

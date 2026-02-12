@@ -1,7 +1,9 @@
 # theimperious1's personal ignores
-videos/
+content/live/
+content/pending/
 stream_data.db
 kick_tokens.db
+twitch_tokens.db
 .idea/
 deprecated/
 

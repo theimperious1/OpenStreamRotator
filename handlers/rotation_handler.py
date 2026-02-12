@@ -7,6 +7,7 @@ from core.database import DatabaseManager
 from config.config_manager import ConfigManager
 from managers.playlist_manager import PlaylistManager
 from services.notification_service import NotificationService
+from config.constants import DEFAULT_VIDEO_FOLDER
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class RotationHandler:
         
         # Check if we have prepared content waiting in backup
         settings = self.config.get_settings()
-        base_path = os.path.dirname(settings.get('video_folder', 'C:/stream_videos/'))
+        base_path = os.path.dirname(settings.get('video_folder', DEFAULT_VIDEO_FOLDER))
         pending_backup_folder = os.path.normpath(os.path.join(base_path, 'temp_pending_backup'))
         
         if os.path.exists(pending_backup_folder) and os.listdir(pending_backup_folder):

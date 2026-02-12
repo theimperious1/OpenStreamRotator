@@ -3,6 +3,7 @@ import logging
 import sys
 import os
 import io
+import threading
 
 # Force UTF-8 encoding for console output to handle Unicode characters
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -48,7 +49,12 @@ if __name__ == "__main__":
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
     finally:
-        # Force-exit if a background download thread is still blocking
+        # Force-exit if a background download thread is still blocking after a grace period.
         # yt-dlp's extract_info() cannot be interrupted from another thread,
-        # so os._exit is the last resort to avoid hanging indefinitely
-        os._exit(0)
+        # so os._exit is the last resort to avoid hanging indefinitely.
+        alive_non_daemon = [t for t in threading.enumerate()
+                           if t.is_alive() and not t.daemon and t.name != 'MainThread']
+        if alive_non_daemon:
+            logger.warning(f"Force-exiting: {len(alive_non_daemon)} non-daemon threads still alive: "
+                          f"{[t.name for t in alive_non_daemon]}")
+            os._exit(0)

@@ -17,12 +17,14 @@ from managers.stream_manager import StreamManager
 from controllers.obs_controller import OBSController
 from managers.platform_manager import PlatformManager
 from services.notification_service import NotificationService
-from playback.file_lock_monitor import FileLockMonitor, strip_ordering_prefix
+from playback.file_lock_monitor import FileLockMonitor
+from utils.video_utils import strip_ordering_prefix
 from services.twitch_live_checker import TwitchLiveChecker
 from handlers.rotation_handler import RotationHandler
 from handlers.content_switch_handler import ContentSwitchHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
+from config.constants import DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER, DEFAULT_PAUSE_IMAGE, DEFAULT_ROTATION_IMAGE
 
 # Load environment variables
 load_dotenv()
@@ -33,10 +35,10 @@ logger = logging.getLogger(__name__)
 OBS_HOST = os.getenv("OBS_HOST", "127.0.0.1")
 OBS_PORT = int(os.getenv("OBS_PORT", 4455))
 OBS_PASSWORD = os.getenv("OBS_PASSWORD", "")
-SCENE_LIVE = os.getenv("SCENE_LIVE", "Pause screen")
-SCENE_OFFLINE = os.getenv("SCENE_OFFLINE", "Stream")
-SCENE_CONTENT_SWITCH = os.getenv("SCENE_CONTENT_SWITCH", "content-switch")
-VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", "Playlist")
+SCENE_PAUSE = os.getenv("SCENE_PAUSE", os.getenv("SCENE_LIVE", "OSR Pause screen"))
+SCENE_STREAM = os.getenv("SCENE_STREAM", os.getenv("SCENE_OFFLINE", "OSR Stream"))
+SCENE_ROTATION_SCREEN = os.getenv("SCENE_ROTATION_SCREEN", "OSR Rotation screen")
+VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", "OSR Playlist")
 
 # Twitch Configuration (used for live checker)
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
@@ -97,7 +99,7 @@ class AutomationController:
         self._downloads_triggered_this_rotation = False  # Track if downloads already triggered after rotation
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
         self._background_download_in_progress = False  # Track if a background download is currently in progress
-        self.shutdown_event = False
+        self._shutdown_requested = False
         
         # Background download state (thread-safe communication from background thread)
         self._pending_db_playlists_to_initialize = None  # Playlists to initialize in DB
@@ -116,7 +118,7 @@ class AutomationController:
         self._shutdown_event.set()  # Signal download threads to abort
         kill_processor_processes()
         logger.info("Cleanup complete. Setting shutdown flag...")
-        self.shutdown_event = True
+        self._shutdown_requested = True
 
     def _initialize_handlers(self):
         """Initialize all handler objects after OBS and services are ready."""
@@ -136,7 +138,10 @@ class AutomationController:
         self.temp_playback_handler = TempPlaybackHandler(
             self.db, self.config_manager, self.playlist_manager,
             self.obs_controller, self.stream_manager,
-            self.notification_service
+            self.notification_service,
+            scene_stream=SCENE_STREAM,
+            scene_rotation_screen=SCENE_ROTATION_SCREEN,
+            vlc_source_name=VLC_SOURCE_NAME
         )
         # Set up callbacks for coordination
         self.temp_playback_handler.set_callbacks(
@@ -149,6 +154,46 @@ class AutomationController:
         )
         
         logger.info("Handlers initialized successfully")
+
+    def _reinitialize_after_obs_reconnect(self):
+        """Re-initialize handlers after OBS reconnect, preserving temp playback state.
+        
+        When OBS disconnects and reconnects, we need new handler instances that
+        reference the fresh OBS controller.  However, if temp playback was active,
+        the new TempPlaybackHandler must inherit the active state — otherwise the
+        system loses track of temp playback and may corrupt the pending folder.
+        """
+        # Capture temp playback state before handlers are replaced
+        temp_was_active = (
+            self.temp_playback_handler is not None
+            and self.temp_playback_handler.is_active
+        )
+        temp_session_id = (
+            self.temp_playback_handler.current_session_id
+            if temp_was_active and self.temp_playback_handler else None
+        )
+
+        # Capture file lock monitor temp mode
+        monitor_was_temp = (
+            self.file_lock_monitor is not None
+            and self.file_lock_monitor._temp_playback_mode
+        )
+
+        self._initialize_handlers()
+
+        # Restore temp playback state on the new handler instance
+        if temp_was_active and self.temp_playback_handler:
+            self.temp_playback_handler._active = True
+            if temp_session_id is not None:
+                self.temp_playback_handler.set_session_id(temp_session_id)
+            logger.info("Preserved temp playback active state across OBS reconnect")
+
+        self._initialize_file_lock_monitor()
+
+        # Restore temp mode on the new file lock monitor
+        if monitor_was_temp and self.file_lock_monitor:
+            self.file_lock_monitor.set_temp_playback_mode(True)
+            logger.info("Preserved file lock monitor temp playback mode across OBS reconnect")
 
     def save_playback_on_exit(self):
         """Save current state when program exits."""
@@ -170,7 +215,7 @@ class AutomationController:
         # Switch to pause scene on exit
         if self.obs_controller:
             try:
-                self.obs_controller.switch_scene(SCENE_LIVE)
+                self.obs_controller.switch_scene(SCENE_PAUSE)
                 logger.info("Switched to pause scene on exit")
             except Exception as e:
                 logger.debug(f"Failed to switch scene on exit: {e}")
@@ -186,6 +231,34 @@ class AutomationController:
             logger.error(f"Failed to connect to OBS: {e}")
             return False
 
+    def reconnect_obs(self, max_retries: int = 0, base_delay: float = 2.0, max_delay: float = 60.0) -> bool:
+        """Reconnect to OBS with exponential backoff.
+
+        Args:
+            max_retries: Maximum retry attempts (0 = unlimited until shutdown).
+            base_delay: Starting delay in seconds between retries.
+            max_delay: Maximum delay cap in seconds.
+
+        Returns:
+            True if reconnected, False if shutdown was requested before reconnecting.
+        """
+        attempt = 0
+        delay = base_delay
+        while not self._shutdown_event.is_set():
+            attempt += 1
+            if max_retries and attempt > max_retries:
+                logger.error(f"OBS reconnect failed after {max_retries} attempts")
+                return False
+            logger.info(f"OBS reconnect attempt {attempt} (waiting {delay:.0f}s)...")
+            # Use shutdown event for interruptible sleep
+            if self._shutdown_event.wait(timeout=delay):
+                return False  # Shutdown requested
+            if self.connect_obs():
+                logger.info(f"OBS reconnected after {attempt} attempt(s)")
+                return True
+            delay = min(delay * 2, max_delay)
+        return False
+
     def setup_platforms(self):
         """Initialize enabled streaming platforms."""
         self.platform_manager.setup(self.twitch_live_checker)
@@ -197,7 +270,7 @@ class AutomationController:
         logger.info("Starting new rotation session...")
 
         settings = self.config_manager.get_settings()
-        next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+        next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
 
         # Use prepared playlists or select new ones
         using_prepared = False
@@ -269,6 +342,13 @@ class AutomationController:
         assert self.content_switch_handler is not None, "Content switch handler not initialized"
         assert self.stream_manager is not None, "Stream manager not initialized"
         
+        # Safety guard: never execute content switch while temp playback is active.
+        # Temp playback streams from the pending folder — switching content would
+        # destroy the live folder and disrupt playback.
+        if self.temp_playback_handler and self.temp_playback_handler.is_active:
+            logger.error("execute_content_switch called while temp playback is active — aborting")
+            return False
+        
         if not self.obs_controller:
             logger.error("OBS controller not initialized")
             return False
@@ -277,12 +357,12 @@ class AutomationController:
         self.is_rotating = True
 
         settings = self.config_manager.get_settings()
-        current_folder = settings.get('video_folder', 'C:/stream_videos/')
-        next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+        current_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
+        next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
 
         try:
             # Prepare for switch
-            if not self.content_switch_handler.prepare_for_switch(SCENE_CONTENT_SWITCH, VLC_SOURCE_NAME):
+            if not self.content_switch_handler.prepare_for_switch(SCENE_ROTATION_SCREEN, VLC_SOURCE_NAME):
                 logger.error("Failed to prepare for content switch")
                 self.is_rotating = False
                 return False
@@ -312,21 +392,13 @@ class AutomationController:
                 logger.warning(f"Failed to rename videos with prefix: {e}")
 
             # Finalize (update VLC + switch scene)
-            target_scene = SCENE_LIVE if self.last_stream_status == "live" else SCENE_OFFLINE
+            target_scene = SCENE_PAUSE if self.last_stream_status == "live" else SCENE_STREAM
             finalize_success, vlc_playlist = self.content_switch_handler.finalize_switch(
-                current_folder, VLC_SOURCE_NAME, target_scene, SCENE_OFFLINE, self.last_stream_status
+                current_folder, VLC_SOURCE_NAME, target_scene, SCENE_STREAM, self.last_stream_status
             )
             if not finalize_success:
                 self.is_rotating = False
                 return False
-
-            # Mark playlists as played
-            try:
-                session = self.db.get_current_session()
-                if session:
-                    self.content_switch_handler.mark_playlists_as_played(session.get('id'))
-            except Exception as e:
-                logger.warning(f"Failed to mark playlists as played: {e}")
 
             # Initialize file lock monitor for this rotation
             self._initialize_file_lock_monitor(current_folder)
@@ -361,7 +433,7 @@ class AutomationController:
             # Clean up temporary download files from the previous rotation
             # Safe to do now that content switch is complete
             settings = self.config_manager.get_settings()
-            pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
             self.playlist_manager.cleanup_temp_downloads(pending_folder)
             
             # Notify rotation switched with playlist names
@@ -396,13 +468,16 @@ class AutomationController:
         
         if video_folder is None:
             settings = self.config_manager.get_settings()
-            video_folder = settings.get('video_folder', 'C:/stream_videos/')
+            video_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
         
         if self.file_lock_monitor is None:
             self.file_lock_monitor = FileLockMonitor(
                 self.db, self.obs_controller, VLC_SOURCE_NAME,
-                config=self.config_manager
+                config=self.config_manager, scene_stream=SCENE_STREAM
             )
+        else:
+            # Update reference after OBS reconnect (new OBSController instance)
+            self.file_lock_monitor.obs_controller = self.obs_controller
         
         self.file_lock_monitor.initialize(str(video_folder))
 
@@ -426,6 +501,80 @@ class AutomationController:
             except Exception as e:
                 logger.warning(f"Failed to update category for current video: {e}")
 
+    async def _handle_temp_playback_vlc_refresh(self) -> None:
+        """Refresh VLC source at the natural end of a video during temp playback.
+        
+        Called when the file lock monitor detects the last video finished while
+        in temp playback mode.  New files may have been downloaded since VLC was
+        last loaded — this is the safe moment to reload (video just ended, no
+        mid-video disruption for viewers).
+        
+        If new files exist  → refresh VLC, reinitialize monitor, continue playing.
+        If no new files     → delete the finished video, mark consumed, let the
+                              normal temp-playback-exit flow handle it.
+        """
+        if not self.file_lock_monitor:
+            return
+        
+        settings = self.config_manager.get_settings()
+        pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
+        
+        # Stop VLC to release file locks before deleting the finished video.
+        # A scene switch alone doesn't release VLC's grip on the file.
+        if self.obs_controller:
+            self.obs_controller.switch_scene(SCENE_ROTATION_SCREEN)
+            self.obs_controller.stop_vlc_source(VLC_SOURCE_NAME)
+            await asyncio.sleep(0.5)
+        
+        # Delete the finished video now (monitor deferred deletion for us)
+        finished_video = self.file_lock_monitor.current_video
+        undeletable_file = None
+        if finished_video:
+            filepath = os.path.join(pending_folder, finished_video)
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                    logger.info(f"Deleted completed temp playback video: {finished_video}")
+                except PermissionError:
+                    logger.warning(f"Cannot delete {finished_video} - still locked, excluding from refresh")
+                    undeletable_file = finished_video
+                except Exception as e:
+                    logger.error(f"Failed to delete temp playback video {finished_video}: {e}")
+                    undeletable_file = finished_video
+        
+        # Check if new files are available (exclude the undeletable finished video)
+        new_files = self.playlist_manager.get_complete_video_files(pending_folder)
+        if undeletable_file and undeletable_file in new_files:
+            new_files.remove(undeletable_file)
+        
+        if new_files:
+            logger.info(f"Temp playback VLC refresh: {len(new_files)} files available in pending")
+            
+            if not self.obs_controller:
+                logger.error("No OBS controller available for temp playback VLC refresh")
+                return
+            
+            self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, pending_folder)
+            
+            await asyncio.sleep(0.3)
+            self.obs_controller.switch_scene(SCENE_STREAM)
+            
+            # Reinitialize monitor to track the refreshed file list
+            self.file_lock_monitor.clear_vlc_refresh_flag()
+            self._initialize_file_lock_monitor(pending_folder)
+            if self.file_lock_monitor:
+                self.file_lock_monitor.set_temp_playback_mode(True)
+            
+            # Update category for the new video
+            await self._update_category_for_current_video()
+            
+            logger.info("Temp playback VLC refreshed — continuing playback")
+        else:
+            # No new files — mark consumed so normal exit flow kicks in
+            logger.info("No new files in pending after last temp video — marking consumed")
+            self.file_lock_monitor.clear_vlc_refresh_flag()
+            self.file_lock_monitor._all_content_consumed = True
+
     async def _trigger_next_rotation_async(self) -> None:
         """Trigger next rotation selection and background download.
         
@@ -440,10 +589,8 @@ class AutomationController:
             if next_playlists:
                 logger.info(f"Auto-triggered next rotation selection after temp playback: {[p['name'] for p in next_playlists]}")
                 
-                # Start background download
-                settings = self.config_manager.get_settings()
-                next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
-                
+                # Mark downloads triggered so check_for_rotation() doesn't also trigger them
+                self._downloads_triggered_this_rotation = True
                 self._background_download_in_progress = True
                 loop = asyncio.get_event_loop()
                 loop.run_in_executor(self.executor, self._sync_background_download_next_rotation, next_playlists)
@@ -462,7 +609,7 @@ class AutomationController:
         try:
             logger.info(f"Downloading next rotation in thread: {[p['name'] for p in playlists]}")
             settings = self.config_manager.get_settings()
-            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
             
             # Queue database initialization to be done in main thread
             self._pending_db_playlists_to_initialize = [p['name'] for p in playlists]
@@ -585,12 +732,22 @@ class AutomationController:
                             self.notification_service.notify_video_transition(current_video, category)
                     except Exception as e:
                         logger.warning(f"Failed to update category on video transition: {e}")
+            
+            # Handle VLC refresh during temp playback: last video finished but
+            # new files may have been downloaded.  Refresh VLC at this natural
+            # transition point (no mid-video disruption) and reinitialize.
+            if self.file_lock_monitor.needs_vlc_refresh:
+                await self._handle_temp_playback_vlc_refresh()
+                return
 
         # Trigger background download only if pending folder is empty and not already triggered
         # Skip on first loop after resume to avoid downloading when resuming into existing rotation
+        # Skip entirely during temp playback — pending folder is in use for playback
         settings = self.config_manager.get_settings()
-        pending_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
-        if (not self._downloads_triggered_this_rotation and 
+        pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
+        temp_active = self.temp_playback_handler is not None and self.temp_playback_handler.is_active
+        if (not temp_active and
+            not self._downloads_triggered_this_rotation and 
             self.playlist_manager.is_folder_empty(pending_folder) and 
             not self._background_download_in_progress and
             not self._just_resumed_session):
@@ -618,12 +775,8 @@ class AutomationController:
             self.temp_playback_handler and not self.temp_playback_handler.is_active):
             
             # Check if we have prepared playlists downloading but not completed yet
-            next_playlists_raw = session.get('next_playlists', [])
-            next_playlists_status_raw = session.get('next_playlists_status', {})
-            
-            # Parse JSON if needed
-            next_playlists = json.loads(next_playlists_raw) if isinstance(next_playlists_raw, str) else (next_playlists_raw or [])
-            next_playlists_status = json.loads(next_playlists_status_raw) if isinstance(next_playlists_status_raw, str) else (next_playlists_status_raw or {})
+            next_playlists = DatabaseManager.parse_json_field(session.get('next_playlists'), [])
+            next_playlists_status: dict = DatabaseManager.parse_json_field(session.get('next_playlists_status'), {})
             
             # Get pending folder status
             pending_complete_files = self.playlist_manager.get_complete_video_files(pending_folder)
@@ -643,6 +796,8 @@ class AutomationController:
                 await self.temp_playback_handler.activate(session)
                 # Re-initialize file lock monitor to watch the pending folder
                 self._initialize_file_lock_monitor(pending_folder)
+                if self.file_lock_monitor:
+                    self.file_lock_monitor.set_temp_playback_mode(True)
                 
                 # Correct the category based on the actual video VLC is playing
                 # (activate() guesses from playlist order, but VLC picks alphabetically)
@@ -651,8 +806,9 @@ class AutomationController:
                 return
         
         # Check if we should rotate (all content consumed + next rotation ready)
+        # Skip during temp playback — monitor() -> exit() handles the proper sequencing
         should_rotate = False
-        if all_consumed:
+        if all_consumed and not temp_active:
             # Only rotate on pending content if no background download is in progress
             pending_content_ready = has_pending_content and not self._background_download_in_progress
             should_rotate = self.next_prepared_playlists or pending_content_ready
@@ -726,7 +882,7 @@ class AutomationController:
         """
         try:
             settings = self.config_manager.get_settings()
-            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
+            next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
             
             # Ensure folder exists
             os.makedirs(next_folder, exist_ok=True)
@@ -766,12 +922,201 @@ class AutomationController:
                     self._background_download_in_progress = False
             
             # Run in background thread
+            self._background_download_in_progress = True
             loop = asyncio.get_event_loop()
             loop.run_in_executor(self.executor, resume_downloads)
             logger.info("Auto-resume background task started")
             
         except Exception as e:
             logger.error(f"Failed to initiate auto-resume of pending downloads: {e}")
+
+    async def _resume_existing_session(self, session: dict, settings: dict):
+        """Resume an existing session on startup (including crash recovery).
+
+        Handles temp-playback restoration, prepared-playlist validation,
+        playback position recovery, and stream-title restoration.
+        """
+        self.current_session_id = session['id']
+        if self.temp_playback_handler:
+            self.temp_playback_handler.set_session_id(self.current_session_id)
+        logger.info(f"Resuming session {self.current_session_id}")
+
+        # Notify crash recovery / session resume
+        saved_video = session.get('playback_current_video')
+        saved_cursor = session.get('playback_cursor_ms', 0)
+        self.notification_service.notify_session_resumed(
+            self.current_session_id,
+            video=saved_video,
+            cursor_s=(saved_cursor / 1000) if saved_cursor else None
+        )
+
+        # Check for temp playback state that needs to be restored (crash recovery)
+        temp_state = self.db.get_temp_playback_state(session['id'])
+        temp_playback_restored = False
+        if temp_state and temp_state.get('active') and self.temp_playback_handler:
+            logger.info("Detected interrupted temp playback session, attempting recovery...")
+            restored = await self.temp_playback_handler.restore(session, temp_state)
+            if restored:
+                logger.info("Successfully restored temp playback state")
+                temp_playback_restored = True
+                pending_folder = temp_state.get('folder')
+                if pending_folder:
+                    self._initialize_file_lock_monitor(pending_folder)
+                    if self.file_lock_monitor:
+                        self.file_lock_monitor.set_temp_playback_mode(True)
+            else:
+                logger.warning("Failed to restore temp playback, continuing with normal session resume")
+                self.db.clear_temp_playback_state(session['id'])
+
+        if temp_playback_restored:
+            # Temp playback owns the pending folder — prevent check_for_rotation
+            # from starting new downloads into it while temp playback is active.
+            self._downloads_triggered_this_rotation = True
+            return
+
+        # Normal session resume
+        self._downloads_triggered_this_rotation = False
+        self._just_resumed_session = True
+
+        # Restore prepared playlists from database
+        await self._restore_prepared_playlists(session, settings)
+
+        if session.get('stream_title'):
+            assert self.stream_manager is not None, "Stream manager not initialized"
+            await self.stream_manager.update_title(session['stream_title'])
+
+        self._initialize_file_lock_monitor()
+        await self._update_category_for_current_video()
+
+        # Restore playback position from crash recovery
+        saved_video = session.get('playback_current_video')
+        saved_cursor = session.get('playback_cursor_ms', 0)
+        if saved_video and saved_cursor and saved_cursor > 0:
+            if (self.file_lock_monitor and
+                self.file_lock_monitor.current_video_original_name == saved_video):
+                self._pending_seek_ms = saved_cursor
+                self._pending_seek_video = saved_video
+                logger.info(f"Pending resume: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s) — waiting for VLC to start")
+            else:
+                logger.debug(f"Saved video '{saved_video}' no longer current, starting from beginning")
+
+    async def _restore_prepared_playlists(self, session: dict, settings: dict):
+        """Restore prepared playlists from database on session resume."""
+        next_playlists = session.get('next_playlists')
+        next_playlists_status = session.get('next_playlists_status')
+
+        if not next_playlists:
+            return
+
+        try:
+            playlist_list = DatabaseManager.parse_json_field(next_playlists, [])
+            status_dict: dict = DatabaseManager.parse_json_field(next_playlists_status, {})
+            all_completed = all(status_dict.get(pl) == "COMPLETED" for pl in playlist_list)
+
+            if all_completed:
+                next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
+                files_exist = self.db.validate_prepared_playlists_exist(session['id'], next_folder)
+
+                if files_exist:
+                    playlist_objects = self.db.get_playlists_with_ids_by_names(playlist_list)
+                    if playlist_objects:
+                        self.next_prepared_playlists = playlist_objects
+                        logger.info(f"Restored prepared playlists from database: {playlist_list}")
+                    else:
+                        logger.warning(f"Could not fetch playlist objects for: {playlist_list}")
+                else:
+                    logger.warning(f"Prepared playlist files missing from pending folder, clearing: {playlist_list}")
+                    self.db.set_next_playlists(session['id'], [])
+            else:
+                logger.info(f"Prepared playlists not fully downloaded, auto-resuming downloads now: {status_dict}")
+                await self._auto_resume_pending_downloads(session['id'], playlist_list, status_dict)
+        except Exception as e:
+            logger.error(f"Failed to restore prepared playlists: {e}")
+
+    def _check_live_status(self, debug_mode: bool) -> None:
+        """Check if the streamer is live and toggle pause/stream scenes accordingly."""
+        if self.twitch_live_checker:
+            try:
+                self.twitch_live_checker.refresh_token_if_needed()
+            except Exception as e:
+                logger.warning(f"Failed to refresh Twitch app token: {e}")
+
+        is_live = False
+        if self.twitch_live_checker:
+            is_live = self.twitch_live_checker.is_stream_live(
+                os.getenv("TARGET_TWITCH_STREAMER", "zackrawrr")
+            )
+
+        if debug_mode:
+            is_live = False
+
+        if is_live and self.last_stream_status != "live":
+            logger.info("Streamer is LIVE — pausing 24/7 stream")
+            if self.obs_controller:
+                self.obs_controller.switch_scene(SCENE_PAUSE)
+            if self.file_lock_monitor:
+                self.file_lock_monitor._pending_transition_file = None
+            self.last_stream_status = "live"
+            self.notification_service.notify_streamer_live()
+        elif not is_live and self.last_stream_status != "offline":
+            logger.info("Streamer is OFFLINE — resuming 24/7 stream")
+            if self.obs_controller:
+                self.obs_controller.switch_scene(SCENE_STREAM)
+            self.last_stream_status = "offline"
+            self._rotation_postpone_logged = False
+            self.notification_service.notify_streamer_offline()
+
+    def _tick_save_playback(self) -> None:
+        """Save playback position every tick and apply deferred seek if pending."""
+        if not (self.current_session_id and self.file_lock_monitor and self.obs_controller):
+            return
+        try:
+            status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
+            if not status or status.get('media_cursor') is None:
+                return
+
+            current_video = self.file_lock_monitor.current_video_original_name
+            self.db.save_playback_position(
+                self.current_session_id,
+                status['media_cursor'],
+                current_video
+            )
+
+            # Apply deferred seek from crash recovery once VLC is playing
+            if self._pending_seek_ms is not None and self.obs_controller:
+                media_state = status.get('media_state')
+                if media_state and 'playing' in str(media_state).lower():
+                    if current_video == self._pending_seek_video:
+                        self.obs_controller.seek_media(VLC_SOURCE_NAME, self._pending_seek_ms)
+                        logger.info(f"Resumed playback: {self._pending_seek_video} at {self._pending_seek_ms}ms ({self._pending_seek_ms/1000:.1f}s)")
+                    else:
+                        logger.debug("Video changed before seek could apply, skipping")
+                    self._pending_seek_ms = None
+                    self._pending_seek_video = None
+        except Exception:
+            pass  # Non-critical, just skip this tick
+
+    def _shutdown_cleanup(self) -> None:
+        """Perform graceful shutdown: save state, disconnect, stop threads."""
+        logger.info("Shutdown event detected, cleaning up...")
+        self.notification_service.notify_automation_shutdown()
+        self.save_playback_on_exit()
+
+        try:
+            self.platform_manager.cleanup()
+        except Exception as e:
+            logger.debug(f"Platform cleanup warning (non-critical): {e}")
+        if self.obs_client:
+            self.obs_client.disconnect()
+
+        self.executor.shutdown(wait=False, cancel_futures=True)
+        if self._background_download_in_progress:
+            logger.info("Waiting up to 5s for download thread to notice shutdown...")
+            self._shutdown_event.wait(5)
+
+        logger.info("Thread executor shutdown complete")
+        self.db.close()
+        logger.info("Cleanup complete, exiting...")
 
     async def run(self):
         """Main automation loop."""
@@ -786,8 +1131,16 @@ class AutomationController:
             logger.error("OBS controller not initialized")
             return
         
-        if not self.obs_controller.verify_scenes([SCENE_LIVE, SCENE_OFFLINE, SCENE_CONTENT_SWITCH]):
-            logger.error("Missing required OBS scenes")
+        if not self.obs_controller.ensure_scenes(
+            scene_stream=SCENE_STREAM,
+            scene_pause=SCENE_PAUSE,
+            scene_rotation=SCENE_ROTATION_SCREEN,
+            vlc_source_name=VLC_SOURCE_NAME,
+            video_folder=self.config_manager.video_folder,
+            pause_image=DEFAULT_PAUSE_IMAGE,
+            rotation_image=DEFAULT_ROTATION_IMAGE,
+        ):
+            logger.error("Failed to set up required OBS scenes")
             return
 
         self.setup_platforms()
@@ -800,7 +1153,7 @@ class AutomationController:
 
         session = self.db.get_current_session()
         settings = self.config_manager.get_settings()
-        video_folder = settings.get('video_folder', 'C:/stream_videos/')
+        video_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
 
         if not session:
             logger.info("No active session, starting initial rotation")
@@ -813,229 +1166,73 @@ class AutomationController:
             if self.start_rotation_session():
                 await self.execute_content_switch()
         else:
-            self.current_session_id = session['id']
-            # Keep temp playback handler in sync
-            if self.temp_playback_handler:
-                self.temp_playback_handler.set_session_id(self.current_session_id)
-            logger.info(f"Resuming session {self.current_session_id}")
-            
-            # Notify crash recovery / session resume
-            saved_video = session.get('playback_current_video')
-            saved_cursor = session.get('playback_cursor_ms', 0)
-            self.notification_service.notify_session_resumed(
-                self.current_session_id,
-                video=saved_video,
-                cursor_s=(saved_cursor / 1000) if saved_cursor else None
-            )
-            
-            # Check for temp playback state that needs to be restored (crash recovery)
-            temp_state = self.db.get_temp_playback_state(session['id'])
-            temp_playback_restored = False
-            if temp_state and temp_state.get('active') and self.temp_playback_handler:
-                logger.info("Detected interrupted temp playback session, attempting recovery...")
-                restored = await self.temp_playback_handler.restore(session, temp_state)
-                if restored:
-                    logger.info("Successfully restored temp playback state")
-                    temp_playback_restored = True
-                    # Initialize file lock monitor pointing at the pending folder
-                    pending_folder = temp_state.get('folder')
-                    if pending_folder:
-                        self._initialize_file_lock_monitor(pending_folder)
-                    # Skip normal session resume - temp playback handles its own state
-                else:
-                    logger.warning("Failed to restore temp playback, continuing with normal session resume")
-                    # Clear the invalid temp playback state
-                    self.db.clear_temp_playback_state(session['id'])
-            
-            # Skip normal session resume logic if temp playback was restored
-            if not temp_playback_restored:
-                # Reset download flag but mark as just resumed to skip initial download trigger
-                self._downloads_triggered_this_rotation = False
-                self._just_resumed_session = True
-                
-                # Restore prepared playlists from database
-                next_playlists = session.get('next_playlists')
-                next_playlists_status = session.get('next_playlists_status')
-                
-                if next_playlists:
-                    try:
-                        playlist_list = json.loads(next_playlists) if isinstance(next_playlists, str) else next_playlists
-                        status_dict = json.loads(next_playlists_status) if isinstance(next_playlists_status, str) else (next_playlists_status or {})
-                        
-                        # Check if all playlists are COMPLETED
-                        all_completed = all(status_dict.get(pl) == "COMPLETED" for pl in playlist_list)
-                        
-                        if all_completed:
-                            # Validate that prepared playlist files actually exist in pending folder
-                            next_folder = settings.get('next_rotation_folder', 'C:/stream_videos_next/')
-                            files_exist = self.db.validate_prepared_playlists_exist(session['id'], next_folder)
-                            
-                            if files_exist:
-                                # Fetch playlist objects from database with IDs (needed for start_rotation_session)
-                                playlist_objects = self.db.get_playlists_with_ids_by_names(playlist_list)
-                                if playlist_objects:
-                                    self.next_prepared_playlists = playlist_objects
-                                    logger.info(f"Restored prepared playlists from database: {playlist_list}")
-                                else:
-                                    logger.warning(f"Could not fetch playlist objects for: {playlist_list}")
-                            else:
-                                # Files don't exist in pending folder, clear prepared playlists
-                                logger.warning(f"Prepared playlist files missing from pending folder, clearing and will download fresh on next rotation: {playlist_list}")
-                                self.db.set_next_playlists(session['id'], [])
-                        else:
-                            logger.info(f"Prepared playlists not fully downloaded, auto-resuming downloads now: {status_dict}")
-                            # Auto-resume interrupted downloads immediately on startup
-                            await self._auto_resume_pending_downloads(session['id'], playlist_list, status_dict)
-                    except Exception as e:
-                        logger.error(f"Failed to restore prepared playlists: {e}")
-                
-                if session.get('stream_title'):
-                    assert self.stream_manager is not None, "Stream manager not initialized"
-                    await self.stream_manager.update_title(session['stream_title'])
-                
-                self._initialize_file_lock_monitor()
-                
-                # Update category based on the actual video VLC is playing
-                await self._update_category_for_current_video()
-                
-                # Restore playback position from crash recovery
-                saved_video = session.get('playback_current_video')
-                saved_cursor = session.get('playback_cursor_ms', 0)
-                if saved_video and saved_cursor and saved_cursor > 0:
-                    # Verify the saved video is still the current video in the folder
-                    if (self.file_lock_monitor and 
-                        self.file_lock_monitor.current_video_original_name == saved_video):
-                        # Defer the seek — VLC isn't playing yet (scene hasn't switched)
-                        # It will be applied on the first main loop tick where VLC is playing
-                        self._pending_seek_ms = saved_cursor
-                        self._pending_seek_video = saved_video
-                        logger.info(f"Pending resume: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s) — waiting for VLC to start")
-                    else:
-                        logger.debug(f"Saved video '{saved_video}' no longer current, starting from beginning")
+            await self._resume_existing_session(session, settings)
 
         # Main loop
         loop_count = 0
         last_debug_mode = False
         while True:
             try:
-                # DEBUG MODE (hot-swappable from settings.json)
                 settings = self.config_manager.get_settings()
                 debug_mode = settings.get('debug_mode', False)
-                
-                # Force an immediate live recheck when debug_mode is toggled
+
                 debug_mode_changed = (debug_mode != last_debug_mode)
                 if debug_mode_changed:
                     logger.info(f"debug_mode changed to {debug_mode}, forcing live status recheck")
                 last_debug_mode = debug_mode
 
-                # Every 60 seconds (or immediately when debug_mode changes): Check stream status
                 if loop_count % 60 == 0 or debug_mode_changed:
-                    if self.twitch_live_checker:
-                        try:
-                            self.twitch_live_checker.refresh_token_if_needed()
-                        except Exception as e:
-                            logger.warning(f"Failed to refresh Twitch app token: {e}")
-
-                    is_live = False
-                    if self.twitch_live_checker:
-                        is_live = self.twitch_live_checker.is_stream_live(
-                            os.getenv("TARGET_TWITCH_STREAMER", "zackrawrr")
-                        )
-
-                    if debug_mode:
-                        is_live=False
-
-                    if is_live and self.last_stream_status != "live":
-                        logger.info("Streamer is LIVE — pausing 24/7 stream")
-                        if self.obs_controller:
-                            self.obs_controller.switch_scene(SCENE_LIVE)
-                        # Reset file lock debounce so stale "unlocked" state doesn't
-                        # carry over and cause false transitions when we resume
-                        if self.file_lock_monitor:
-                            self.file_lock_monitor._pending_transition_file = None
-                        self.last_stream_status = "live"
-                        self.notification_service.notify_streamer_live()
-                    elif not is_live and self.last_stream_status != "offline":
-                        logger.info("Streamer is OFFLINE — resuming 24/7 stream")
-                        if self.obs_controller:
-                            self.obs_controller.switch_scene(SCENE_OFFLINE)
-                        self.last_stream_status = "offline"
-                        self._rotation_postpone_logged = False
-                        self.notification_service.notify_streamer_offline()
+                    self._check_live_status(debug_mode)
 
                 self._process_video_registration_queue()
                 self._process_pending_database_operations()
-                
-                # Save playback position every tick for crash recovery
-                if self.current_session_id and self.file_lock_monitor and self.obs_controller:
-                    try:
-                        status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
-                        if status and status.get('media_cursor') is not None:
-                            current_video = self.file_lock_monitor.current_video_original_name
-                            self.db.save_playback_position(
-                                self.current_session_id,
-                                status['media_cursor'],
-                                current_video
-                            )
-                            
-                            # Apply deferred seek from crash recovery once VLC is playing
-                            if self._pending_seek_ms is not None and self.obs_controller:
-                                media_state = status.get('media_state')
-                                if media_state and 'playing' in str(media_state).lower():
-                                    # Verify the video hasn't changed since we queued the seek
-                                    if current_video == self._pending_seek_video:
-                                        self.obs_controller.seek_media(VLC_SOURCE_NAME, self._pending_seek_ms)
-                                        logger.info(f"Resumed playback: {self._pending_seek_video} at {self._pending_seek_ms}ms ({self._pending_seek_ms/1000:.1f}s)")
-                                    else:
-                                        logger.debug(f"Video changed before seek could apply, skipping")
-                                    self._pending_seek_ms = None
-                                    self._pending_seek_video = None
-                    except Exception:
-                        pass  # Non-critical, just skip this tick
-                
+                self._tick_save_playback()
+
+                # Proactive OBS health check — detect disconnect even though
+                # OBSController swallows exceptions internally
+                if self.obs_controller and not self.obs_controller.is_connected:
+                    logger.warning("OBS connection lost (detected via health check)")
+                    self.notification_service.notify_automation_error("OBS disconnected, attempting reconnect...")
+                    if self.reconnect_obs():
+                        self._reinitialize_after_obs_reconnect()
+                        logger.info("OBS reconnected, handlers re-initialized")
+                        continue
+                    else:
+                        logger.error("Failed to reconnect to OBS, shutting down")
+                        break
+
                 # Monitor temp playback for download completion
                 if self.temp_playback_handler and self.temp_playback_handler.is_active:
                     current_time = time.time()
-                    if current_time - self.temp_playback_handler._last_folder_check >= 2.0:  # Check every 2 seconds
+                    if current_time - self.temp_playback_handler._last_folder_check >= 2.0:
                         await self.temp_playback_handler.monitor()
                         self.temp_playback_handler._last_folder_check = current_time
-                
-                # Check for rotation (normal behavior)
+
                 await self.check_for_rotation()
 
                 if self.config_manager.has_config_changed():
                     logger.info("Config changed, syncing...")
                     self.db.sync_playlists_from_config(self.config_manager.get_playlists())
 
-                # Shutdown
-                if self.shutdown_event:
-                    logger.info("Shutdown event detected, cleaning up...")
-                    self.notification_service.notify_automation_shutdown()
-                    self.save_playback_on_exit()
-                    
-                    try:
-                        self.platform_manager.cleanup()
-                    except Exception as e:
-                        logger.debug(f"Platform cleanup warning (non-critical): {e}")
-                    if self.obs_client:
-                        self.obs_client.disconnect()
-                    
-                    # Shut down executor: cancel queued futures, don't wait for running downloads
-                    # The _shutdown_event is already set so download threads will bail at their next check point.
-                    # Give them a brief grace period, then force-exit if still blocked.
-                    self.executor.shutdown(wait=False, cancel_futures=True)
-                    if self._background_download_in_progress:
-                        logger.info("Waiting up to 5s for download thread to notice shutdown...")
-                        self._shutdown_event.wait(5)
-                    
-                    logger.info("Thread executor shutdown complete")
-                    self.db.close()
-                    logger.info("Cleanup complete, exiting...")
+                if self._shutdown_requested:
+                    self._shutdown_cleanup()
                     break
 
             except Exception as e:
+                error_msg = str(e)
+                # Detect OBS disconnection and auto-reconnect
+                if any(hint in error_msg.lower() for hint in ('websocket', 'connection', 'socket', 'connect')):
+                    logger.warning(f"OBS connection lost: {e}")
+                    self.notification_service.notify_automation_error(f"OBS disconnected: {error_msg}")
+                    if self.reconnect_obs():
+                        self._reinitialize_after_obs_reconnect()
+                        logger.info("OBS reconnected, handlers re-initialized")
+                        continue
+                    else:
+                        logger.error("Failed to reconnect to OBS, shutting down")
+                        break
                 logger.error(f"Error in main loop: {e}", exc_info=True)
-                self.notification_service.notify_automation_error(str(e))
+                self.notification_service.notify_automation_error(error_msg)
 
             loop_count += 1
             await asyncio.sleep(1)
