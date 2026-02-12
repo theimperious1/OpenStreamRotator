@@ -1,3 +1,9 @@
+"""Background download manager with cross-thread DB queuing.
+
+Owns the single-worker thread pool, download-in-progress flags,
+and pending database operation queues that let the background
+download thread communicate safely with the main SQLite thread.
+"""
 import asyncio
 import logging
 import os
@@ -169,9 +175,7 @@ class DownloadManager:
     # Auto-resume interrupted downloads on startup
     # ------------------------------------------------------------------
 
-    async def auto_resume_pending_downloads(
-        self, session_id: int, pending_playlists: list, status_dict: dict
-    ) -> None:
+    async def auto_resume_pending_downloads(self, session_id: int, pending_playlists: list) -> None:
         """Resume interrupted playlist downloads from a previous session.
 
         Uses yt-dlp's built-in ``--continue`` flag to pick up from partial

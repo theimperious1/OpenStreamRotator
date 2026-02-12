@@ -1,3 +1,8 @@
+"""Stream metadata manager.
+
+Thin facade that delegates stream title and category updates
+to the PlatformManager for all configured platforms.
+"""
 import logging
 from typing import Optional
 from managers.platform_manager import PlatformManager

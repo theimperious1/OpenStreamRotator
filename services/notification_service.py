@@ -1,3 +1,8 @@
+"""Discord webhook notification service.
+
+Sends rich embed notifications for rotation events, errors,
+and status changes with local rate-limit tracking.
+"""
 import requests
 import time
 import logging

@@ -1,4 +1,9 @@
 import logging
+"""Abstract base class for streaming platform integrations.
+
+Defines the common interface for title and category updates
+that all platform implementations must provide.
+"""
 from abc import ABC, abstractmethod
 from typing import Optional
 

@@ -1,3 +1,9 @@
+"""Main automation controller — orchestrates all components.
+
+Wires managers, handlers, and services together, runs the 1-second
+tick main loop, and makes top-level routing decisions (rotation,
+temp playback, live status, config changes, shutdown).
+"""
 import time
 import logging
 import os

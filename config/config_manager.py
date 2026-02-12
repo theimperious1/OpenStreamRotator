@@ -1,3 +1,8 @@
+"""Configuration manager for playlists and application settings.
+
+Loads and saves playlists.json and settings.json with mtime-based
+change detection for live-reload in the main loop.
+"""
 import json
 import os
 import logging

@@ -1,3 +1,8 @@
+"""OBS WebSocket connection lifecycle manager.
+
+Handles connect, exponential-backoff reconnect, and graceful
+disconnect for the OBS WebSocket client and controller.
+"""
 import logging
 from threading import Event
 from typing import Optional

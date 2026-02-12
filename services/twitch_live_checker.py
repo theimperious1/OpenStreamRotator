@@ -1,3 +1,8 @@
+"""Twitch live status checker.
+
+Acquires Twitch app access tokens via client credentials and
+checks whether specified channels are currently streaming.
+"""
 import requests
 import time
 import logging

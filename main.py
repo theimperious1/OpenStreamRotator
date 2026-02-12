@@ -1,3 +1,8 @@
+"""Application entry point for OpenStreamRotator.
+
+Configures logging, loads environment variables, and runs the
+AutomationController async main loop.
+"""
 import asyncio
 import logging
 import sys

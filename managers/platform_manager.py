@@ -1,3 +1,8 @@
+"""Streaming platform manager.
+
+Sets up and coordinates multiple streaming platform integrations
+(Twitch, Kick) based on environment configuration.
+"""
 import logging
 import os
 from typing import Optional, List

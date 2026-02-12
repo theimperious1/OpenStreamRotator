@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -406,6 +405,6 @@ class RotationManager:
                     ctrl.db.set_next_playlists(session['id'], [])
             else:
                 logger.info(f"Prepared playlists not fully downloaded, auto-resuming downloads now: {status_dict}")
-                await ctrl.download_manager.auto_resume_pending_downloads(session['id'], playlist_list, status_dict)
+                await ctrl.download_manager.auto_resume_pending_downloads(session['id'], playlist_list)
         except Exception as e:
             logger.error(f"Failed to restore prepared playlists: {e}")

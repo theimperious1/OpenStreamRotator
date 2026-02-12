@@ -1,3 +1,8 @@
+"""Kick.com platform integration.
+
+Handles OAuth authentication, stream title and category updates,
+and category search via the kickpython API wrapper.
+"""
 import asyncio
 import logging
 import os

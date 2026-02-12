@@ -1,3 +1,8 @@
+"""YouTube playlist downloader via yt-dlp.
+
+Downloads playlists with per-video retry logic, post-processing
+hooks for duration extraction, and archive-based deduplication.
+"""
 import os
 import logging
 from threading import Event, Lock

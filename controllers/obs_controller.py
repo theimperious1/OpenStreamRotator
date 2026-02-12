@@ -1,3 +1,8 @@
+"""OBS WebSocket controller for scene and source management.
+
+Provides high-level commands for scene switching, VLC source
+management, media playback queries, and connection health checks.
+"""
 import logging
 import time
 import obsws_python as obs
