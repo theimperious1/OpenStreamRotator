@@ -127,6 +127,7 @@ class AutomationController:
         self.next_prepared_playlists = None
         self.last_stream_status = None
         self.is_rotating = False
+        self._manual_pause = False  # True when paused via dashboard (prevents auto-resume)
         self._rotation_postpone_logged = False
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
         self._shutdown_requested = False
@@ -360,6 +361,7 @@ class AutomationController:
 
         return {
             "status": status,
+            "manual_pause": self._manual_pause,
             "current_video": current_video,
             "current_playlist": current_playlist,
             "current_category": current_category,
@@ -420,6 +422,14 @@ class AutomationController:
             logger.info(f"Dashboard command: toggle playlist {name} -> {enabled}")
             self._playlist_toggle(name, enabled)
 
+        elif action == "pause_stream":
+            logger.info("Dashboard command: pause stream")
+            self._manual_pause_stream()
+
+        elif action == "resume_stream":
+            logger.info("Dashboard command: resume stream")
+            self._manual_resume_stream()
+
         else:
             logger.warning(f"Unknown dashboard command: {action}")
 
@@ -456,6 +466,74 @@ class AutomationController:
             logger.info(f"Setting '{key}' updated to {value!r} via dashboard")
         except Exception as e:
             logger.error(f"Failed to update setting '{key}': {e}")
+
+    # ── Manual pause / resume ────────────────────────────────────
+
+    def _manual_pause_stream(self) -> None:
+        """Manually pause the stream from the dashboard.
+
+        Reuses the same logic as the streamer-is-live pause: saves playback
+        position, switches OBS to the pause scene, and sets the manual flag
+        so the live checker won't auto-resume.
+        """
+        if self.last_stream_status == "live" and self._manual_pause:
+            logger.info("Stream is already manually paused")
+            return
+
+        # Save playback position
+        if self.current_session_id and self.file_lock_monitor and self.obs_controller:
+            try:
+                status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
+                if status and status.get('media_cursor') is not None:
+                    current_video = self.file_lock_monitor.current_video_original_name
+                    self.db.save_playback_position(
+                        self.current_session_id,
+                        status['media_cursor'],
+                        current_video
+                    )
+                    logger.info(f"Saved playback position before manual pause: {current_video} at {status['media_cursor']}ms")
+            except Exception as e:
+                logger.debug(f"Failed to save playback position before manual pause: {e}")
+
+        # Switch to pause scene
+        if self.obs_controller:
+            self.obs_controller.switch_scene(SCENE_PAUSE)
+        if self.file_lock_monitor:
+            self.file_lock_monitor._pending_transition_file = None
+
+        self.last_stream_status = "live"
+        self._manual_pause = True
+        logger.info("Stream manually paused via dashboard")
+
+    def _manual_resume_stream(self) -> None:
+        """Manually resume the stream from the dashboard.
+
+        Switches OBS back to the stream scene, clears the manual pause flag,
+        and queues a deferred seek to restore playback position.
+        """
+        if self.last_stream_status != "live":
+            logger.info("Stream is not paused — nothing to resume")
+            return
+
+        # Switch to stream scene
+        if self.obs_controller:
+            self.obs_controller.switch_scene(SCENE_STREAM)
+
+        # Restore playback position
+        if self.current_session_id:
+            session = self.db.get_current_session()
+            if session:
+                saved_video = session.get('playback_current_video')
+                saved_cursor = session.get('playback_cursor_ms', 0)
+                if saved_video and saved_cursor and saved_cursor > 0:
+                    self._pending_seek_ms = saved_cursor
+                    self._pending_seek_video = saved_video
+                    logger.info(f"Pending seek after manual resume: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s)")
+
+        self.last_stream_status = "offline"
+        self._manual_pause = False
+        self._rotation_postpone_logged = False
+        logger.info("Stream manually resumed via dashboard")
 
     # ── Playlist CRUD from dashboard ──────────────────────────────
 
@@ -949,6 +1027,10 @@ class AutomationController:
             self.last_stream_status = "live"
             self.notification_service.notify_streamer_live()
         elif not is_live and self.last_stream_status != "offline":
+            if self._manual_pause:
+                # Manual pause is active — don't auto-resume when streamer goes offline
+                logger.debug("Streamer is OFFLINE but manual pause is active — staying paused")
+                return
             logger.info("Streamer is OFFLINE — resuming 24/7 stream")
             if self.obs_controller:
                 self.obs_controller.switch_scene(SCENE_STREAM)
