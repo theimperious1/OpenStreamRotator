@@ -1,6 +1,7 @@
 # theimperious1's personal ignores
 content/live/
 content/pending/
+content/prepared/
 stream_data.db
 stream_data.db-journal
 stream_data.db-wal

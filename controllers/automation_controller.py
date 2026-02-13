@@ -22,11 +22,13 @@ from managers.obs_connection_manager import OBSConnectionManager
 from managers.download_manager import DownloadManager
 from managers.rotation_manager import RotationManager
 from managers.platform_manager import PlatformManager
+from managers.prepared_rotation_manager import PreparedRotationManager
 from services.notification_service import NotificationService
 from playback.file_lock_monitor import FileLockMonitor
 from services.twitch_live_checker import TwitchLiveChecker
 from services.kick_live_checker import KickLiveChecker
 from handlers.content_switch_handler import ContentSwitchHandler
+from handlers.dashboard_handler import DashboardHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
 from services.web_dashboard_client import WebDashboardClient
@@ -118,9 +120,29 @@ class AutomationController:
         else:
             self.kick_live_checker = None
 
+        # Prepared rotation manager
+        self.prepared_rotation_manager = PreparedRotationManager(
+            playlist_manager=self.playlist_manager,
+            config_manager=self.config_manager,
+            video_registration_queue=self.video_registration_queue,
+            shutdown_event=self._shutdown_event,
+        )
+        self.prepared_rotation_manager.set_download_manager(self.download_manager)
+
         # Handlers (initialized in _initialize_handlers)
         self.content_switch_handler: Optional[ContentSwitchHandler] = None
         self.temp_playback_handler: Optional[TempPlaybackHandler] = None
+
+        # Expose constants for DashboardHandler (avoids circular imports)
+        self._scene_pause = SCENE_PAUSE
+        self._scene_stream = SCENE_STREAM
+        self._scene_rotation_screen = SCENE_ROTATION_SCREEN
+        self._vlc_source_name = VLC_SOURCE_NAME
+        self._env_twitch_client_id = TWITCH_CLIENT_ID
+        self._env_twitch_client_secret = TWITCH_CLIENT_SECRET
+        self._env_kick_client_id = KICK_CLIENT_ID
+        self._env_kick_client_secret = KICK_CLIENT_SECRET
+        self._env_discord_webhook_url = DISCORD_WEBHOOK_URL
 
         # State
         self.current_session_id: Optional[int] = None
@@ -132,14 +154,23 @@ class AutomationController:
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
         self._shutdown_requested = False
         self._start_time = time.time()  # For uptime tracking
+
+        # Prepared rotation overlay state
+        self._prepared_rotation_active = False  # True while a prepared rotation is playing
+        self._saved_live_video: Optional[str] = None  # Original name of live video that was playing
+        self._saved_live_cursor_ms: int = 0  # Cursor position within that video
+        self._saved_live_folder: Optional[str] = None  # Path to live folder to restore
         
+        # Dashboard handler — owns all web-dashboard state / command logic
+        self.dashboard_handler = DashboardHandler(self)
+
         # Web dashboard client (optional, enabled via env vars)
         self.web_dashboard: Optional[WebDashboardClient] = None
         if WEB_DASHBOARD_URL and WEB_DASHBOARD_API_KEY:
             self.web_dashboard = WebDashboardClient(
                 api_key=WEB_DASHBOARD_API_KEY,
-                state_provider=self._get_dashboard_state,
-                command_handler=self._handle_dashboard_command,
+                state_provider=self.dashboard_handler.get_dashboard_state,
+                command_handler=self.dashboard_handler.handle_command,
                 server_url=WEB_DASHBOARD_URL,
             )
         
@@ -260,377 +291,6 @@ class AutomationController:
                     self._pending_seek_ms = saved_cursor
                     self._pending_seek_video = saved_video
                     logger.info(f"Pending seek after OBS reconnect: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s)")
-
-    def _get_dashboard_state(self) -> dict:
-        """Build a state snapshot for the web dashboard.
-
-        Includes core status fields plus extended data for playlists,
-        settings, queue, and platform connections pages.
-        """
-        status = "offline"
-        if self.last_stream_status == "live":
-            status = "paused"
-        elif self.obs_controller and self.obs_controller.is_connected:
-            status = "online"
-
-        current_video: Optional[str] = None
-        current_playlist: Optional[str] = None
-        current_category: Optional[dict] = None
-
-        if self.file_lock_monitor:
-            current_video = self.file_lock_monitor.current_video_original_name
-
-        session = self.db.get_current_session()
-        if session:
-            playlists_json = session.get('playlists_selected')
-            if playlists_json:
-                try:
-                    playlist_ids = json.loads(playlists_json) if isinstance(playlists_json, str) else playlists_json
-                    names = []
-                    for pid in playlist_ids:
-                        p = self.db.get_playlist(pid)
-                        if p:
-                            names.append(p['name'])
-                    current_playlist = ", ".join(names) if names else None
-                except Exception:
-                    pass
-
-        if self.file_lock_monitor:
-            current_category = self.file_lock_monitor.get_category_for_current_video()
-
-        # ── Extended data ──
-
-        # Playlists from config (name, url, twitch_category, kick_category, enabled, priority)
-        playlists = []
-        try:
-            for p in self.config_manager.get_playlists():
-                playlists.append({
-                    "name": p.get("name", ""),
-                    "url": p.get("url", ""),
-                    "twitch_category": p.get("twitch_category", "") or p.get("category", ""),
-                    "kick_category": p.get("kick_category", "") or p.get("category", ""),
-                    "enabled": p.get("enabled", True),
-                    "priority": p.get("priority", 1),
-                })
-        except Exception:
-            pass
-
-        # Settings (all hot-swappable keys from settings.json)
-        settings: dict = {}
-        try:
-            raw = self.config_manager.get_settings()
-            # Only expose dashboard-relevant keys (exclude folder paths)
-            for key in (
-                "stream_title_template",
-                "debug_mode",
-                "notify_video_transitions",
-                "min_playlists_per_rotation",
-                "max_playlists_per_rotation",
-                "download_retry_attempts",
-                "yt_dlp_use_cookies",
-                "yt_dlp_browser_for_cookies",
-                "yt_dlp_verbose",
-            ):
-                if key in raw:
-                    settings[key] = raw[key]
-        except Exception:
-            pass
-
-        # Video queue (files in the current rotation folder)
-        queue: list[str] = []
-        try:
-            if self.file_lock_monitor and self.file_lock_monitor.video_folder:
-                queue = self.file_lock_monitor._get_video_files()
-        except Exception:
-            pass
-
-        # Platform connections
-        connections: dict = {}
-        try:
-            connections["obs"] = bool(self.obs_controller and self.obs_controller.is_connected)
-            connections["twitch"] = bool(TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET)
-            connections["kick"] = bool(KICK_CLIENT_ID and KICK_CLIENT_SECRET)
-            connections["discord_webhook"] = bool(DISCORD_WEBHOOK_URL)
-            connections["twitch_enabled"] = bool(os.getenv("ENABLE_TWITCH", "").lower() == "true")
-            connections["kick_enabled"] = bool(os.getenv("ENABLE_KICK", "").lower() == "true")
-        except Exception:
-            pass
-
-        # Download status
-        download_active = self.download_manager.background_download_in_progress if self.download_manager else False
-
-        return {
-            "status": status,
-            "manual_pause": self._manual_pause,
-            "current_video": current_video,
-            "current_playlist": current_playlist,
-            "current_category": current_category,
-            "obs_connected": bool(self.obs_controller and self.obs_controller.is_connected),
-            "uptime_seconds": int(time.time() - self._start_time),
-            "playlists": playlists,
-            "settings": settings,
-            "queue": queue,
-            "connections": connections,
-            "download_active": download_active,
-        }
-
-    async def _handle_dashboard_command(self, command: dict) -> None:
-        """Handle a command received from the web dashboard."""
-        action = command.get("action", "")
-        payload = command.get("payload", {})
-
-        if action == "skip_video":
-            logger.info("Dashboard command: skip video")
-            if self.obs_controller:
-                try:
-                    self.obs_controller.obs_client.trigger_media_input_action(
-                        name=VLC_SOURCE_NAME,
-                        action="OBS_WEBSOCKET_MEDIA_INPUT_ACTION_NEXT",
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to skip video via dashboard: {e}")
-
-        elif action == "trigger_rotation":
-            logger.info("Dashboard command: trigger rotation")
-            if not self.is_rotating:
-                # Force all-content-consumed so rotation triggers on next tick
-                if self.file_lock_monitor:
-                    self.file_lock_monitor._all_content_consumed = True
-
-        elif action == "update_setting":
-            key = payload.get("key")
-            value = payload.get("value")
-            if key:
-                logger.info(f"Dashboard command: update setting {key}={value}")
-                self._apply_setting_from_dashboard(key, value)
-
-        elif action == "add_playlist":
-            logger.info(f"Dashboard command: add playlist {payload.get('name')}")
-            self._playlist_add(payload)
-
-        elif action == "update_playlist":
-            logger.info(f"Dashboard command: update playlist {payload.get('name')}")
-            self._playlist_update(payload)
-
-        elif action == "remove_playlist":
-            logger.info(f"Dashboard command: remove playlist {payload.get('name')}")
-            self._playlist_remove(payload.get("name", ""))
-
-        elif action == "toggle_playlist":
-            name = payload.get("name", "")
-            enabled = payload.get("enabled")
-            logger.info(f"Dashboard command: toggle playlist {name} -> {enabled}")
-            self._playlist_toggle(name, enabled)
-
-        elif action == "pause_stream":
-            logger.info("Dashboard command: pause stream")
-            self._manual_pause_stream()
-
-        elif action == "resume_stream":
-            logger.info("Dashboard command: resume stream")
-            self._manual_resume_stream()
-
-        else:
-            logger.warning(f"Unknown dashboard command: {action}")
-
-    def _apply_setting_from_dashboard(self, key: str, value) -> None:
-        """Write a single setting change to settings.json.
-
-        Only whitelisted keys are accepted to prevent arbitrary file writes.
-        After writing, the ConfigManager's mtime cache will pick up the
-        change automatically on the next get_settings() call.
-        """
-        allowed_keys = {
-            "stream_title_template",
-            "debug_mode",
-            "notify_video_transitions",
-            "min_playlists_per_rotation",
-            "max_playlists_per_rotation",
-            "download_retry_attempts",
-            "yt_dlp_use_cookies",
-            "yt_dlp_browser_for_cookies",
-            "yt_dlp_verbose",
-        }
-
-        if key not in allowed_keys:
-            logger.warning(f"Dashboard tried to set disallowed key: {key}")
-            return
-
-        settings_path = self.config_manager.settings_path
-        try:
-            with open(settings_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            data[key] = value
-            with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            logger.info(f"Setting '{key}' updated to {value!r} via dashboard")
-        except Exception as e:
-            logger.error(f"Failed to update setting '{key}': {e}")
-
-    # ── Manual pause / resume ────────────────────────────────────
-
-    def _manual_pause_stream(self) -> None:
-        """Manually pause the stream from the dashboard.
-
-        Reuses the same logic as the streamer-is-live pause: saves playback
-        position, switches OBS to the pause scene, and sets the manual flag
-        so the live checker won't auto-resume.
-        """
-        if self.last_stream_status == "live" and self._manual_pause:
-            logger.info("Stream is already manually paused")
-            return
-
-        # Save playback position
-        if self.current_session_id and self.file_lock_monitor and self.obs_controller:
-            try:
-                status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
-                if status and status.get('media_cursor') is not None:
-                    current_video = self.file_lock_monitor.current_video_original_name
-                    self.db.save_playback_position(
-                        self.current_session_id,
-                        status['media_cursor'],
-                        current_video
-                    )
-                    logger.info(f"Saved playback position before manual pause: {current_video} at {status['media_cursor']}ms")
-            except Exception as e:
-                logger.debug(f"Failed to save playback position before manual pause: {e}")
-
-        # Switch to pause scene
-        if self.obs_controller:
-            self.obs_controller.switch_scene(SCENE_PAUSE)
-        if self.file_lock_monitor:
-            self.file_lock_monitor._pending_transition_file = None
-
-        self.last_stream_status = "live"
-        self._manual_pause = True
-        logger.info("Stream manually paused via dashboard")
-
-    def _manual_resume_stream(self) -> None:
-        """Manually resume the stream from the dashboard.
-
-        Switches OBS back to the stream scene, clears the manual pause flag,
-        and queues a deferred seek to restore playback position.
-        """
-        if self.last_stream_status != "live":
-            logger.info("Stream is not paused — nothing to resume")
-            return
-
-        # Switch to stream scene
-        if self.obs_controller:
-            self.obs_controller.switch_scene(SCENE_STREAM)
-
-        # Restore playback position
-        if self.current_session_id:
-            session = self.db.get_current_session()
-            if session:
-                saved_video = session.get('playback_current_video')
-                saved_cursor = session.get('playback_cursor_ms', 0)
-                if saved_video and saved_cursor and saved_cursor > 0:
-                    self._pending_seek_ms = saved_cursor
-                    self._pending_seek_video = saved_video
-                    logger.info(f"Pending seek after manual resume: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s)")
-
-        self.last_stream_status = "offline"
-        self._manual_pause = False
-        self._rotation_postpone_logged = False
-        logger.info("Stream manually resumed via dashboard")
-
-    # ── Playlist CRUD from dashboard ──────────────────────────────
-
-    def _load_playlists_raw(self) -> dict:
-        """Load the raw playlists.json file."""
-        try:
-            with open(self.config_manager.config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load playlists.json: {e}")
-            return {"playlists": []}
-
-    def _save_playlists_raw(self, data: dict) -> bool:
-        """Write the playlists.json file. Returns True on success."""
-        try:
-            with open(self.config_manager.config_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            logger.info("playlists.json updated via dashboard")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to save playlists.json: {e}")
-            return False
-
-    def _playlist_add(self, payload: dict) -> None:
-        """Add a new playlist from dashboard payload."""
-        name = payload.get("name", "").strip()
-        url = payload.get("url", "").strip()
-        if not name or not url:
-            logger.warning("Dashboard add_playlist missing name or url")
-            return
-
-        data = self._load_playlists_raw()
-        # Prevent duplicates by name
-        for p in data.get("playlists", []):
-            if p.get("name", "").lower() == name.lower():
-                logger.warning(f"Playlist '{name}' already exists — skipping add")
-                return
-
-        data.setdefault("playlists", []).append({
-            "name": name,
-            "url": url,
-            "twitch_category": payload.get("twitch_category", "Just Chatting"),
-            "kick_category": payload.get("kick_category", ""),
-            "enabled": payload.get("enabled", True),
-            "priority": payload.get("priority", 1),
-        })
-        self._save_playlists_raw(data)
-
-    def _playlist_update(self, payload: dict) -> None:
-        """Update an existing playlist's fields (matched by name)."""
-        name = payload.get("name", "").strip()
-        if not name:
-            return
-
-        data = self._load_playlists_raw()
-        for p in data.get("playlists", []):
-            if p.get("name", "").lower() == name.lower():
-                if "url" in payload:
-                    p["url"] = payload["url"]
-                if "twitch_category" in payload:
-                    p["twitch_category"] = payload["twitch_category"]
-                if "kick_category" in payload:
-                    p["kick_category"] = payload["kick_category"]
-                if "enabled" in payload:
-                    p["enabled"] = payload["enabled"]
-                if "priority" in payload:
-                    p["priority"] = payload["priority"]
-                self._save_playlists_raw(data)
-                return
-        logger.warning(f"Playlist '{name}' not found for update")
-
-    def _playlist_remove(self, name: str) -> None:
-        """Remove a playlist by name."""
-        if not name:
-            return
-        data = self._load_playlists_raw()
-        original_len = len(data.get("playlists", []))
-        data["playlists"] = [
-            p for p in data.get("playlists", [])
-            if p.get("name", "").lower() != name.lower()
-        ]
-        if len(data["playlists"]) < original_len:
-            self._save_playlists_raw(data)
-        else:
-            logger.warning(f"Playlist '{name}' not found for removal")
-
-    def _playlist_toggle(self, name: str, enabled: bool | None) -> None:
-        """Toggle a playlist's enabled state."""
-        if not name:
-            return
-        data = self._load_playlists_raw()
-        for p in data.get("playlists", []):
-            if p.get("name", "").lower() == name.lower():
-                p["enabled"] = enabled if enabled is not None else not p.get("enabled", True)
-                self._save_playlists_raw(data)
-                return
-        logger.warning(f"Playlist '{name}' not found for toggle")
 
     def save_playback_on_exit(self):
         """Save current state when program exits."""
@@ -885,10 +545,12 @@ class AutomationController:
         # Trigger background download only if pending folder is empty and not already triggered
         # Skip on first loop after resume to avoid downloading when resuming into existing rotation
         # Skip entirely during temp playback — pending folder is in use for playback
+        # Skip during prepared rotation — live/pending must not be touched
         settings = self.config_manager.get_settings()
         pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
         temp_active = self.temp_playback_handler is not None and self.temp_playback_handler.is_active
         if (not temp_active and
+            not self._prepared_rotation_active and
             not self.download_manager.downloads_triggered_this_rotation and 
             self.playlist_manager.is_folder_empty(pending_folder) and 
             not self.download_manager.background_download_in_progress and
@@ -902,6 +564,12 @@ class AutomationController:
         # Check if all content is consumed
         all_consumed = self.file_lock_monitor is not None and self.file_lock_monitor.all_content_consumed
         has_pending_content = not self.playlist_manager.is_folder_empty(pending_folder)
+
+        # ── Prepared rotation finished → restore live playback ──
+        if all_consumed and self._prepared_rotation_active:
+            logger.info("Prepared rotation content finished — restoring live playback")
+            await self.dashboard_handler.restore_after_prepared_rotation()
+            return
         
         # Check if temp playback should be activated (long playlist being downloaded)
         if (all_consumed and 
@@ -1236,6 +904,13 @@ class AutomationController:
                         self.temp_playback_handler._last_folder_check = current_time
 
                 await self.check_for_rotation()
+
+                # Check for scheduled prepared rotations (every 30 seconds)
+                if loop_count % 30 == 0:
+                    scheduled_folder = self.prepared_rotation_manager.check_scheduled()
+                    if scheduled_folder and not self.prepared_rotation_manager.is_executing:
+                        logger.info(f"Scheduled prepared rotation ready — executing: {scheduled_folder}")
+                        await self.dashboard_handler.execute_prepared_rotation(scheduled_folder)
 
                 if self.config_manager.has_config_changed():
                     logger.info("Config changed, syncing...")

@@ -40,6 +40,7 @@ echo "WARNING: This will delete:"
 echo "   - core/stream_data.db"
 echo "   - All files in $VIDEO_FOLDER"
 echo "   - All files in $NEXT_FOLDER"
+echo "   - All prepared rotations in content/prepared"
 echo ""
 read -p "Type 'y' to confirm and continue: " CONFIRM
 if [ "$CONFIRM" != "y" ]; then
@@ -81,6 +82,17 @@ if [ -d "$NEXT_FOLDER" ]; then
     echo "Cleared $NEXT_FOLDER"
 else
     echo "$NEXT_FOLDER folder not found"
+fi
+
+echo ""
+
+# Delete prepared rotations
+if [ -d "content/prepared" ]; then
+    echo "Deleting content/prepared/*/..."
+    rm -rf content/prepared/*/
+    echo "Cleared content/prepared"
+else
+    echo "content/prepared folder not found"
 fi
 
 echo ""
