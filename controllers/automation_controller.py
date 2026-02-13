@@ -29,6 +29,7 @@ from services.kick_live_checker import KickLiveChecker
 from handlers.content_switch_handler import ContentSwitchHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
+from services.web_dashboard_client import WebDashboardClient
 from config.constants import (
     DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER,
     DEFAULT_PAUSE_IMAGE, DEFAULT_ROTATION_IMAGE,
@@ -60,6 +61,10 @@ KICK_CLIENT_SECRET = os.getenv("KICK_CLIENT_SECRET", "")
 
 # Discord Configuration
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+
+# Web Dashboard Configuration
+WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "")      # e.g. ws://localhost:8000
+WEB_DASHBOARD_API_KEY = os.getenv("WEB_DASHBOARD_API_KEY", "")  # from team page
 
 
 class AutomationController:
@@ -125,6 +130,17 @@ class AutomationController:
         self._rotation_postpone_logged = False
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
         self._shutdown_requested = False
+        self._start_time = time.time()  # For uptime tracking
+        
+        # Web dashboard client (optional, enabled via env vars)
+        self.web_dashboard: Optional[WebDashboardClient] = None
+        if WEB_DASHBOARD_URL and WEB_DASHBOARD_API_KEY:
+            self.web_dashboard = WebDashboardClient(
+                api_key=WEB_DASHBOARD_API_KEY,
+                state_provider=self._get_dashboard_state,
+                command_handler=self._handle_dashboard_command,
+                server_url=WEB_DASHBOARD_URL,
+            )
         
         # Deferred seek for crash recovery (applied once VLC is confirmed playing)
         self._pending_seek_ms: Optional[int] = None
@@ -243,6 +259,183 @@ class AutomationController:
                     self._pending_seek_ms = saved_cursor
                     self._pending_seek_video = saved_video
                     logger.info(f"Pending seek after OBS reconnect: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s)")
+
+    def _get_dashboard_state(self) -> dict:
+        """Build a state snapshot for the web dashboard.
+
+        Includes core status fields plus extended data for playlists,
+        settings, queue, and platform connections pages.
+        """
+        status = "offline"
+        if self.last_stream_status == "live":
+            status = "paused"
+        elif self.obs_controller and self.obs_controller.is_connected:
+            status = "online"
+
+        current_video: Optional[str] = None
+        current_playlist: Optional[str] = None
+        current_category: Optional[str] = None
+
+        if self.file_lock_monitor:
+            current_video = self.file_lock_monitor.current_video_original_name
+
+        session = self.db.get_current_session()
+        if session:
+            playlists_json = session.get('playlists_selected')
+            if playlists_json:
+                try:
+                    playlist_ids = json.loads(playlists_json) if isinstance(playlists_json, str) else playlists_json
+                    names = []
+                    for pid in playlist_ids:
+                        p = self.db.get_playlist(pid)
+                        if p:
+                            names.append(p['name'])
+                    current_playlist = ", ".join(names) if names else None
+                except Exception:
+                    pass
+
+        if self.file_lock_monitor:
+            current_category = self.file_lock_monitor.get_category_for_current_video()
+
+        # ── Extended data ──
+
+        # Playlists from config (name, url, category, enabled, priority)
+        playlists = []
+        try:
+            for p in self.config_manager.get_playlists():
+                playlists.append({
+                    "name": p.get("name", ""),
+                    "url": p.get("url", ""),
+                    "category": p.get("category", ""),
+                    "enabled": p.get("enabled", True),
+                    "priority": p.get("priority", 1),
+                })
+        except Exception:
+            pass
+
+        # Settings (all hot-swappable keys from settings.json)
+        settings: dict = {}
+        try:
+            raw = self.config_manager.get_settings()
+            # Only expose dashboard-relevant keys (exclude folder paths)
+            for key in (
+                "stream_title_template",
+                "debug_mode",
+                "notify_video_transitions",
+                "min_playlists_per_rotation",
+                "max_playlists_per_rotation",
+                "download_retry_attempts",
+                "yt_dlp_use_cookies",
+                "yt_dlp_browser_for_cookies",
+                "yt_dlp_verbose",
+            ):
+                if key in raw:
+                    settings[key] = raw[key]
+        except Exception:
+            pass
+
+        # Video queue (files in the current rotation folder)
+        queue: list[str] = []
+        try:
+            if self.file_lock_monitor and self.file_lock_monitor.video_folder:
+                queue = self.file_lock_monitor._get_video_files()
+        except Exception:
+            pass
+
+        # Platform connections
+        connections: dict = {}
+        try:
+            connections["obs"] = bool(self.obs_controller and self.obs_controller.is_connected)
+            connections["twitch"] = bool(TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET)
+            connections["kick"] = bool(KICK_CLIENT_ID and KICK_CLIENT_SECRET)
+            connections["discord_webhook"] = bool(DISCORD_WEBHOOK_URL)
+            connections["twitch_enabled"] = bool(os.getenv("ENABLE_TWITCH", "").lower() == "true")
+            connections["kick_enabled"] = bool(os.getenv("ENABLE_KICK", "").lower() == "true")
+        except Exception:
+            pass
+
+        # Download status
+        download_active = self.download_manager.background_download_in_progress if self.download_manager else False
+
+        return {
+            "status": status,
+            "current_video": current_video,
+            "current_playlist": current_playlist,
+            "current_category": current_category,
+            "obs_connected": bool(self.obs_controller and self.obs_controller.is_connected),
+            "uptime_seconds": int(time.time() - self._start_time),
+            "playlists": playlists,
+            "settings": settings,
+            "queue": queue,
+            "connections": connections,
+            "download_active": download_active,
+        }
+
+    async def _handle_dashboard_command(self, command: dict) -> None:
+        """Handle a command received from the web dashboard."""
+        action = command.get("action", "")
+        payload = command.get("payload", {})
+
+        if action == "skip_video":
+            logger.info("Dashboard command: skip video")
+            if self.obs_controller:
+                try:
+                    self.obs_controller.obs_client.trigger_media_input_action(
+                        name=VLC_SOURCE_NAME,
+                        action="OBS_WEBSOCKET_MEDIA_INPUT_ACTION_NEXT",
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to skip video via dashboard: {e}")
+
+        elif action == "trigger_rotation":
+            logger.info("Dashboard command: trigger rotation")
+            if not self.is_rotating:
+                # Force all-content-consumed so rotation triggers on next tick
+                if self.file_lock_monitor:
+                    self.file_lock_monitor._all_content_consumed = True
+
+        elif action == "update_setting":
+            key = payload.get("key")
+            value = payload.get("value")
+            if key:
+                logger.info(f"Dashboard command: update setting {key}={value}")
+                self._apply_setting_from_dashboard(key, value)
+
+        else:
+            logger.warning(f"Unknown dashboard command: {action}")
+
+    def _apply_setting_from_dashboard(self, key: str, value) -> None:
+        """Write a single setting change to settings.json.
+
+        Only whitelisted keys are accepted to prevent arbitrary file writes.
+        After writing, the ConfigManager's mtime cache will pick up the
+        change automatically on the next get_settings() call.
+        """
+        allowed_keys = {
+            "stream_title_template",
+            "debug_mode",
+            "notify_video_transitions",
+            "min_playlists_per_rotation",
+            "max_playlists_per_rotation",
+            "download_retry_attempts",
+            "yt_dlp_use_cookies",
+            "yt_dlp_browser_for_cookies",
+            "yt_dlp_verbose",
+        }
+        if key not in allowed_keys:
+            logger.warning(f"Dashboard tried to set disallowed key: {key}")
+            return
+
+        settings_path = self.config_manager.settings_path
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data[key] = value
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            logger.info(f"Setting '{key}' updated to {value!r} via dashboard")
+        except Exception as e:
+            logger.error(f"Failed to update setting '{key}': {e}")
 
     def save_playback_on_exit(self):
         """Save current state when program exits."""
@@ -692,6 +885,10 @@ class AutomationController:
         self.notification_service.notify_automation_shutdown()
         self.save_playback_on_exit()
 
+        # Disconnect web dashboard client
+        if self.web_dashboard:
+            await self.web_dashboard.close()
+
         try:
             self.platform_manager.cleanup()
         except Exception as e:
@@ -741,6 +938,12 @@ class AutomationController:
         self.setup_platforms()
         self._initialize_handlers()
         self.notification_service.notify_automation_started()
+
+        # Start web dashboard client if configured
+        dashboard_task: Optional[asyncio.Task] = None
+        if self.web_dashboard:
+            dashboard_task = asyncio.create_task(self.web_dashboard.run())
+            logger.info("Web dashboard client started")
 
         # Sync and check for startup conditions
         config_playlists = self.config_manager.get_playlists()
