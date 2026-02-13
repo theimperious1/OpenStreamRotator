@@ -441,11 +441,11 @@ class FileLockMonitor:
         except Exception as e:
             logger.error(f"Failed to update VLC source after deletion: {e}")
 
-    def get_category_for_current_video(self) -> Optional[str]:
-        """Get the stream category for the currently playing video.
+    def get_category_for_current_video(self) -> Optional[dict[str, str]]:
+        """Get the per-platform stream categories for the currently playing video.
         
         Returns:
-            Category name, or None if unable to determine
+            ``{"twitch": "...", "kick": "..."}`` or None if unable to determine
         """
         if not self._current_video or not self.config:
             return None

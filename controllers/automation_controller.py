@@ -441,6 +441,7 @@ class AutomationController:
             "yt_dlp_browser_for_cookies",
             "yt_dlp_verbose",
         }
+
         if key not in allowed_keys:
             logger.warning(f"Dashboard tried to set disallowed key: {key}")
             return
