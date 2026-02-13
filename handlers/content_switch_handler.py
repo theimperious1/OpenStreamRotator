@@ -12,7 +12,7 @@ from config.config_manager import ConfigManager
 from managers.playlist_manager import PlaylistManager
 from controllers.obs_controller import OBSController
 from services.notification_service import NotificationService
-from utils.video_utils import strip_ordering_prefix, resolve_category_for_video, get_video_files_sorted
+from utils.video_utils import strip_ordering_prefix, resolve_category_for_video, resolve_playlist_categories, get_video_files_sorted
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +41,15 @@ class ContentSwitchHandler:
         self.notification_service = notification_service
         self._last_category_update_time = 0  # Track last category update to throttle spam
 
-    def get_category_for_video(self, video_filename: str) -> Optional[str]:
+    def get_category_for_video(self, video_filename: str) -> Optional[dict[str, str]]:
         """
-        Get the stream category for a specific video based on its source playlist.
+        Get per-platform stream categories for a specific video based on its source playlist.
         
         Args:
             video_filename: Filename of the video to look up
             
         Returns:
-            Category name, or None if not found
+            ``{"twitch": "...", "kick": "..."}`` or None if not found
         """
         return resolve_category_for_video(video_filename, self.db, self.config)
 
@@ -88,9 +88,9 @@ class ContentSwitchHandler:
             logger.error(f"Failed to update category for video {video_filename}: {e}")
             return False
 
-    def get_initial_rotation_category(self, video_folder: str, playlist_manager) -> Optional[str]:
+    def get_initial_rotation_category(self, video_folder: str, playlist_manager) -> Optional[dict[str, str]]:
         """
-        Get the category for the first video in rotation, with fallback to first playlist.
+        Get per-platform categories for the first video in rotation, with fallback to first playlist.
         
         Used during rotation startup to set the correct category for the video about to play.
         
@@ -99,7 +99,7 @@ class ContentSwitchHandler:
             playlist_manager: PlaylistManager instance to get first playlist as fallback
             
         Returns:
-            Category name, or None if unable to determine
+            ``{"twitch": "...", "kick": "..."}`` or None if unable to determine
         """
         category = None
         
@@ -125,7 +125,7 @@ class ContentSwitchHandler:
                     playlist_ids = json.loads(playlists_selected)
                     playlists = playlist_manager.get_playlists_by_ids(playlist_ids)
                     if playlists:
-                        category = playlists[0].get('category') or playlists[0].get('name')
+                        category = resolve_playlist_categories(playlists[0])
                         logger.info(f"Using fallback category from first selected playlist: {category}")
                         return category
         except Exception as e:

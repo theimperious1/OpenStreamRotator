@@ -38,7 +38,7 @@ class DashboardLogHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         entry = {
             "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
-            "level": record.levelname,
+            "level": record.levelname.lower(),
             "logger": record.name,
             "message": self.format(record),
         }

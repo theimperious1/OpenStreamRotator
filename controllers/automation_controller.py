@@ -274,7 +274,7 @@ class AutomationController:
 
         current_video: Optional[str] = None
         current_playlist: Optional[str] = None
-        current_category: Optional[str] = None
+        current_category: Optional[dict] = None
 
         if self.file_lock_monitor:
             current_video = self.file_lock_monitor.current_video_original_name
@@ -299,14 +299,15 @@ class AutomationController:
 
         # ── Extended data ──
 
-        # Playlists from config (name, url, category, enabled, priority)
+        # Playlists from config (name, url, twitch_category, kick_category, enabled, priority)
         playlists = []
         try:
             for p in self.config_manager.get_playlists():
                 playlists.append({
                     "name": p.get("name", ""),
                     "url": p.get("url", ""),
-                    "category": p.get("category", ""),
+                    "twitch_category": p.get("twitch_category", "") or p.get("category", ""),
+                    "kick_category": p.get("kick_category", "") or p.get("category", ""),
                     "enabled": p.get("enabled", True),
                     "priority": p.get("priority", 1),
                 })
@@ -401,6 +402,24 @@ class AutomationController:
                 logger.info(f"Dashboard command: update setting {key}={value}")
                 self._apply_setting_from_dashboard(key, value)
 
+        elif action == "add_playlist":
+            logger.info(f"Dashboard command: add playlist {payload.get('name')}")
+            self._playlist_add(payload)
+
+        elif action == "update_playlist":
+            logger.info(f"Dashboard command: update playlist {payload.get('name')}")
+            self._playlist_update(payload)
+
+        elif action == "remove_playlist":
+            logger.info(f"Dashboard command: remove playlist {payload.get('name')}")
+            self._playlist_remove(payload.get("name", ""))
+
+        elif action == "toggle_playlist":
+            name = payload.get("name", "")
+            enabled = payload.get("enabled")
+            logger.info(f"Dashboard command: toggle playlist {name} -> {enabled}")
+            self._playlist_toggle(name, enabled)
+
         else:
             logger.warning(f"Unknown dashboard command: {action}")
 
@@ -436,6 +455,103 @@ class AutomationController:
             logger.info(f"Setting '{key}' updated to {value!r} via dashboard")
         except Exception as e:
             logger.error(f"Failed to update setting '{key}': {e}")
+
+    # ── Playlist CRUD from dashboard ──────────────────────────────
+
+    def _load_playlists_raw(self) -> dict:
+        """Load the raw playlists.json file."""
+        try:
+            with open(self.config_manager.config_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load playlists.json: {e}")
+            return {"playlists": []}
+
+    def _save_playlists_raw(self, data: dict) -> bool:
+        """Write the playlists.json file. Returns True on success."""
+        try:
+            with open(self.config_manager.config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            logger.info("playlists.json updated via dashboard")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save playlists.json: {e}")
+            return False
+
+    def _playlist_add(self, payload: dict) -> None:
+        """Add a new playlist from dashboard payload."""
+        name = payload.get("name", "").strip()
+        url = payload.get("url", "").strip()
+        if not name or not url:
+            logger.warning("Dashboard add_playlist missing name or url")
+            return
+
+        data = self._load_playlists_raw()
+        # Prevent duplicates by name
+        for p in data.get("playlists", []):
+            if p.get("name", "").lower() == name.lower():
+                logger.warning(f"Playlist '{name}' already exists — skipping add")
+                return
+
+        data.setdefault("playlists", []).append({
+            "name": name,
+            "url": url,
+            "twitch_category": payload.get("twitch_category", "Just Chatting"),
+            "kick_category": payload.get("kick_category", ""),
+            "enabled": payload.get("enabled", True),
+            "priority": payload.get("priority", 1),
+        })
+        self._save_playlists_raw(data)
+
+    def _playlist_update(self, payload: dict) -> None:
+        """Update an existing playlist's fields (matched by name)."""
+        name = payload.get("name", "").strip()
+        if not name:
+            return
+
+        data = self._load_playlists_raw()
+        for p in data.get("playlists", []):
+            if p.get("name", "").lower() == name.lower():
+                if "url" in payload:
+                    p["url"] = payload["url"]
+                if "twitch_category" in payload:
+                    p["twitch_category"] = payload["twitch_category"]
+                if "kick_category" in payload:
+                    p["kick_category"] = payload["kick_category"]
+                if "enabled" in payload:
+                    p["enabled"] = payload["enabled"]
+                if "priority" in payload:
+                    p["priority"] = payload["priority"]
+                self._save_playlists_raw(data)
+                return
+        logger.warning(f"Playlist '{name}' not found for update")
+
+    def _playlist_remove(self, name: str) -> None:
+        """Remove a playlist by name."""
+        if not name:
+            return
+        data = self._load_playlists_raw()
+        original_len = len(data.get("playlists", []))
+        data["playlists"] = [
+            p for p in data.get("playlists", [])
+            if p.get("name", "").lower() != name.lower()
+        ]
+        if len(data["playlists"]) < original_len:
+            self._save_playlists_raw(data)
+        else:
+            logger.warning(f"Playlist '{name}' not found for removal")
+
+    def _playlist_toggle(self, name: str, enabled: bool | None) -> None:
+        """Toggle a playlist's enabled state."""
+        if not name:
+            return
+        data = self._load_playlists_raw()
+        for p in data.get("playlists", []):
+            if p.get("name", "").lower() == name.lower():
+                p["enabled"] = enabled if enabled is not None else not p.get("enabled", True)
+                self._save_playlists_raw(data)
+                return
+        logger.warning(f"Playlist '{name}' not found for toggle")
 
     def save_playback_on_exit(self):
         """Save current state when program exits."""
