@@ -2,7 +2,7 @@
   "min_playlists_per_rotation": 2,
   "max_playlists_per_rotation": 2,
   "download_retry_attempts": 5,
-  "stream_title_template": "testing openstreamrotator software for asmons 247 streams | {GAMES} |",
+  "stream_title_template": "OpenStreamRotator Demo for Emirus Team | {GAMES} |",
   "yt_dlp_verbose": false,
   "notify_video_transitions": true,
   "debug_mode": true,

@@ -137,7 +137,7 @@ def resolve_category_for_video(
             if p.get('name') == playlist_name:
                 return resolve_playlist_categories(p)
 
-        logger.warning(f"Playlist '{playlist_name}' not found in config for video: {video_filename}")
+        logger.debug(f"Playlist '{playlist_name}' no longer in config (may have been removed) — skipping category update for: {video_filename}")
         return None
     except Exception as e:
         logger.error(f"Error getting category for video {video_filename}: {e}")

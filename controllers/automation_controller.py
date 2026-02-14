@@ -499,6 +499,51 @@ class AutomationController:
             self.file_lock_monitor.clear_vlc_refresh_flag()
             self.file_lock_monitor._all_content_consumed = True
 
+    async def _try_recover_session(self) -> None:
+        """Attempt to start a fresh session when none is active.
+
+        Called once per tick from ``check_for_rotation()`` when there is no
+        current session.  Stays on the pause scene until enough enabled
+        playlists are present in playlists.json to meet the configured
+        minimum, then kicks off a normal rotation.
+        """
+        # Ensure we're on the pause scene while waiting
+        if self.obs_controller:
+            try:
+                current_scene = self.obs_controller.get_current_scene()
+                if current_scene != self._scene_pause:
+                    self.obs_controller.switch_scene(self._scene_pause)
+                    logger.info("No active session — switched to pause scene while awaiting playlists")
+            except Exception:
+                pass
+
+        # Only re-check when config actually changes to avoid per-tick noise
+        if not self.config_manager.has_config_changed():
+            return
+
+        # Sync any newly-added playlists into the DB
+        self.db.sync_playlists_from_config(self.config_manager.get_playlists())
+
+        settings = self.config_manager.get_settings()
+        min_playlists = settings.get('min_playlists_per_rotation', 2)
+
+        enabled = [p for p in self.config_manager.get_playlists() if p.get('enabled', True)]
+        if len(enabled) < min_playlists:
+            logger.debug(
+                f"Waiting for playlists: {len(enabled)} enabled, "
+                f"need at least {min_playlists}"
+            )
+            return
+
+        logger.info(
+            f"Enough playlists available ({len(enabled)} >= {min_playlists}) "
+            f"— starting fresh rotation session"
+        )
+        if self.rotation_manager.start_session():
+            self.download_manager.downloads_triggered_this_rotation = False
+            self.download_manager.background_download_in_progress = False
+            await self.rotation_manager.execute_content_switch()
+
     async def check_for_rotation(self):
         """Check if rotation is needed and handle it."""
         if self.is_rotating:
@@ -506,6 +551,12 @@ class AutomationController:
 
         session = self.db.get_current_session()
         if not session:
+            # No active session — this can happen when playlists were removed
+            # mid-rotation causing start_session() to fail, or when the program
+            # starts with an empty playlists.json.  Park on the pause scene and
+            # periodically try to start a fresh session once enough playlists
+            # become available.
+            await self._try_recover_session()
             return
 
         # Check file lock monitor for video transitions
