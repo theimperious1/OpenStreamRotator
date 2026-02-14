@@ -91,7 +91,7 @@ def resolve_playlist_categories(playlist: dict) -> dict[str, str]:
     elif not twitch and not kick:
         twitch = kick = fallback
 
-    return {"twitch": twitch, "kick": kick}
+    return {"twitch": twitch or fallback, "kick": kick or fallback}
 
 
 def resolve_category_for_video(
