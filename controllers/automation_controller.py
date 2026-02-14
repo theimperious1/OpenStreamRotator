@@ -530,8 +530,9 @@ class AutomationController:
                         # Optional video transition notification
                         settings = self.config_manager.get_settings()
                         if settings.get('notify_video_transitions', False):
-                            category = self.file_lock_monitor.get_category_for_current_video() if self.file_lock_monitor else None
-                            self.notification_service.notify_video_transition(current_video, category)
+                            cat_dict = self.file_lock_monitor.get_category_for_current_video() if self.file_lock_monitor else None
+                            cat_label = " / ".join(f"{k}: {v}" for k, v in cat_dict.items()) if cat_dict else None
+                            self.notification_service.notify_video_transition(current_video, cat_label)
                     except Exception as e:
                         logger.warning(f"Failed to update category on video transition: {e}")
             
