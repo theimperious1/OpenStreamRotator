@@ -11,6 +11,7 @@ import os
 import time
 from typing import Optional, TYPE_CHECKING
 
+from dotenv import find_dotenv, set_key
 from config.constants import (
     DEFAULT_VIDEO_FOLDER,
 )
@@ -163,6 +164,9 @@ class DashboardHandler:
         # Prepared rotations state
         prepared_state = ctrl.prepared_rotation_manager.get_dashboard_state()
 
+        # Environment configuration (for owner settings page)
+        env_config = self._build_env_config()
+
         return {
             "status": status,
             "manual_pause": ctrl._manual_pause,
@@ -178,6 +182,7 @@ class DashboardHandler:
             "download_active": download_active,
             "can_skip": can_skip,
             "can_trigger_rotation": can_trigger_rotation,
+            "env_config": env_config,
             **prepared_state,
         }
 
@@ -330,6 +335,23 @@ class DashboardHandler:
             logger.info(f"Dashboard command: cancel schedule for '{slug}'")
             ctrl.prepared_rotation_manager.cancel_schedule(folder)
 
+        elif action == "reload_env":
+            logger.info("Dashboard command: reload .env configuration")
+            changed = ctrl.reload_env()
+            if changed:
+                safe = {k: ("****" if "SECRET" in k or "PASSWORD" in k or "API_KEY" in k else v) for k, v in changed.items()}
+                logger.info(f"Environment reloaded — changed: {', '.join(safe.keys())}")
+            else:
+                logger.info("Environment reloaded — no changes")
+
+        elif action == "update_env":
+            key = payload.get("key", "")
+            value = payload.get("value", "")
+            if not key:
+                logger.warning("update_env: missing key")
+                return
+            self._apply_env_var(key, str(value))
+
         else:
             logger.warning(f"Unknown dashboard command: {action}")
 
@@ -368,6 +390,66 @@ class DashboardHandler:
             logger.info(f"Setting '{key}' updated to {value!r} via dashboard")
         except Exception as e:
             logger.error(f"Failed to update setting '{key}': {e}")
+
+    # ── Environment variables ─────────────────────────────────────
+
+    # Keys the owner may read and/or write from the dashboard.
+    # "safe" keys have their value sent to the frontend;
+    # "secret" keys only report whether they are set (write-only).
+    _ENV_SAFE_KEYS = {
+        "OBS_HOST", "OBS_PORT",
+        "SCENE_PAUSE", "SCENE_STREAM", "SCENE_ROTATION_SCREEN",
+        "VLC_SOURCE_NAME",
+        "ENABLE_TWITCH", "ENABLE_KICK",
+        "TARGET_TWITCH_STREAMER", "TARGET_KICK_STREAMER",
+    }
+    _ENV_SECRET_KEYS = {
+        "OBS_PASSWORD",
+        "TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET",
+        "KICK_CLIENT_ID", "KICK_CLIENT_SECRET",
+        "DISCORD_WEBHOOK_URL",
+    }
+    _ENV_ALLOWED_KEYS = _ENV_SAFE_KEYS | _ENV_SECRET_KEYS
+
+    def _build_env_config(self) -> dict:
+        """Return current env values for the settings page.
+
+        Safe keys include their current value.  Secret keys only report
+        ``True``/``False`` to indicate whether they are configured (the
+        actual secret is never sent over the wire).
+        """
+        config: dict[str, dict] = {}
+        for key in self._ENV_SAFE_KEYS:
+            config[key] = {"value": os.getenv(key, ""), "secret": False}
+        for key in self._ENV_SECRET_KEYS:
+            config[key] = {"value": bool(os.getenv(key, "")), "secret": True}
+        return config
+
+    def _apply_env_var(self, key: str, value: str) -> None:
+        """Write a single env var to the .env file, then trigger reload.
+
+        Only whitelisted keys are accepted.
+        """
+        if key not in self._ENV_ALLOWED_KEYS:
+            logger.warning(f"Dashboard tried to set disallowed env key: {key}")
+            return
+
+        env_path = find_dotenv(usecwd=True)
+        if not env_path:
+            logger.error("update_env: .env file not found")
+            return
+
+        try:
+            set_key(env_path, key, value)
+            is_secret = key in self._ENV_SECRET_KEYS
+            display = "****" if is_secret else value
+            logger.info(f"Env var '{key}' written to .env → {display}")
+        except Exception as e:
+            logger.error(f"Failed to write env var '{key}': {e}")
+            return
+
+        # Apply immediately
+        self.ctrl.reload_env()
 
     # ── Manual pause / resume ─────────────────────────────────────
 

@@ -200,6 +200,133 @@ class AutomationController:
         """Callback for download manager to set prepared playlists."""
         self.next_prepared_playlists = playlists
 
+    def reload_env(self) -> dict:
+        """Re-read .env file and update module-level constants + instance attrs.
+
+        Returns a dict summarising what changed so the caller can log it.
+        """
+        global OBS_HOST, OBS_PORT, OBS_PASSWORD
+        global SCENE_PAUSE, SCENE_STREAM, SCENE_ROTATION_SCREEN, VLC_SOURCE_NAME
+        global TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET
+        global KICK_CLIENT_ID, KICK_CLIENT_SECRET
+        global DISCORD_WEBHOOK_URL
+        global WEB_DASHBOARD_URL, WEB_DASHBOARD_API_KEY
+
+        # Snapshot old values for diff
+        old = {
+            "OBS_HOST": OBS_HOST, "OBS_PORT": OBS_PORT, "OBS_PASSWORD": OBS_PASSWORD,
+            "SCENE_PAUSE": SCENE_PAUSE, "SCENE_STREAM": SCENE_STREAM,
+            "SCENE_ROTATION_SCREEN": SCENE_ROTATION_SCREEN,
+            "VLC_SOURCE_NAME": VLC_SOURCE_NAME,
+            "TWITCH_CLIENT_ID": TWITCH_CLIENT_ID,
+            "TWITCH_CLIENT_SECRET": TWITCH_CLIENT_SECRET,
+            "KICK_CLIENT_ID": KICK_CLIENT_ID,
+            "KICK_CLIENT_SECRET": KICK_CLIENT_SECRET,
+            "DISCORD_WEBHOOK_URL": DISCORD_WEBHOOK_URL,
+            "WEB_DASHBOARD_URL": WEB_DASHBOARD_URL,
+            "WEB_DASHBOARD_API_KEY": WEB_DASHBOARD_API_KEY,
+        }
+
+        # Re-read .env into os.environ (override=True so changed values win)
+        load_dotenv(override=True)
+
+        # Re-evaluate module-level constants
+        OBS_HOST = os.getenv("OBS_HOST", "127.0.0.1")
+        OBS_PORT = int(os.getenv("OBS_PORT", 4455))
+        OBS_PASSWORD = os.getenv("OBS_PASSWORD", "")
+        SCENE_PAUSE = os.getenv("SCENE_PAUSE", os.getenv("SCENE_LIVE", DEFAULT_SCENE_PAUSE))
+        SCENE_STREAM = os.getenv("SCENE_STREAM", os.getenv("SCENE_OFFLINE", DEFAULT_SCENE_STREAM))
+        SCENE_ROTATION_SCREEN = os.getenv("SCENE_ROTATION_SCREEN", DEFAULT_SCENE_ROTATION_SCREEN)
+        VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", DEFAULT_VLC_SOURCE_NAME)
+        TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
+        TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET", "")
+        KICK_CLIENT_ID = os.getenv("KICK_CLIENT_ID", "")
+        KICK_CLIENT_SECRET = os.getenv("KICK_CLIENT_SECRET", "")
+        DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+        WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "")
+        WEB_DASHBOARD_API_KEY = os.getenv("WEB_DASHBOARD_API_KEY", "")
+
+        # Build diff
+        new = {
+            "OBS_HOST": OBS_HOST, "OBS_PORT": OBS_PORT, "OBS_PASSWORD": OBS_PASSWORD,
+            "SCENE_PAUSE": SCENE_PAUSE, "SCENE_STREAM": SCENE_STREAM,
+            "SCENE_ROTATION_SCREEN": SCENE_ROTATION_SCREEN,
+            "VLC_SOURCE_NAME": VLC_SOURCE_NAME,
+            "TWITCH_CLIENT_ID": TWITCH_CLIENT_ID,
+            "TWITCH_CLIENT_SECRET": TWITCH_CLIENT_SECRET,
+            "KICK_CLIENT_ID": KICK_CLIENT_ID,
+            "KICK_CLIENT_SECRET": KICK_CLIENT_SECRET,
+            "DISCORD_WEBHOOK_URL": DISCORD_WEBHOOK_URL,
+            "WEB_DASHBOARD_URL": WEB_DASHBOARD_URL,
+            "WEB_DASHBOARD_API_KEY": WEB_DASHBOARD_API_KEY,
+        }
+        changed = {k: new[k] for k in new if old[k] != new[k]}
+
+        if not changed:
+            logger.info("reload_env: .env re-read — no changes detected")
+            return changed
+
+        # Mask secret values in logs
+        safe = {k: ("****" if "SECRET" in k or "PASSWORD" in k or "API_KEY" in k else v) for k, v in changed.items()}
+        logger.info(f"reload_env: changed keys → {safe}")
+
+        # ── Update instance attrs ──
+        self._scene_pause = SCENE_PAUSE
+        self._scene_stream = SCENE_STREAM
+        self._scene_rotation_screen = SCENE_ROTATION_SCREEN
+        self._vlc_source_name = VLC_SOURCE_NAME
+        self._env_twitch_client_id = TWITCH_CLIENT_ID
+        self._env_twitch_client_secret = TWITCH_CLIENT_SECRET
+        self._env_kick_client_id = KICK_CLIENT_ID
+        self._env_kick_client_secret = KICK_CLIENT_SECRET
+        self._env_discord_webhook_url = DISCORD_WEBHOOK_URL
+
+        # ── Update rotation manager scene names ──
+        self.rotation_manager._scene_stream = SCENE_STREAM
+        self.rotation_manager._scene_pause = SCENE_PAUSE
+        self.rotation_manager._scene_rotation = SCENE_ROTATION_SCREEN
+        self.rotation_manager._vlc_source = VLC_SOURCE_NAME
+
+        # ── Reconstruct simple services if their config changed ──
+
+        # Discord webhook — just swap the attribute
+        if "DISCORD_WEBHOOK_URL" in changed:
+            self.notification_service.discord_webhook_url = DISCORD_WEBHOOK_URL
+            logger.info("reload_env: updated Discord webhook URL")
+
+        # Twitch live checker
+        if "TWITCH_CLIENT_ID" in changed or "TWITCH_CLIENT_SECRET" in changed:
+            if TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET:
+                self.twitch_live_checker = TwitchLiveChecker(TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET)
+                logger.info("reload_env: rebuilt Twitch live checker")
+            else:
+                self.twitch_live_checker = None
+                logger.info("reload_env: Twitch credentials cleared — live checker disabled")
+
+        # Kick live checker
+        if "KICK_CLIENT_ID" in changed or "KICK_CLIENT_SECRET" in changed:
+            if KICK_CLIENT_ID and KICK_CLIENT_SECRET:
+                self.kick_live_checker = KickLiveChecker(KICK_CLIENT_ID, KICK_CLIENT_SECRET)
+                logger.info("reload_env: rebuilt Kick live checker")
+            else:
+                self.kick_live_checker = None
+                logger.info("reload_env: Kick credentials cleared — live checker disabled")
+
+        # OBS connection — reconnect if host/port/password changed
+        if any(k in changed for k in ("OBS_HOST", "OBS_PORT", "OBS_PASSWORD")):
+            logger.info("reload_env: OBS connection config changed — will reconnect on next tick")
+            try:
+                self.obs_connection.disconnect()
+            except Exception:
+                pass
+            self.obs_connection = OBSConnectionManager(
+                host=OBS_HOST, port=OBS_PORT, password=OBS_PASSWORD,
+                shutdown_event=self._shutdown_event,
+            )
+            # obs_controller will be reconstructed on next tick's connect attempt
+
+        return changed
+
     def signal_handler(self, sig, frame):
         """Handle shutdown signals gracefully."""
         logger.info("Shutdown signal received...")
