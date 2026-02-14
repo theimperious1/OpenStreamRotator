@@ -91,6 +91,32 @@ class PreparedRotationManager:
     def set_download_manager(self, dm: DownloadManager) -> None:
         self._download_manager = dm
 
+    def resolve_folder(self, slug: str) -> Optional[str]:
+        """Convert a slug to a validated absolute folder path.
+
+        Returns the full path if the slug is safe and the folder exists,
+        otherwise *None*.  Rejects any slug containing path separators,
+        parent-directory references, or other traversal attempts.
+        """
+        if not slug or not isinstance(slug, str):
+            return None
+        # Reject anything that could escape PREPARED_BASE
+        if any(c in slug for c in ("/", "\\", "\0")):
+            logger.warning(f"Rejected slug with path separators: {slug!r}")
+            return None
+        if slug in (".", "..") or slug.startswith("."):
+            logger.warning(f"Rejected slug with dot prefix: {slug!r}")
+            return None
+        folder = os.path.join(PREPARED_BASE, slug)
+        # Double-check the resolved path is still under PREPARED_BASE
+        resolved = os.path.realpath(folder)
+        if not resolved.startswith(os.path.realpath(PREPARED_BASE)):
+            logger.warning(f"Slug resolved outside PREPARED_BASE: {slug!r} -> {resolved}")
+            return None
+        if not os.path.isdir(folder):
+            return None
+        return folder
+
     def _reset_stale_executing(self) -> None:
         """Reset any rotations stuck in 'executing' from a previous run."""
         for entry in os.scandir(PREPARED_BASE):
@@ -428,11 +454,15 @@ class PreparedRotationManager:
     # ──────────────────────────────────────────────────────────────
 
     def get_dashboard_state(self) -> dict:
-        """Return a state dict suitable for the web dashboard."""
+        """Return a state dict suitable for the web dashboard.
+
+        Emits *slug* (the bare directory name) instead of full filesystem
+        paths so that absolute paths are never exposed over the wire.
+        """
         rotations = []
         for meta in self.list_all():
             rotations.append({
-                "folder": meta["folder"],
+                "slug": os.path.basename(meta["folder"]),
                 "title": meta.get("title", "Untitled"),
                 "playlists": meta.get("playlists", []),
                 "status": meta.get("status", "created"),
@@ -443,5 +473,5 @@ class PreparedRotationManager:
         return {
             "prepared_rotations": rotations,
             "any_downloading": self.is_any_downloading(),
-            "executing_folder": self._executing_folder,
+            "executing_slug": os.path.basename(self._executing_folder) if self._executing_folder else None,
         }

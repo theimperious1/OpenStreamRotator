@@ -270,24 +270,40 @@ class DashboardHandler:
             ctrl.prepared_rotation_manager.create(title, playlists)
 
         elif action == "download_prepared_rotation":
-            folder = payload.get("folder", "")
-            logger.info(f"Dashboard command: download prepared rotation at {folder}")
+            slug = payload.get("slug", "")
+            folder = ctrl.prepared_rotation_manager.resolve_folder(slug)
+            if not folder:
+                logger.warning(f"download_prepared_rotation: invalid slug {slug!r}")
+                return
+            logger.info(f"Dashboard command: download prepared rotation '{slug}'")
             if not ctrl.prepared_rotation_manager.start_download(folder):
                 logger.warning("download_prepared_rotation failed — check status or another download in progress")
 
         elif action == "cancel_prepared_download":
-            folder = payload.get("folder", "")
-            logger.info(f"Dashboard command: cancel prepared download at {folder}")
+            slug = payload.get("slug", "")
+            folder = ctrl.prepared_rotation_manager.resolve_folder(slug)
+            if not folder:
+                logger.warning(f"cancel_prepared_download: invalid slug {slug!r}")
+                return
+            logger.info(f"Dashboard command: cancel prepared download '{slug}'")
             ctrl.prepared_rotation_manager.cancel_download(folder)
 
         elif action == "execute_prepared_rotation":
-            folder = payload.get("folder", "")
-            logger.info(f"Dashboard command: execute prepared rotation at {folder}")
+            slug = payload.get("slug", "")
+            folder = ctrl.prepared_rotation_manager.resolve_folder(slug)
+            if not folder:
+                logger.warning(f"execute_prepared_rotation: invalid slug {slug!r}")
+                return
+            logger.info(f"Dashboard command: execute prepared rotation '{slug}'")
             await self.execute_prepared_rotation(folder)
 
         elif action == "delete_prepared_rotation":
-            folder = payload.get("folder", "")
-            logger.info(f"Dashboard command: delete prepared rotation at {folder}")
+            slug = payload.get("slug", "")
+            folder = ctrl.prepared_rotation_manager.resolve_folder(slug)
+            if not folder:
+                logger.warning(f"delete_prepared_rotation: invalid slug {slug!r}")
+                return
+            logger.info(f"Dashboard command: delete prepared rotation '{slug}'")
             ctrl.prepared_rotation_manager.delete(folder)
 
         elif action == "clear_completed_prepared":
@@ -296,14 +312,22 @@ class DashboardHandler:
             logger.info(f"Cleared {count} completed prepared rotations")
 
         elif action == "schedule_prepared_rotation":
-            folder = payload.get("folder", "")
+            slug = payload.get("slug", "")
+            folder = ctrl.prepared_rotation_manager.resolve_folder(slug)
+            if not folder:
+                logger.warning(f"schedule_prepared_rotation: invalid slug {slug!r}")
+                return
             scheduled_at = payload.get("scheduled_at", "")
-            logger.info(f"Dashboard command: schedule prepared rotation at {folder} for {scheduled_at}")
+            logger.info(f"Dashboard command: schedule prepared rotation '{slug}' for {scheduled_at}")
             ctrl.prepared_rotation_manager.schedule(folder, scheduled_at)
 
         elif action == "cancel_prepared_schedule":
-            folder = payload.get("folder", "")
-            logger.info(f"Dashboard command: cancel schedule for {folder}")
+            slug = payload.get("slug", "")
+            folder = ctrl.prepared_rotation_manager.resolve_folder(slug)
+            if not folder:
+                logger.warning(f"cancel_prepared_schedule: invalid slug {slug!r}")
+                return
+            logger.info(f"Dashboard command: cancel schedule for '{slug}'")
             ctrl.prepared_rotation_manager.cancel_schedule(folder)
 
         else:
