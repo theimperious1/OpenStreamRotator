@@ -1,11 +1,11 @@
 {
   "min_playlists_per_rotation": 2,
-  "max_playlists_per_rotation": 2,
+  "max_playlists_per_rotation": 4,
   "download_retry_attempts": 5,
-  "stream_title_template": "OpenStreamRotator Demo for @Asmongold247 | {GAMES} |",
+  "stream_title_template": "My Stream Title | {GAMES} | OpenStreamRotator",
   "yt_dlp_verbose": false,
   "notify_video_transitions": true,
-  "debug_mode": true,
+  "debug_mode": false,
   "yt_dlp_use_cookies": true,
   "yt_dlp_browser_for_cookies": "firefox"
 }

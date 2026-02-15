@@ -1,84 +1,28 @@
 {
   "playlists": [
     {
-      "name": "MUSIC",
-      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyF6XOwb53qTmbyLa2xsSHR-",
-      "twitch_category": "Just Chatting",
-      "enabled": true,
+      "name": "Example1",
+      "url": "https://www.youtube.com/playlist?list=Example1",
+      "enabled": false,
       "priority": 1,
+      "twitch_category": "Just Chatting",
       "kick_category": "Just Chatting"
     },
     {
-      "name": "NARWHALS",
-      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyFkfqt3Oga1pab8ePbKFscB",
-      "enabled": true,
-      "twitch_category": "Just Chatting",
+      "name": "Example2",
+      "url": "https://www.youtube.com/playlist?list=Example2",
+      "enabled": false,
       "priority": 1,
+      "twitch_category": "Just Chatting",
       "kick_category": "Just Chatting"
     },
     {
-      "name": "CATS",
-      "url": "https://www.youtube.com/playlist?list=PLiJqYgx6JJyEKFKMuMWtiCWJGjwYsblck",
+      "name": "Example3",
+      "url": "https://www.youtube.com/playlist?list=Example3",
+      "enabled": false,
+      "priority": 1,
       "twitch_category": "Just Chatting",
-      "enabled": true,
-      "priority": 1,
       "kick_category": "Just Chatting"
-    },
-    {
-      "name": "MW2",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjkZRMdYQ5cn5hUmaqyUVqYO",
-      "twitch_category": "Call of Duty: Modern Warfare 2",
-      "enabled": true,
-      "priority": 1,
-      "kick_category": "Call of Duty: Modern Warfare 2"
-    },
-    {
-      "name": "ASMONGOLD SHORTS",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjnr40tReiGs84uifUAJtlRu",
-      "twitch_category": "Just Chatting",
-      "enabled": true,
-      "priority": 1,
-      "kick_category": "Just Chatting"
-    },
-    {
-      "name": "CAT MEMES",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjlbzhcE-hePMPqPQ_B7YXNC",
-      "twitch_category": "Just Chatting",
-      "enabled": true,
-      "priority": 1,
-      "kick_category": "Just Chatting"
-    },
-    {
-      "name": "FF14",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjkhpjL87dSagEcu1L1c2C3G",
-      "twitch_category": "Final Fantasy XIV",
-      "kick_category": "Final Fantasy XIV",
-      "enabled": true,
-      "priority": 1
-    },
-    {
-      "name": "Hytale",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjnzKfefPZN11m15xTotRsjD",
-      "twitch_category": "Hytale",
-      "kick_category": "Hytale",
-      "enabled": true,
-      "priority": 1
-    },
-    {
-      "name": "TESIV: Oblivion Remastered",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjnfz8DnG6NbyCSjp8-TyMgc",
-      "twitch_category": "The Elder Scrolls IV: Oblivion Remastered",
-      "kick_category": "The Elder Scrolls IV Oblivion Remastered",
-      "enabled": true,
-      "priority": 1
-    },
-    {
-      "name": "Mecha BREAK",
-      "url": "https://www.youtube.com/playlist?list=PLyOrmHkdXGjkvo4nKRJT3PM-9xm5TvFjb",
-      "twitch_category": "Mecha BREAK",
-      "kick_category": "Mecha BREAK",
-      "enabled": true,
-      "priority": 1
     }
   ]
 }
