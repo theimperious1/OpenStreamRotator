@@ -2,6 +2,8 @@
 
 Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays them through VLC in OBS, rotates content when finished, and manages stream metadata on Kick and Twitch — all unattended.
 
+> **Like this project?** [Buy me a coffee ☕](https://buymeacoffee.com/theimperious1)
+
 ## How It Works
 
 1. **Playlist selection** — Each rotation, the system picks a configurable number of enabled playlists (prioritizing least-recently-played) and downloads their videos via yt-dlp into a pending folder.
