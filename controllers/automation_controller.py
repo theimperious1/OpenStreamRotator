@@ -39,8 +39,9 @@ from config.constants import (
     DEFAULT_SCENE_ROTATION_SCREEN, DEFAULT_VLC_SOURCE_NAME,
 )
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from project root
+from config.constants import _PROJECT_ROOT
+load_dotenv(os.path.join(_PROJECT_ROOT, '.env'))
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +229,7 @@ class AutomationController:
         }
 
         # Re-read .env into os.environ (override=True so changed values win)
-        load_dotenv(override=True)
+        load_dotenv(os.path.join(_PROJECT_ROOT, '.env'), override=True)
 
         # Re-evaluate module-level constants
         OBS_HOST = os.getenv("OBS_HOST", "127.0.0.1")

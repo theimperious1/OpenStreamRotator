@@ -20,7 +20,7 @@ import shutil
 import time
 from datetime import datetime, timezone
 from threading import Event
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from config.constants import VIDEO_EXTENSIONS
 
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Base directory for prepared rotations (sibling of live/, pending/, etc.)
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from config.constants import _PROJECT_ROOT
 PREPARED_BASE = os.path.join(_PROJECT_ROOT, "content", "prepared")
 
 # Valid status transitions

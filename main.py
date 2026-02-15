@@ -13,7 +13,13 @@ import threading
 # Force UTF-8 encoding for console output to handle Unicode characters
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
-log_dir = os.path.dirname(os.path.abspath(__file__))
+# Frozen-aware project root (PyInstaller bundles to temp dir)
+if getattr(sys, 'frozen', False):
+    _app_root = os.path.dirname(sys.executable)
+else:
+    _app_root = os.path.dirname(os.path.abspath(__file__))
+
+log_dir = _app_root
 log_file = os.path.join(log_dir, 'automation.log')
 
 # Setup logging with explicit formatter on handlers

@@ -45,7 +45,9 @@ class DatabaseManager:
     def __init__(self, db_path: Optional[str] = None):
         # Use core directory if not provided
         if db_path is None:
-            core_dir = os.path.dirname(os.path.abspath(__file__))
+            from config.constants import _PROJECT_ROOT
+            core_dir = os.path.join(_PROJECT_ROOT, "core")
+            os.makedirs(core_dir, exist_ok=True)
             db_path = os.path.join(core_dir, "stream_data.db")
         
         self.db_path = db_path

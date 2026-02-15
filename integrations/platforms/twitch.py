@@ -9,12 +9,11 @@ import re
 import sqlite3
 import time
 import webbrowser
+import requests
 from typing import Optional
 from urllib.parse import quote
-
-import requests
-
 from integrations.platforms.base.stream_platform import StreamPlatform
+from config.constants import _PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +28,8 @@ class TwitchTokenManager:
 
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
-            core_dir = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                "core"
-            )
+            core_dir = os.path.join(_PROJECT_ROOT, "core")
+            os.makedirs(core_dir, exist_ok=True)
             db_path = os.path.join(core_dir, "twitch_tokens.db")
         self.db_path = db_path
         self._ensure_table()

@@ -13,6 +13,7 @@ from typing import Optional
 import aiohttp
 from integrations.platforms.base.stream_platform import StreamPlatform
 from config.constants import KICK_FALLBACK_CATEGORY_ID
+from config.constants import _PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,8 @@ class KickUpdater(StreamPlatform):
         
         # Use core directory for token storage if not provided
         if db_path is None:
-            core_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "core")
+            core_dir = os.path.join(_PROJECT_ROOT, "core")
+            os.makedirs(core_dir, exist_ok=True)
             db_path = os.path.join(core_dir, "kick_tokens.db")
         
         self.db_path = db_path

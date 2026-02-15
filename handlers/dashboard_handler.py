@@ -11,7 +11,7 @@ import os
 import time
 from typing import Optional, TYPE_CHECKING
 
-from dotenv import find_dotenv, set_key
+from dotenv import set_key
 from config.constants import (
     DEFAULT_VIDEO_FOLDER,
 )
@@ -434,8 +434,9 @@ class DashboardHandler:
             logger.warning(f"Dashboard tried to set disallowed env key: {key}")
             return
 
-        env_path = find_dotenv(usecwd=True)
-        if not env_path:
+        from config.constants import _PROJECT_ROOT
+        env_path = os.path.join(_PROJECT_ROOT, '.env')
+        if not os.path.isfile(env_path):
             logger.error("update_env: .env file not found")
             return
 

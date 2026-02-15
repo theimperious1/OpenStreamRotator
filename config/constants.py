@@ -4,9 +4,15 @@ Centralized location for magic numbers, strings, and IDs.
 """
 
 import os
+import sys
 
-# Project root directory (parent of config/)
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Project root directory — when frozen by PyInstaller the exe unpacks to a temp
+# dir so __file__ no longer points at the real project folder.  Use the
+# directory containing the exe instead.
+if getattr(sys, 'frozen', False):
+    _PROJECT_ROOT = os.path.dirname(sys.executable)
+else:
+    _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Kick Platform
 KICK_FALLBACK_CATEGORY_ID = 15  # "Just Chatting" category ID on Kick

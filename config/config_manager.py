@@ -7,6 +7,7 @@ import json
 import os
 import logging
 from typing import Dict, List, Optional
+from config.constants import _PROJECT_ROOT
 
 from config.constants import DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER
 
@@ -14,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class ConfigManager:
     def __init__(self, config_path: Optional[str] = None, settings_path: Optional[str] = None):
-        config_dir = os.path.dirname(os.path.abspath(__file__))
+        config_dir = os.path.join(_PROJECT_ROOT, "config")
         self.config_path = config_path or os.path.join(config_dir, "playlists.json")
         self.settings_path = settings_path or os.path.join(config_dir, "settings.json")
         # Seed with actual mtimes so the first has_config_changed() call
