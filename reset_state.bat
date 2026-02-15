@@ -44,6 +44,7 @@ echo WARNING: This will delete:
 echo   - core\stream_data.db
 echo   - All files in !VIDEO_FOLDER!
 echo   - All files in !NEXT_FOLDER!
+echo   - All prepared rotations in content\prepared
 echo.
 set /p CONFIRM="Type 'y' to confirm and continue: "
 if /i not "!CONFIRM!"=="y" (
@@ -88,6 +89,17 @@ if exist "!NEXT_FOLDER!" (
     echo Cleared !NEXT_FOLDER!
 ) else (
     echo !NEXT_FOLDER! folder not found
+)
+
+echo.
+
+REM Delete prepared rotations
+if exist "content\prepared" (
+    echo Deleting content\prepared\*...
+    for /d %%x in ("content\prepared\*") do @rmdir /s /q "%%x" 2>nul
+    echo Cleared content\prepared
+) else (
+    echo content\prepared folder not found
 )
 
 echo.

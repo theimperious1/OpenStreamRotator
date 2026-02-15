@@ -58,6 +58,7 @@ class FileLockMonitor:
         self._current_video: Optional[str] = None  # Filename of currently playing video
         self._all_content_consumed: bool = False
         self._temp_playback_mode: bool = False
+        self._delete_on_transition: bool = True  # False during prepared rotations to preserve files
         self._last_video_duration_seconds: int = 0  # Cached duration for last-video polling
         self._needs_vlc_refresh: bool = False  # Signal: last video done in temp playback, new files may exist
         
@@ -82,6 +83,7 @@ class FileLockMonitor:
         self._all_content_consumed = False
         self._needs_vlc_refresh = False
         self._temp_playback_mode = False
+        self._delete_on_transition = True
         self._pending_transition_file = None
         self._last_video_duration_seconds = 0
         
@@ -284,23 +286,35 @@ class FileLockMonitor:
         previous_video = self._current_video
         previous_original = strip_ordering_prefix(previous_video)
         
-        # Delete the finished video
-        self._delete_video(filepath)
+        if self._delete_on_transition:
+            # Delete the finished video
+            self._delete_video(filepath)
+            
+            # Update VLC source to remove the deleted file
+            self._update_vlc_source()
+            
+            # Get next video
+            files = self._get_video_files()
+            if files:
+                self._current_video = files[0]
+            else:
+                self._current_video = None
+        else:
+            # Prepared rotation mode — keep files, advance to next in list
+            files = self._get_video_files()
+            cur_idx = files.index(previous_video) if previous_video in files else -1
+            if cur_idx >= 0 and cur_idx + 1 < len(files):
+                self._current_video = files[cur_idx + 1]
+            else:
+                self._current_video = None
         
-        # Update VLC source to remove the deleted file
-        self._update_vlc_source()
-        
-        # Get next video
-        files = self._get_video_files()
-        if files:
-            self._current_video = files[0]
+        if self._current_video:
             result['transition'] = True
             result['previous_video'] = previous_original
             result['current_video'] = strip_ordering_prefix(self._current_video)
             logger.info(f"Video transition: {previous_original} -> {result['current_video']}")
         else:
             # No more files - all consumed
-            self._current_video = None
             self._all_content_consumed = True
             result['transition'] = True
             result['previous_video'] = previous_original
@@ -372,7 +386,7 @@ class FileLockMonitor:
                     return result
                 
                 # Normal mode: delete the last video and mark consumed
-                if self._current_video:
+                if self._current_video and self._delete_on_transition:
                     filepath = os.path.join(self.video_folder, self._current_video)
                     # Try to delete - may fail if VLC still has lock
                     if not is_file_locked(filepath):
@@ -441,11 +455,11 @@ class FileLockMonitor:
         except Exception as e:
             logger.error(f"Failed to update VLC source after deletion: {e}")
 
-    def get_category_for_current_video(self) -> Optional[str]:
-        """Get the stream category for the currently playing video.
+    def get_category_for_current_video(self) -> Optional[dict[str, str]]:
+        """Get the per-platform stream categories for the currently playing video.
         
         Returns:
-            Category name, or None if unable to determine
+            ``{"twitch": "...", "kick": "..."}`` or None if unable to determine
         """
         if not self._current_video or not self.config:
             return None

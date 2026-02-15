@@ -17,6 +17,7 @@ from core.database import DatabaseManager
 from managers.playlist_manager import PlaylistManager
 from services.notification_service import NotificationService
 from config.constants import DEFAULT_NEXT_ROTATION_FOLDER, DEFAULT_VIDEO_FOLDER
+from utils.video_utils import resolve_playlist_categories
 
 if TYPE_CHECKING:
     from controllers.obs_controller import OBSController
@@ -175,7 +176,7 @@ class TempPlaybackHandler:
                                     playlist_name = video_data.get('playlist_name')
                                     for p in playlists_config:
                                         if p.get('name') == playlist_name:
-                                            category = p.get('category') or p.get('name')
+                                            category = resolve_playlist_categories(p)
                                             logger.info(f"Got category from first video DB lookup: {first_video} -> {category}")
                                             break
                             except Exception as e:
@@ -187,7 +188,7 @@ class TempPlaybackHandler:
                                 playlists_config = self.config.get_playlists()
                                 for p in playlists_config:
                                     if p.get('name') == next_playlist_names[0]:
-                                        category = p.get('category') or p.get('name')
+                                        category = resolve_playlist_categories(p)
                                         logger.info(f"Using category from first next_playlist ({next_playlist_names[0]}): {category}")
                                         break
                             except Exception as e:

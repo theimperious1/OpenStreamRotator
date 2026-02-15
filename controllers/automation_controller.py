@@ -22,13 +22,16 @@ from managers.obs_connection_manager import OBSConnectionManager
 from managers.download_manager import DownloadManager
 from managers.rotation_manager import RotationManager
 from managers.platform_manager import PlatformManager
+from managers.prepared_rotation_manager import PreparedRotationManager
 from services.notification_service import NotificationService
 from playback.file_lock_monitor import FileLockMonitor
 from services.twitch_live_checker import TwitchLiveChecker
 from services.kick_live_checker import KickLiveChecker
 from handlers.content_switch_handler import ContentSwitchHandler
+from handlers.dashboard_handler import DashboardHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
+from services.web_dashboard_client import WebDashboardClient
 from config.constants import (
     DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER,
     DEFAULT_PAUSE_IMAGE, DEFAULT_ROTATION_IMAGE,
@@ -60,6 +63,10 @@ KICK_CLIENT_SECRET = os.getenv("KICK_CLIENT_SECRET", "")
 
 # Discord Configuration
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+
+# Web Dashboard Configuration
+WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "")      # e.g. ws://localhost:8000
+WEB_DASHBOARD_API_KEY = os.getenv("WEB_DASHBOARD_API_KEY", "")  # from team page
 
 
 class AutomationController:
@@ -113,18 +120,59 @@ class AutomationController:
         else:
             self.kick_live_checker = None
 
+        # Prepared rotation manager
+        self.prepared_rotation_manager = PreparedRotationManager(
+            playlist_manager=self.playlist_manager,
+            config_manager=self.config_manager,
+            video_registration_queue=self.video_registration_queue,
+            shutdown_event=self._shutdown_event,
+        )
+        self.prepared_rotation_manager.set_download_manager(self.download_manager)
+
         # Handlers (initialized in _initialize_handlers)
         self.content_switch_handler: Optional[ContentSwitchHandler] = None
         self.temp_playback_handler: Optional[TempPlaybackHandler] = None
+
+        # Expose constants for DashboardHandler (avoids circular imports)
+        self._scene_pause = SCENE_PAUSE
+        self._scene_stream = SCENE_STREAM
+        self._scene_rotation_screen = SCENE_ROTATION_SCREEN
+        self._vlc_source_name = VLC_SOURCE_NAME
+        self._env_twitch_client_id = TWITCH_CLIENT_ID
+        self._env_twitch_client_secret = TWITCH_CLIENT_SECRET
+        self._env_kick_client_id = KICK_CLIENT_ID
+        self._env_kick_client_secret = KICK_CLIENT_SECRET
+        self._env_discord_webhook_url = DISCORD_WEBHOOK_URL
 
         # State
         self.current_session_id: Optional[int] = None
         self.next_prepared_playlists = None
         self.last_stream_status = None
         self.is_rotating = False
+        self._manual_pause = False  # True when paused via dashboard (prevents auto-resume)
         self._rotation_postpone_logged = False
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
         self._shutdown_requested = False
+        self._start_time = time.time()  # For uptime tracking
+
+        # Prepared rotation overlay state
+        self._prepared_rotation_active = False  # True while a prepared rotation is playing
+        self._saved_live_video: Optional[str] = None  # Original name of live video that was playing
+        self._saved_live_cursor_ms: int = 0  # Cursor position within that video
+        self._saved_live_folder: Optional[str] = None  # Path to live folder to restore
+        
+        # Dashboard handler — owns all web-dashboard state / command logic
+        self.dashboard_handler = DashboardHandler(self)
+
+        # Web dashboard client (optional, enabled via env vars)
+        self.web_dashboard: Optional[WebDashboardClient] = None
+        if WEB_DASHBOARD_URL and WEB_DASHBOARD_API_KEY:
+            self.web_dashboard = WebDashboardClient(
+                api_key=WEB_DASHBOARD_API_KEY,
+                state_provider=self.dashboard_handler.get_dashboard_state,
+                command_handler=self.dashboard_handler.handle_command,
+                server_url=WEB_DASHBOARD_URL,
+            )
         
         # Deferred seek for crash recovery (applied once VLC is confirmed playing)
         self._pending_seek_ms: Optional[int] = None
@@ -151,6 +199,133 @@ class AutomationController:
     def _set_next_prepared_playlists(self, playlists) -> None:
         """Callback for download manager to set prepared playlists."""
         self.next_prepared_playlists = playlists
+
+    def reload_env(self) -> dict:
+        """Re-read .env file and update module-level constants + instance attrs.
+
+        Returns a dict summarising what changed so the caller can log it.
+        """
+        global OBS_HOST, OBS_PORT, OBS_PASSWORD
+        global SCENE_PAUSE, SCENE_STREAM, SCENE_ROTATION_SCREEN, VLC_SOURCE_NAME
+        global TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET
+        global KICK_CLIENT_ID, KICK_CLIENT_SECRET
+        global DISCORD_WEBHOOK_URL
+        global WEB_DASHBOARD_URL, WEB_DASHBOARD_API_KEY
+
+        # Snapshot old values for diff
+        old = {
+            "OBS_HOST": OBS_HOST, "OBS_PORT": OBS_PORT, "OBS_PASSWORD": OBS_PASSWORD,
+            "SCENE_PAUSE": SCENE_PAUSE, "SCENE_STREAM": SCENE_STREAM,
+            "SCENE_ROTATION_SCREEN": SCENE_ROTATION_SCREEN,
+            "VLC_SOURCE_NAME": VLC_SOURCE_NAME,
+            "TWITCH_CLIENT_ID": TWITCH_CLIENT_ID,
+            "TWITCH_CLIENT_SECRET": TWITCH_CLIENT_SECRET,
+            "KICK_CLIENT_ID": KICK_CLIENT_ID,
+            "KICK_CLIENT_SECRET": KICK_CLIENT_SECRET,
+            "DISCORD_WEBHOOK_URL": DISCORD_WEBHOOK_URL,
+            "WEB_DASHBOARD_URL": WEB_DASHBOARD_URL,
+            "WEB_DASHBOARD_API_KEY": WEB_DASHBOARD_API_KEY,
+        }
+
+        # Re-read .env into os.environ (override=True so changed values win)
+        load_dotenv(override=True)
+
+        # Re-evaluate module-level constants
+        OBS_HOST = os.getenv("OBS_HOST", "127.0.0.1")
+        OBS_PORT = int(os.getenv("OBS_PORT", 4455))
+        OBS_PASSWORD = os.getenv("OBS_PASSWORD", "")
+        SCENE_PAUSE = os.getenv("SCENE_PAUSE", os.getenv("SCENE_LIVE", DEFAULT_SCENE_PAUSE))
+        SCENE_STREAM = os.getenv("SCENE_STREAM", os.getenv("SCENE_OFFLINE", DEFAULT_SCENE_STREAM))
+        SCENE_ROTATION_SCREEN = os.getenv("SCENE_ROTATION_SCREEN", DEFAULT_SCENE_ROTATION_SCREEN)
+        VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", DEFAULT_VLC_SOURCE_NAME)
+        TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
+        TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET", "")
+        KICK_CLIENT_ID = os.getenv("KICK_CLIENT_ID", "")
+        KICK_CLIENT_SECRET = os.getenv("KICK_CLIENT_SECRET", "")
+        DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+        WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "")
+        WEB_DASHBOARD_API_KEY = os.getenv("WEB_DASHBOARD_API_KEY", "")
+
+        # Build diff
+        new = {
+            "OBS_HOST": OBS_HOST, "OBS_PORT": OBS_PORT, "OBS_PASSWORD": OBS_PASSWORD,
+            "SCENE_PAUSE": SCENE_PAUSE, "SCENE_STREAM": SCENE_STREAM,
+            "SCENE_ROTATION_SCREEN": SCENE_ROTATION_SCREEN,
+            "VLC_SOURCE_NAME": VLC_SOURCE_NAME,
+            "TWITCH_CLIENT_ID": TWITCH_CLIENT_ID,
+            "TWITCH_CLIENT_SECRET": TWITCH_CLIENT_SECRET,
+            "KICK_CLIENT_ID": KICK_CLIENT_ID,
+            "KICK_CLIENT_SECRET": KICK_CLIENT_SECRET,
+            "DISCORD_WEBHOOK_URL": DISCORD_WEBHOOK_URL,
+            "WEB_DASHBOARD_URL": WEB_DASHBOARD_URL,
+            "WEB_DASHBOARD_API_KEY": WEB_DASHBOARD_API_KEY,
+        }
+        changed = {k: new[k] for k in new if old[k] != new[k]}
+
+        if not changed:
+            logger.info("reload_env: .env re-read — no changes detected")
+            return changed
+
+        # Mask secret values in logs
+        safe = {k: ("****" if "SECRET" in k or "PASSWORD" in k or "API_KEY" in k else v) for k, v in changed.items()}
+        logger.info(f"reload_env: changed keys → {safe}")
+
+        # ── Update instance attrs ──
+        self._scene_pause = SCENE_PAUSE
+        self._scene_stream = SCENE_STREAM
+        self._scene_rotation_screen = SCENE_ROTATION_SCREEN
+        self._vlc_source_name = VLC_SOURCE_NAME
+        self._env_twitch_client_id = TWITCH_CLIENT_ID
+        self._env_twitch_client_secret = TWITCH_CLIENT_SECRET
+        self._env_kick_client_id = KICK_CLIENT_ID
+        self._env_kick_client_secret = KICK_CLIENT_SECRET
+        self._env_discord_webhook_url = DISCORD_WEBHOOK_URL
+
+        # ── Update rotation manager scene names ──
+        self.rotation_manager._scene_stream = SCENE_STREAM
+        self.rotation_manager._scene_pause = SCENE_PAUSE
+        self.rotation_manager._scene_rotation = SCENE_ROTATION_SCREEN
+        self.rotation_manager._vlc_source = VLC_SOURCE_NAME
+
+        # ── Reconstruct simple services if their config changed ──
+
+        # Discord webhook — just swap the attribute
+        if "DISCORD_WEBHOOK_URL" in changed:
+            self.notification_service.discord_webhook_url = DISCORD_WEBHOOK_URL
+            logger.info("reload_env: updated Discord webhook URL")
+
+        # Twitch live checker
+        if "TWITCH_CLIENT_ID" in changed or "TWITCH_CLIENT_SECRET" in changed:
+            if TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET:
+                self.twitch_live_checker = TwitchLiveChecker(TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET)
+                logger.info("reload_env: rebuilt Twitch live checker")
+            else:
+                self.twitch_live_checker = None
+                logger.info("reload_env: Twitch credentials cleared — live checker disabled")
+
+        # Kick live checker
+        if "KICK_CLIENT_ID" in changed or "KICK_CLIENT_SECRET" in changed:
+            if KICK_CLIENT_ID and KICK_CLIENT_SECRET:
+                self.kick_live_checker = KickLiveChecker(KICK_CLIENT_ID, KICK_CLIENT_SECRET)
+                logger.info("reload_env: rebuilt Kick live checker")
+            else:
+                self.kick_live_checker = None
+                logger.info("reload_env: Kick credentials cleared — live checker disabled")
+
+        # OBS connection — reconnect if host/port/password changed
+        if any(k in changed for k in ("OBS_HOST", "OBS_PORT", "OBS_PASSWORD")):
+            logger.info("reload_env: OBS connection config changed — will reconnect on next tick")
+            try:
+                self.obs_connection.disconnect()
+            except Exception:
+                pass
+            self.obs_connection = OBSConnectionManager(
+                host=OBS_HOST, port=OBS_PORT, password=OBS_PASSWORD,
+                shutdown_event=self._shutdown_event,
+            )
+            # obs_controller will be reconstructed on next tick's connect attempt
+
+        return changed
 
     def signal_handler(self, sig, frame):
         """Handle shutdown signals gracefully."""
@@ -451,6 +626,51 @@ class AutomationController:
             self.file_lock_monitor.clear_vlc_refresh_flag()
             self.file_lock_monitor._all_content_consumed = True
 
+    async def _try_recover_session(self) -> None:
+        """Attempt to start a fresh session when none is active.
+
+        Called once per tick from ``check_for_rotation()`` when there is no
+        current session.  Stays on the pause scene until enough enabled
+        playlists are present in playlists.json to meet the configured
+        minimum, then kicks off a normal rotation.
+        """
+        # Ensure we're on the pause scene while waiting
+        if self.obs_controller:
+            try:
+                current_scene = self.obs_controller.get_current_scene()
+                if current_scene != self._scene_pause:
+                    self.obs_controller.switch_scene(self._scene_pause)
+                    logger.info("No active session — switched to pause scene while awaiting playlists")
+            except Exception:
+                pass
+
+        # Only re-check when config actually changes to avoid per-tick noise
+        if not self.config_manager.has_config_changed():
+            return
+
+        # Sync any newly-added playlists into the DB
+        self.db.sync_playlists_from_config(self.config_manager.get_playlists())
+
+        settings = self.config_manager.get_settings()
+        min_playlists = settings.get('min_playlists_per_rotation', 2)
+
+        enabled = [p for p in self.config_manager.get_playlists() if p.get('enabled', True)]
+        if len(enabled) < min_playlists:
+            logger.debug(
+                f"Waiting for playlists: {len(enabled)} enabled, "
+                f"need at least {min_playlists}"
+            )
+            return
+
+        logger.info(
+            f"Enough playlists available ({len(enabled)} >= {min_playlists}) "
+            f"— starting fresh rotation session"
+        )
+        if self.rotation_manager.start_session():
+            self.download_manager.downloads_triggered_this_rotation = False
+            self.download_manager.background_download_in_progress = False
+            await self.rotation_manager.execute_content_switch()
+
     async def check_for_rotation(self):
         """Check if rotation is needed and handle it."""
         if self.is_rotating:
@@ -458,6 +678,12 @@ class AutomationController:
 
         session = self.db.get_current_session()
         if not session:
+            # No active session — this can happen when playlists were removed
+            # mid-rotation causing start_session() to fail, or when the program
+            # starts with an empty playlists.json.  Park on the pause scene and
+            # periodically try to start a fresh session once enough playlists
+            # become available.
+            await self._try_recover_session()
             return
 
         # Check file lock monitor for video transitions
@@ -482,8 +708,9 @@ class AutomationController:
                         # Optional video transition notification
                         settings = self.config_manager.get_settings()
                         if settings.get('notify_video_transitions', False):
-                            category = self.file_lock_monitor.get_category_for_current_video() if self.file_lock_monitor else None
-                            self.notification_service.notify_video_transition(current_video, category)
+                            cat_dict = self.file_lock_monitor.get_category_for_current_video() if self.file_lock_monitor else None
+                            cat_label = " / ".join(f"{k}: {v}" for k, v in cat_dict.items()) if cat_dict else None
+                            self.notification_service.notify_video_transition(current_video, cat_label)
                     except Exception as e:
                         logger.warning(f"Failed to update category on video transition: {e}")
             
@@ -497,10 +724,12 @@ class AutomationController:
         # Trigger background download only if pending folder is empty and not already triggered
         # Skip on first loop after resume to avoid downloading when resuming into existing rotation
         # Skip entirely during temp playback — pending folder is in use for playback
+        # Skip during prepared rotation — live/pending must not be touched
         settings = self.config_manager.get_settings()
         pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
         temp_active = self.temp_playback_handler is not None and self.temp_playback_handler.is_active
         if (not temp_active and
+            not self._prepared_rotation_active and
             not self.download_manager.downloads_triggered_this_rotation and 
             self.playlist_manager.is_folder_empty(pending_folder) and 
             not self.download_manager.background_download_in_progress and
@@ -514,6 +743,12 @@ class AutomationController:
         # Check if all content is consumed
         all_consumed = self.file_lock_monitor is not None and self.file_lock_monitor.all_content_consumed
         has_pending_content = not self.playlist_manager.is_folder_empty(pending_folder)
+
+        # ── Prepared rotation finished → restore live playback ──
+        if all_consumed and self._prepared_rotation_active:
+            logger.info("Prepared rotation content finished — restoring live playback")
+            await self.dashboard_handler.restore_after_prepared_rotation()
+            return
         
         # Check if temp playback should be activated (long playlist being downloaded)
         if (all_consumed and 
@@ -639,6 +874,10 @@ class AutomationController:
             self.last_stream_status = "live"
             self.notification_service.notify_streamer_live()
         elif not is_live and self.last_stream_status != "offline":
+            if self._manual_pause:
+                # Manual pause is active — don't auto-resume when streamer goes offline
+                logger.debug("Streamer is OFFLINE but manual pause is active — staying paused")
+                return
             logger.info("Streamer is OFFLINE — resuming 24/7 stream")
             if self.obs_controller:
                 self.obs_controller.switch_scene(SCENE_STREAM)
@@ -692,6 +931,10 @@ class AutomationController:
         self.notification_service.notify_automation_shutdown()
         self.save_playback_on_exit()
 
+        # Disconnect web dashboard client
+        if self.web_dashboard:
+            await self.web_dashboard.close()
+
         try:
             self.platform_manager.cleanup()
         except Exception as e:
@@ -741,6 +984,12 @@ class AutomationController:
         self.setup_platforms()
         self._initialize_handlers()
         self.notification_service.notify_automation_started()
+
+        # Start web dashboard client if configured
+        dashboard_task: Optional[asyncio.Task] = None
+        if self.web_dashboard:
+            dashboard_task = asyncio.create_task(self.web_dashboard.run())
+            logger.info("Web dashboard client started")
 
         # Sync and check for startup conditions
         config_playlists = self.config_manager.get_playlists()
@@ -834,6 +1083,13 @@ class AutomationController:
                         self.temp_playback_handler._last_folder_check = current_time
 
                 await self.check_for_rotation()
+
+                # Check for scheduled prepared rotations (every 30 seconds)
+                if loop_count % 30 == 0:
+                    scheduled_folder = self.prepared_rotation_manager.check_scheduled()
+                    if scheduled_folder and not self.prepared_rotation_manager.is_executing:
+                        logger.info(f"Scheduled prepared rotation ready — executing: {scheduled_folder}")
+                        await self.dashboard_handler.execute_prepared_rotation(scheduled_folder)
 
                 if self.config_manager.has_config_changed():
                     logger.info("Config changed, syncing...")

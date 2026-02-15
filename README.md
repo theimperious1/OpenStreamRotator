@@ -357,10 +357,6 @@ OpenStreamRotator/
     └── rotation/              # Assets for the Rotation Screen OBS scene
 ```
 
-## Credits
-u/theimperious1 / Shadow  
-u/Kryptiiq
-
 ## License
 
-This project is open source. See the repository for license details.
+Copyright (c) 2025-2026 theimperious1. All rights reserved. See [LICENSE](LICENSE) for details.

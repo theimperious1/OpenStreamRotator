@@ -44,12 +44,13 @@ class StreamManager:
             logger.info(f"Updated title on {success_count}/{len(results)} platforms: {title}")
         return success_count > 0
 
-    async def update_category(self, category: str) -> bool:
+    async def update_category(self, category: 'dict[str, str] | str') -> bool:
         """
         Update stream category on all enabled platforms.
         
         Args:
-            category: New stream category/game
+            category: Per-platform dict ``{"twitch": ..., "kick": ...}``
+                      or a single string for all platforms.
             
         Returns:
             True if at least one platform succeeded
@@ -68,13 +69,13 @@ class StreamManager:
             logger.info(f"Updated category on {success_count}/{len(results)} platforms: {category}")
         return success_count > 0
 
-    async def update_both(self, title: str, category: Optional[str] = None) -> bool:
+    async def update_both(self, title: str, category: 'dict[str, str] | str | None' = None) -> bool:
         """
         Update both title and category on all platforms (legacy method).
         
         Args:
             title: New stream title
-            category: New stream category (optional)
+            category: Per-platform dict or single string (optional)
             
         Returns:
             True if successful
@@ -87,14 +88,14 @@ class StreamManager:
         
         return title_updated or category_updated
 
-    async def update_stream_info(self, title: str, category: Optional[str] = None) -> bool:
+    async def update_stream_info(self, title: str, category: 'dict[str, str] | str | None' = None) -> bool:
         """
         Update stream information (title and category together).
         Uses platform's update_stream_info method for optimal compatibility.
         
         Args:
             title: New stream title
-            category: New stream category (optional)
+            category: Per-platform dict or single string (optional)
             
         Returns:
             True if successful

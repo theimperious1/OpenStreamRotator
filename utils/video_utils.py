@@ -66,15 +66,44 @@ def get_video_files_sorted(folder: str) -> list[str]:
     ])
 
 
+def resolve_playlist_categories(playlist: dict) -> dict[str, str]:
+    """Resolve per-platform categories from a playlist config dict.
+
+    Each playlist can have ``twitch_category`` and/or ``kick_category``.
+    If only one is present it is used for both platforms.  Falls back to
+    the legacy ``category`` field, then to the playlist name.
+
+    Args:
+        playlist: A single playlist dict from playlists.json
+
+    Returns:
+        ``{"twitch": "<cat>", "kick": "<cat>"}``
+    """
+    twitch = playlist.get("twitch_category") or playlist.get("category")
+    kick = playlist.get("kick_category") or playlist.get("category")
+    fallback = playlist.get("name", "Just Chatting")
+
+    # When only one platform category is specified, share it
+    if twitch and not kick:
+        kick = twitch
+    elif kick and not twitch:
+        twitch = kick
+    elif not twitch and not kick:
+        twitch = kick = fallback
+
+    return {"twitch": twitch or fallback, "kick": kick or fallback}
+
+
 def resolve_category_for_video(
     video_filename: str,
     db: 'DatabaseManager',
     config: 'ConfigManager'
-) -> Optional[str]:
-    """Resolve the stream category for a video based on its source playlist.
+) -> Optional[dict[str, str]]:
+    """Resolve per-platform stream categories for a video.
 
     Strips ordering prefix, looks up the original filename in the database,
-    finds the source playlist, and returns the playlist's configured category.
+    finds the source playlist, and returns the playlist's configured
+    per-platform categories.
 
     Args:
         video_filename: Filename of the video (with or without ordering prefix)
@@ -82,7 +111,7 @@ def resolve_category_for_video(
         config: ConfigManager instance for playlist category lookup
 
     Returns:
-        Category name, or None if unable to determine
+        ``{"twitch": "...", "kick": "..."}`` or None if unable to determine
     """
     if not video_filename:
         return None
@@ -106,9 +135,9 @@ def resolve_category_for_video(
         playlists_config = config.get_playlists()
         for p in playlists_config:
             if p.get('name') == playlist_name:
-                return p.get('category') or p.get('name')
+                return resolve_playlist_categories(p)
 
-        logger.warning(f"Playlist '{playlist_name}' not found in config for video: {video_filename}")
+        logger.debug(f"Playlist '{playlist_name}' no longer in config (may have been removed) — skipping category update for: {video_filename}")
         return None
     except Exception as e:
         logger.error(f"Error getting category for video {video_filename}: {e}")

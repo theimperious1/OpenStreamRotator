@@ -46,6 +46,7 @@ class KickUpdater(StreamPlatform):
         self.loop = None
         self._initialized = False
         self.current_title: str = ""                # Track current title for category-only updates
+        self.current_category_id: Optional[int] = None  # Track current category ID for title-only updates
 
     async def _ensure_initialized(self):
         """Initialize both API clients and verify authentication."""
@@ -140,10 +141,12 @@ class KickUpdater(StreamPlatform):
         # category_id is required by KickAPI.update_channel()
         category_id = kwargs.pop("category_id", None)
         if category_id is None:
-            # Skip trying to fetch current category to avoid kickpython's asyncio.run() issue
-            # Always use the provided category or fallback
-            category_id = KICK_FALLBACK_CATEGORY_ID  # Just Chatting - fallback
-            logger.warning(f"[{self.platform_name}] Using fallback category ID: {category_id}")
+            # Prefer the last successfully-set category, fall back to Just Chatting
+            if self.current_category_id is not None:
+                category_id = self.current_category_id
+            else:
+                category_id = KICK_FALLBACK_CATEGORY_ID  # Just Chatting - fallback
+                logger.warning(f"[{self.platform_name}] Using fallback category ID: {category_id}")
 
         # Ensure category_id is an integer
         try:
@@ -292,6 +295,7 @@ class KickUpdater(StreamPlatform):
                 # Need to include current title when updating category
                 # (Kick API requires stream_title even when only updating category)
                 await self._update_channel(category_id=category_id, stream_title=self.current_title or "")
+                self.current_category_id = int(category_id)
                 self.log_success("Updated category", category)
                 return True
             else:
@@ -306,9 +310,8 @@ class KickUpdater(StreamPlatform):
             return False
 
     async def update_stream_info(self, title: str, category: Optional[str] = None) -> bool:
+        params = {"stream_title": title}
         try:
-            params = {"stream_title": title}
-
             if category:
                 category_id = await self._get_category_id(category)
                 if category_id:
@@ -316,6 +319,11 @@ class KickUpdater(StreamPlatform):
 
             await self._update_channel(**params)
             self.current_title = title  # Store title for category-only updates
+            if "category_id" in params:
+                try:
+                    self.current_category_id = int(params["category_id"])
+                except (ValueError, TypeError):
+                    pass
             self.log_success(
                 "Updated stream info",
                 f"Title: {title}, Category: {category or 'N/A'}"
@@ -324,6 +332,11 @@ class KickUpdater(StreamPlatform):
         except Exception as e:
             if self._is_204_success(e):
                 self.current_title = title
+                if "category_id" in params:
+                    try:
+                        self.current_category_id = int(params["category_id"])
+                    except (ValueError, TypeError):
+                        pass
                 self.log_success(
                     "Updated stream info",
                     f"Title: {title}, Category: {category or 'N/A'}"

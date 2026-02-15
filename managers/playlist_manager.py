@@ -55,21 +55,13 @@ class PlaylistManager:
         return result
     
     def get_playlists_by_names(self, playlist_names: List[str]) -> List[Dict]:
-        """Get full playlist data from config by their names.
+        """Get full playlist data (with DB ids) by their names.
         
-        Used to restore prepared playlists from database by name.
+        Returns database rows with 'id', 'youtube_url', 'name', etc.
+        Used by prepared rotations and anywhere the downloader needs
+        properly-keyed playlist dicts.
         """
-        config_playlists = self.config.get_playlists()
-        
-        # Find matching playlists in config by name
-        result = []
-        for name in playlist_names:
-            for p in config_playlists:
-                if p.get('name') == name:
-                    result.append(p)
-                    break
-        
-        return result
+        return self.db.get_playlists_with_ids_by_names(playlist_names)
     
     def select_playlists_for_rotation(self, manual_selection: Optional[List[str]] = None) -> List[Dict]:
         """

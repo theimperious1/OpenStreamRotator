@@ -125,18 +125,36 @@ class PlatformManager:
             results[platform.platform_name] = await platform.update_title(title)
         return results
 
-    async def update_category_all(self, category: str) -> dict[str, bool]:
-        """Update category on all enabled platforms."""
+    async def update_category_all(self, category: 'dict[str, str] | str') -> dict[str, bool]:
+        """Update category on all enabled platforms.
+
+        Args:
+            category: Either a per-platform dict ``{"twitch": ..., "kick": ...}``
+                      or a single string applied to every platform.
+        """
         results = {}
         for platform in self.platforms:
-            results[platform.platform_name] = await platform.update_category(category)
+            cat = category.get(platform.platform_name.lower(), "") if isinstance(category, dict) else category
+            if cat:
+                results[platform.platform_name] = await platform.update_category(cat)
         return results
 
-    async def update_stream_info_all(self, title: str, category: Optional[str] = None) -> dict[str, bool]:
-         """Update stream title and category on all enabled platforms."""
+    async def update_stream_info_all(self, title: str, category: 'dict[str, str] | str | None' = None) -> dict[str, bool]:
+         """Update stream title and category on all enabled platforms.
+
+         Args:
+             title: New stream title.
+             category: Either a per-platform dict ``{"twitch": ..., "kick": ...}``
+                       or a single string applied to every platform.
+         """
          results = {}
          for platform in self.platforms:
-             results[platform.platform_name] = await platform.update_stream_info(title, category)
+             cat = None
+             if isinstance(category, dict):
+                 cat = category.get(platform.platform_name.lower())
+             elif isinstance(category, str):
+                 cat = category
+             results[platform.platform_name] = await platform.update_stream_info(title, cat)
          return results
 
     def is_platform_enabled(self, platform_name: str) -> bool:
