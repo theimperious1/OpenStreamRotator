@@ -59,6 +59,8 @@ cp .env.example .env
 | `SCENE_ROTATION_SCREEN` | No | `OSR Rotation screen` | OBS scene shown during rotation transitions |
 | `VLC_SOURCE_NAME` | No | `OSR Playlist` | Name of the VLC media source in OBS |
 | `DISCORD_WEBHOOK_URL` | No | — | Discord webhook for notifications |
+| `WEB_DASHBOARD_URL` | No | — | URL of the OpenStreamRotator Web Dashboard backend (e.g. `https://your-domain:8000`) |
+| `WEB_DASHBOARD_API_KEY` | No | — | API key from the web dashboard Team page (generated when you register an instance) |
 | `VIDEO_FOLDER` | No | `content/live/` | Path to the live playback folder (VLC reads from here) |
 | `NEXT_ROTATION_FOLDER` | No | `content/pending/` | Path to the pending/download folder |
 | `BROADCASTER_ID` | No | — | Twitch broadcaster ID (auto-resolved from `TWITCH_USER_LOGIN` if empty) |
@@ -326,10 +328,11 @@ OpenStreamRotator/
 │   ├── automation_controller.py     # Main orchestration loop
 │   └── obs_controller.py            # OBS WebSocket interface
 ├── core/
-│   └── database.py                  # SQLite session, playlist, and playback tracking
+│   ├── database.py                  # SQLite session, playlist, and playback tracking
+│   └── video_registration_queue.py  # Async queue for video file registration
 ├── handlers/
 │   ├── content_switch_handler.py    # OBS scene transitions during rotation
-│   ├── rotation_handler.py          # Background download triggers and rotation prep
+│   ├── dashboard_handler.py         # Web dashboard command handler
 │   └── temp_playback_handler.py     # Temp playback during long downloads
 ├── integrations/
 │   └── platforms/
@@ -337,26 +340,39 @@ OpenStreamRotator/
 │       ├── kick.py                  # Kick API integration
 │       └── twitch.py                # Twitch API integration
 ├── managers/
+│   ├── download_manager.py          # Download orchestration and retry logic
+│   ├── obs_connection_manager.py    # OBS WebSocket connection lifecycle
 │   ├── platform_manager.py          # Multi-platform broadcast orchestration
 │   ├── playlist_manager.py          # Folder management and video renaming
+│   ├── prepared_rotation_manager.py # Prepared rotation scheduling and execution
+│   ├── rotation_manager.py          # Rotation lifecycle management
 │   └── stream_manager.py            # Stream title and category updates
 ├── playback/
 │   └── file_lock_monitor.py         # File-lock-based video transition detection
 ├── services/
+│   ├── kick_live_checker.py         # Kick live status polling
 │   ├── notification_service.py      # Discord webhook notifications
-│   └── twitch_live_checker.py       # Twitch live status polling
+│   ├── twitch_live_checker.py       # Twitch live status polling
+│   └── web_dashboard_client.py      # WebSocket client for the web dashboard
 ├── utils/
 │   ├── playlist_selector.py         # Rotation playlist selection logic
-│   ├── video_downloader.py          # yt-dlp download manager
-│   └── video_processor.py           # Video file processing utilities
-└── videos/
+│   ├── video_downloader.py          # yt-dlp download wrapper
+│   ├── video_processor.py           # Video file processing utilities
+│   └── video_utils.py               # Video duration and validation helpers
+└── content/
     ├── live/                        # Current playback folder (VLC reads from here)
+    ├── pause/                       # Pause screen assets
     ├── pending/                     # Next rotation downloads
-    │   ├── archive.txt              # yt-dlp download archive (prevents re-downloads)
-    │   └── temp/                    # yt-dlp partial download fragments
-    └── rotation/              # Assets for the Rotation Screen OBS scene
+    ├── prepared/                    # Prepared rotation content staging
+    └── rotation/                    # Rotation screen assets
 ```
+
+## Web Dashboard
+
+OpenStreamRotator has an optional web dashboard for remote monitoring and control. See [OpenStreamRotatorWeb](https://github.com/theimperious1/OpenStreamRotatorWeb) for setup instructions.
+
+To connect an OSR instance to the dashboard, set `WEB_DASHBOARD_URL` and `WEB_DASHBOARD_API_KEY` in your `.env` file. The API key is generated when you register an instance on the Team page of the web dashboard.
 
 ## License
 
-Copyright (c) 2025-2026 theimperious1. All rights reserved. See [LICENSE](LICENSE) for details.
+Copyright (c) 2026 theimperious1. All rights reserved. See [LICENSE](LICENSE) for details.
