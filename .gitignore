@@ -1,4 +1,4 @@
-# theimperious1's personal ignores
+# Project ignores
 content/live/
 content/pending/
 content/prepared/
@@ -11,6 +11,8 @@ twitch_tokens.db
 osr_web.db
 .idea/
 deprecated/
+OpenStreamRotator/
+*.zip
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
