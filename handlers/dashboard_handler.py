@@ -252,6 +252,12 @@ class DashboardHandler:
             logger.info(f"Dashboard command: remove playlist {payload.get('name')}")
             self._playlist_remove(payload.get("name", ""))
 
+        elif action == "rename_playlist":
+            old_name = payload.get("old_name", "")
+            new_name = payload.get("new_name", "")
+            logger.info(f"Dashboard command: rename playlist '{old_name}' -> '{new_name}'")
+            self._playlist_rename(old_name, new_name)
+
         elif action == "toggle_playlist":
             name = payload.get("name", "")
             enabled = payload.get("enabled")
@@ -775,6 +781,41 @@ class DashboardHandler:
             self._save_playlists_raw(data)
         else:
             logger.warning(f"Playlist '{name}' not found for removal")
+
+    def _playlist_rename(self, old_name: str, new_name: str) -> None:
+        """Rename a playlist: update playlists.json and cascade through DB."""
+        old_name = old_name.strip()
+        new_name = new_name.strip()
+        if not old_name or not new_name:
+            logger.warning("Dashboard rename_playlist missing old_name or new_name")
+            return
+        if old_name.lower() == new_name.lower():
+            return  # no-op
+
+        data = self._load_playlists_raw()
+        # Check for name collision
+        for p in data.get("playlists", []):
+            if p.get("name", "").lower() == new_name.lower():
+                logger.warning(f"Cannot rename to '{new_name}' — name already exists")
+                return
+
+        # Update playlists.json
+        found = False
+        for p in data.get("playlists", []):
+            if p.get("name", "").lower() == old_name.lower():
+                p["name"] = new_name
+                found = True
+                break
+        if not found:
+            logger.warning(f"Playlist '{old_name}' not found for rename")
+            return
+        self._save_playlists_raw(data)
+
+        # Cascade through database
+        db = self.ctrl.db
+        if db:
+            db.rename_playlist(old_name, new_name)
+        logger.info(f"Playlist renamed: '{old_name}' -> '{new_name}'")
 
     def _playlist_toggle(self, name: str, enabled: bool | None) -> None:
         """Toggle a playlist's enabled state."""

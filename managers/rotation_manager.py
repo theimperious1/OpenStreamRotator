@@ -7,6 +7,7 @@ shared state.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -42,7 +43,7 @@ class RotationManager:
     # Session creation
     # ------------------------------------------------------------------
 
-    def start_session(self, manual_playlists=None) -> bool:
+    async def start_session(self, manual_playlists=None) -> bool:
         """Start a new rotation session."""
         ctrl = self._ctrl
 
@@ -75,7 +76,10 @@ class RotationManager:
             settings = ctrl.config_manager.get_settings()
             verbose_download = settings.get('yt_dlp_verbose', False)
 
-            download_result = ctrl.playlist_manager.download_playlists(playlists, next_folder, verbose=verbose_download)
+            download_result = await asyncio.get_event_loop().run_in_executor(
+                ctrl.download_manager.executor,
+                lambda: ctrl.playlist_manager.download_playlists(playlists, next_folder, verbose=verbose_download)
+            )
             total_duration_seconds = download_result.get('total_duration_seconds', 0)
 
             if not download_result.get('success'):
@@ -279,7 +283,7 @@ class RotationManager:
 
             ctrl.db.end_session(ctrl.current_session_id)
 
-        if self.start_session():
+        if await self.start_session():
             # Record the new playlists being prepared
             try:
                 session = ctrl.db.get_current_session()

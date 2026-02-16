@@ -524,6 +524,30 @@ class DatabaseManager:
                 logger.error(f"Failed to update session column: {e}")
                 return False
 
+    def rename_playlist(self, old_name: str, new_name: str) -> None:
+        """Rename a playlist and cascade the change through all tables.
+
+        Updates the name in the playlists table and the playlist_name
+        text columns in videos and playback_log so that history is preserved.
+        """
+        with self._cursor() as cursor:
+            # Update playlists table
+            cursor.execute(
+                "UPDATE playlists SET name = ?, updated_at = ? WHERE name = ?",
+                (new_name, datetime.now().isoformat(), old_name)
+            )
+            # Update videos table
+            cursor.execute(
+                "UPDATE videos SET playlist_name = ? WHERE playlist_name = ?",
+                (new_name, old_name)
+            )
+            # Update playback_log table
+            cursor.execute(
+                "UPDATE playback_log SET playlist_name = ? WHERE playlist_name = ?",
+                (new_name, old_name)
+            )
+            logger.info(f"Database cascade rename: '{old_name}' -> '{new_name}'")
+
     def update_playlist_status(self, session_id: int, playlist_name: str, status: str = "PENDING") -> bool:
         """Update the status of a specific playlist in next_playlists_status.
         
@@ -658,15 +682,34 @@ class DatabaseManager:
                 return {}
 
     def sync_playlists_from_config(self, config_playlists: List[Dict]):
-        """Sync playlists from config file to database."""
+        """Sync playlists from config file to database.
+        
+        Ensures every playlist in config exists in the DB regardless of
+        enabled state, and updates the enabled/priority flags to match config.
+        """
         for playlist in config_playlists:
-            if playlist.get('enabled', True):
-                self.add_playlist(
-                    name=playlist['name'],
-                    youtube_url=playlist['url'],
-                    enabled=True,
-                    priority=playlist.get('priority', 1)
+            name = playlist['name']
+            url = playlist.get('url', '')
+            enabled = playlist.get('enabled', True)
+            priority = playlist.get('priority', 1)
+
+            with self._cursor() as cursor:
+                # Try to insert; on conflict update enabled/priority to match config
+                cursor.execute(
+                    "SELECT id FROM playlists WHERE name = ?", (name,)
                 )
+                row = cursor.fetchone()
+                if row:
+                    cursor.execute(
+                        "UPDATE playlists SET enabled = ?, priority = ?, youtube_url = ?, updated_at = ? WHERE name = ?",
+                        (enabled, priority, url, datetime.now().isoformat(), name)
+                    )
+                else:
+                    cursor.execute(
+                        "INSERT INTO playlists (name, youtube_url, enabled, priority) VALUES (?, ?, ?, ?)",
+                        (name, url, enabled, priority)
+                    )
+                    logger.info(f"Added playlist: {name}")
         logger.info(f"Synced {len(config_playlists)} playlists from config")
 
     def initialize_next_playlists(self, session_id: int, playlist_names: List[str]):

@@ -156,7 +156,8 @@ class PlaylistSelector:
         # Cap at available playlists (can't select more than we have)
         num_to_select = min(num_to_select, len(all_playlists))
         if num_to_select < min_playlists:
-            logger.warning(f"Only {len(all_playlists)} playlists available, fewer than minimum {min_playlists}")
+            logger.error(f"Only {len(all_playlists)} playlists available, fewer than minimum {min_playlists} — blocking rotation")
+            return []
 
         selected = all_playlists[:num_to_select]
 

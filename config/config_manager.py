@@ -39,10 +39,28 @@ class ConfigManager:
         default_playlists = {
             "playlists": [
                 {
-                    "name": "Example Playlist",
-                    "url": "https://www.youtube.com/playlist?list=EXAMPLE",
-                    "enabled": True,
-                    "priority": 1
+                    "name": "Example1",
+                    "url": "https://www.youtube.com/playlist?list=Example1",
+                    "enabled": False,
+                    "priority": 1,
+                    "twitch_category": "Just Chatting",
+                    "kick_category": "Just Chatting"
+                },
+                {
+                    "name": "Example2",
+                    "url": "https://www.youtube.com/playlist?list=Example2",
+                    "enabled": False,
+                    "priority": 1,
+                    "twitch_category": "Just Chatting",
+                    "kick_category": "Just Chatting"
+                },
+                {
+                    "name": "Example3",
+                    "url": "https://www.youtube.com/playlist?list=Example3",
+                    "enabled": False,
+                    "priority": 1,
+                    "twitch_category": "Just Chatting",
+                    "kick_category": "Just Chatting"
                 }
             ]
         }

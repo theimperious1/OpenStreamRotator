@@ -304,6 +304,10 @@ class VideoDownloader:
                         file_size_mb=int(file_size_mb),
                         playlist_name=playlist_name
                     )
+                    # Track as registered so subsequent playlist batch scans
+                    # don't re-queue the same file under a different playlist
+                    with self._registered_files_lock:
+                        self._registered_files.add(filename)
                     total_duration += duration
                     registered_count += 1
                     logger.debug(f"Queued video for registration: {filename} ({duration}s)")

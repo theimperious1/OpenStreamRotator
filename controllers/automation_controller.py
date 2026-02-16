@@ -667,7 +667,7 @@ class AutomationController:
             f"Enough playlists available ({len(enabled)} >= {min_playlists}) "
             f"— starting fresh rotation session"
         )
-        if self.rotation_manager.start_session():
+        if await self.rotation_manager.start_session():
             self.download_manager.downloads_triggered_this_rotation = False
             self.download_manager.background_download_in_progress = False
             await self.rotation_manager.execute_content_switch()
@@ -1002,7 +1002,7 @@ class AutomationController:
 
         if not session:
             logger.info("No active session, starting initial rotation")
-            if self.rotation_manager.start_session():
+            if await self.rotation_manager.start_session():
                 await self.rotation_manager.execute_content_switch()
         elif not os.path.exists(video_folder) or not os.listdir(video_folder):
             logger.warning(f"Video folder empty/missing: {video_folder}")
@@ -1038,7 +1038,7 @@ class AutomationController:
                     logger.warning(f"Failed to check pending playlists: {e}")
             if session.get('id'):
                 self.db.end_session(session['id'])
-            if self.rotation_manager.start_session():
+            if await self.rotation_manager.start_session():
                 await self.rotation_manager.execute_content_switch()
         else:
             await self.rotation_manager.resume_existing_session(session, settings)
