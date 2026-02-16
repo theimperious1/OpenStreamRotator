@@ -1,4 +1,4 @@
-# Known Issues
+# Known Quirks
 
 ## Video Playback
 
@@ -15,8 +15,8 @@ The system only picks up files with these extensions: `.mp4`, `.mkv`, `.avi`, `.
 
 ## OBS
 
-### OBS scene names must match your configuration exactly
-The system switches between scenes by name (default: "OSR Stream", "OSR Pause screen", "OSR Rotation screen"). If you rename scenes in OBS without updating your `.env` file, scene switching will fail. Names are **case-sensitive** and must be an exact match.
+### OBS scene names must match your configuration
+The system switches between scenes by name (default: "OSR Stream", "OSR Pause screen", "OSR Rotation screen"). Missing scenes and sources are **auto-created** on first startup, but if you manually rename scenes in OBS without updating your `.env` file, scene switching will fail. Names are **case-sensitive** and must be an exact match.
 
 ### The VLC source must be a "VLC Video Source", not a "Media Source"
 The OBS source used for playback must be a **VLC Video Source** (`vlc_source`), not a standard OBS Media Source. The VLC source plugin for OBS must be installed. If you use a regular Media Source, the system won't be able to control playback or detect video transitions. If scenes are auto-created by the system, this is handled for you.
@@ -41,7 +41,7 @@ The system uses `ffprobe` to determine video durations and validate downloads. I
 If you enable `yt_dlp_use_cookies` in settings to handle age-restricted or region-locked videos, the browser specified in `yt_dlp_browser_for_cookies` must be **fully closed** while the system is downloading. Some browsers lock their cookie database while running, preventing yt-dlp from reading it.
 
 ### `.env` changes require a full restart
-While `settings.json` and `playlists.json` are hot-reloaded (changes are picked up within seconds), any changes to the `.env` file — credentials, folder paths, OBS connection details, platform toggles — require stopping and restarting the program.
+`settings.json` and `playlists.json` are **hot-swappable** — changes are picked up within seconds with no restart needed. However, any changes to the `.env` file (credentials, folder paths, OBS connection details, platform toggles) require stopping and restarting the program.
 
 ### Stream titles are automatically truncated to 140 characters
 Kick enforces a 140-character limit on stream titles. If your title template combined with playlist names exceeds this, playlist names are dropped from the end of the title until it fits. With many playlists in a single rotation, some names may not appear in the displayed title.
