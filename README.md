@@ -377,4 +377,4 @@ To connect an OSR instance to the dashboard, set `WEB_DASHBOARD_URL` and `WEB_DA
 
 ## License
 
-Copyright (c) 2026 theimperious1. All rights reserved. See [LICENSE](LICENSE) for details.
+See [LICENSE](LICENSE) for details.
