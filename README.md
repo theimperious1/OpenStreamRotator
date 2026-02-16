@@ -1,4 +1,6 @@
-# OpenStreamRotator
+<p align="center">
+  <img src=".github/assets/osr-banner-1500x500.png" alt="OpenStreamRotator" width="100%" />
+</p>
 
 Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays them through VLC in OBS, rotates content when finished, and manages stream metadata on Kick and Twitch — all unattended.
 
