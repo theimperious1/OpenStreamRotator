@@ -182,6 +182,22 @@ class WebDashboardClient:
         self.detach_logger()
         logger.info("Dashboard client stopped")
 
+    async def push_state_now(self) -> None:
+        """Immediately push a state snapshot (call after commands that change state)."""
+        if not self._connected or not self._ws:
+            return
+        try:
+            state = self._state_provider()
+            await self._ws.send(json.dumps({"type": "state", "data": state}))
+            logger.debug("Immediate state push sent")
+        except Exception as e:
+            logger.debug(f"Failed to send immediate state push: {e}")
+
+    async def push_state_delayed(self, delay: float = 3.0) -> None:
+        """Push a state snapshot after a delay (to capture async state changes)."""
+        await asyncio.sleep(delay)
+        await self.push_state_now()
+
     async def _send_loop(self, ws: ClientConnection) -> None:
         """Periodically push state snapshots and forward queued log entries."""
         last_state_push = 0.0

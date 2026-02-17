@@ -51,6 +51,18 @@ class DashboardHandler:
     def _vlc_source_name(self) -> str:
         return self.ctrl._vlc_source_name
 
+    # ── Post-command state push ───────────────────────────────────
+
+    async def _push_state_after_command(self, delay: float = 3.0) -> None:
+        """Push an immediate state snapshot and schedule a delayed follow-up.
+
+        Called after skip/rotate commands so the dashboard reflects
+        changes without waiting for the next periodic push cycle.
+        """
+        if self.ctrl.web_dashboard:
+            await self.ctrl.web_dashboard.push_state_now()
+            asyncio.create_task(self.ctrl.web_dashboard.push_state_delayed(delay))
+
     # ── State snapshot ────────────────────────────────────────────
 
     def get_dashboard_state(self) -> dict:
@@ -195,6 +207,10 @@ class DashboardHandler:
         payload = command.get("payload", {})
 
         if action == "skip_video":
+            # Guard: reject if a transition is already in progress (debounce)
+            if ctrl.file_lock_monitor and ctrl.file_lock_monitor._pending_transition_file:
+                logger.warning("Dashboard command: skip video REJECTED — transition already in progress")
+                return
             # Guard: only allow skip if there are more videos in the queue
             if ctrl.file_lock_monitor:
                 queue = ctrl.file_lock_monitor._get_video_files()
@@ -209,6 +225,7 @@ class DashboardHandler:
                     # main loop triggers rotation or prepared-rotation restore.
                     logger.info("Dashboard command: skip video — last video, marking all content consumed")
                     ctrl.file_lock_monitor._all_content_consumed = True
+                    await self._push_state_after_command()
                     return
             logger.info("Dashboard command: skip video")
             if ctrl.obs_controller:
@@ -219,6 +236,7 @@ class DashboardHandler:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to skip video via dashboard: {e}")
+            await self._push_state_after_command()
 
         elif action == "trigger_rotation":
             # Guard: only allow if not already rotating and no download in progress
@@ -232,6 +250,7 @@ class DashboardHandler:
             # Force all-content-consumed so rotation triggers on next tick
             if ctrl.file_lock_monitor:
                 ctrl.file_lock_monitor._all_content_consumed = True
+            await self._push_state_after_command()
 
         elif action == "update_setting":
             key = payload.get("key")
