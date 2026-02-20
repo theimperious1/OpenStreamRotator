@@ -66,6 +66,14 @@ class FileLockMonitor:
         # This avoids false positives from VLC briefly releasing a file between reads.
         self._pending_transition_file: Optional[str] = None
 
+        # Suspend flag: when True, check() is a no-op.  Used during OBS freeze
+        # recovery to prevent VLC lock-release from being misread as transitions.
+        self._suspended: bool = False
+
+        # Grace period: after initialization, suppress transition detection for
+        # a few seconds to let VLC actually lock the file.
+        self._init_grace_until: float = 0.0
+
     def initialize(self, video_folder: str) -> None:
         """Initialize the monitor for a new rotation.
         
@@ -86,6 +94,7 @@ class FileLockMonitor:
         self._delete_on_transition = True
         self._pending_transition_file = None
         self._last_video_duration_seconds = 0
+        self._init_grace_until = 0.0
         
         files = self._get_video_files()
         if not files:
@@ -103,6 +112,7 @@ class FileLockMonitor:
                 filepath = os.path.join(self.video_folder, f)
                 if is_file_locked(filepath):
                     self._current_video = f
+                    self._suspended = False
                     logger.info(f"File lock monitor initialized: current video = {f} (locked after {time.time() - start_time:.1f}s)")
                     logger.info(f"File lock monitor tracking {len(files)} videos in {video_folder}")
                     return
@@ -113,6 +123,11 @@ class FileLockMonitor:
         logger.warning(f"File lock monitor: no file locked after {timeout}s, assuming first: {files[0]}")
         logger.info(f"File lock monitor tracking {len(files)} videos in {video_folder}")
 
+        # Grace period: suppress transition detection for 15s after a
+        # timeout-based init so VLC has time to actually lock the file.
+        self._init_grace_until = time.time() + 15.0
+        self._suspended = False
+
     def reset(self) -> None:
         """Reset the monitor state."""
         self._current_video = None
@@ -120,7 +135,25 @@ class FileLockMonitor:
         self._needs_vlc_refresh = False
         self._pending_transition_file = None
         self._last_video_duration_seconds = 0
+        self._suspended = False
+        self._init_grace_until = 0.0
         logger.debug("File lock monitor reset")
+
+    def suspend(self) -> None:
+        """Suspend monitoring — check() becomes a no-op.
+
+        Used during OBS freeze recovery to prevent VLC releasing file locks
+        from being misinterpreted as video transitions.
+        """
+        self._suspended = True
+        self._pending_transition_file = None  # Clear stale debounce
+        logger.info("File lock monitor suspended")
+
+    def resume(self) -> None:
+        """Resume monitoring after suspension."""
+        self._suspended = False
+        self._pending_transition_file = None  # Clear stale debounce
+        logger.info("File lock monitor resumed")
 
     def set_temp_playback_mode(self, enabled: bool) -> None:
         """Enable or disable temp playback mode.
@@ -189,6 +222,17 @@ class FileLockMonitor:
         if not self.video_folder or self._all_content_consumed:
             result['all_consumed'] = self._all_content_consumed
             return result
+
+        # Suspended during OBS freeze recovery — do nothing.
+        if self._suspended:
+            return result
+
+        # Grace period after re-initialization — suppress transitions while
+        # VLC is still loading and hasn't locked its file yet.
+        if self._init_grace_until and time.time() < self._init_grace_until:
+            return result
+        elif self._init_grace_until:
+            self._init_grace_until = 0.0  # Grace period expired, clear it
 
         # If OBS is disconnected, VLC releases all file locks — every video
         # would appear "finished" and get deleted.  Pause monitoring until

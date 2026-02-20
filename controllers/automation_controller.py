@@ -32,6 +32,7 @@ from handlers.dashboard_handler import DashboardHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
 from services.web_dashboard_client import WebDashboardClient
+from monitors.obs_freeze_monitor import OBSFreezeMonitor
 from config.constants import (
     DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER,
     DEFAULT_PAUSE_IMAGE, DEFAULT_ROTATION_IMAGE,
@@ -49,6 +50,7 @@ logger = logging.getLogger(__name__)
 OBS_HOST = os.getenv("OBS_HOST", "127.0.0.1")
 OBS_PORT = int(os.getenv("OBS_PORT", 4455))
 OBS_PASSWORD = os.getenv("OBS_PASSWORD", "")
+OBS_PATH = os.getenv("OBS_PATH", "")  # Path to obs64.exe for freeze recovery
 SCENE_PAUSE = os.getenv("SCENE_PAUSE", os.getenv("SCENE_LIVE", DEFAULT_SCENE_PAUSE))
 SCENE_STREAM = os.getenv("SCENE_STREAM", os.getenv("SCENE_OFFLINE", DEFAULT_SCENE_STREAM))
 SCENE_ROTATION_SCREEN = os.getenv("SCENE_ROTATION_SCREEN", DEFAULT_SCENE_ROTATION_SCREEN)
@@ -164,6 +166,11 @@ class AutomationController:
         
         # Dashboard handler — owns all web-dashboard state / command logic
         self.dashboard_handler = DashboardHandler(self)
+
+        # OBS freeze monitor — detects hung OBS via render frame stall
+        self.obs_freeze_monitor = OBSFreezeMonitor(
+            obs_exe_path=OBS_PATH or None,
+        )
 
         # Web dashboard client (optional, enabled via env vars)
         self.web_dashboard: Optional[WebDashboardClient] = None
@@ -419,6 +426,69 @@ class AutomationController:
                     self._pending_seek_ms = saved_cursor
                     self._pending_seek_video = saved_video
                     logger.info(f"Pending seek after OBS reconnect: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s)")
+
+    async def _recover_from_obs_freeze(self) -> bool:
+        """Full OBS freeze recovery: capture state → kill → relaunch → reconnect → resume.
+
+        Returns:
+            True if recovery succeeded, False otherwise.
+        """
+        monitor = self.obs_freeze_monitor
+
+        # 1. Capture streaming state before we kill OBS
+        if self.obs_controller:
+            monitor.capture_stream_state(self.obs_controller.obs_client)
+
+        # 2. Save current playback position for seek-after-reconnect
+        self._tick_save_playback()
+
+        # 2.5 Suspend file lock monitor so VLC releasing locks during kill
+        # isn't misread as a video transition (which would delete the file).
+        if self.file_lock_monitor:
+            self.file_lock_monitor.suspend()
+
+        # 3. Kill + relaunch OBS
+        monitor.kill_obs()
+
+        if not monitor.launch_obs(wait_seconds=8.0):
+            monitor.mark_recovery_attempted(succeeded=False)
+            self.notification_service.notify_automation_error(
+                "OBS freeze recovery FAILED — could not relaunch OBS. "
+                "Set OBS_PATH in .env if OBS is not in the default location."
+            )
+            return False
+
+        # 4. Reconnect via WebSocket
+        if not self.obs_connection.reconnect(max_retries=5, base_delay=2.0):
+            monitor.mark_recovery_attempted(succeeded=False)
+            self.notification_service.notify_automation_error(
+                "OBS freeze recovery FAILED — OBS relaunched but WebSocket reconnect failed."
+            )
+            return False
+
+        # 5. Re-initialize handlers (same as normal reconnect)
+        self._reinitialize_after_obs_reconnect()
+        logger.info("OBS freeze recovery: handlers re-initialized after restart")
+
+        # 6. Resume streaming if it was active
+        if monitor.was_streaming and self.obs_controller:
+            # Give OBS a moment to fully initialize before starting stream
+            await asyncio.sleep(3.0)
+            if not monitor.resume_streaming(self.obs_controller.obs_client):
+                logger.warning("OBS freeze recovery: streaming could not be resumed automatically")
+                self.notification_service.notify_automation_error(
+                    "OBS restarted successfully but streaming could not be resumed. "
+                    "You may need to click Start Streaming manually."
+                )
+
+        monitor.mark_recovery_attempted(succeeded=True)
+        self.notification_service.notify_automation_error(
+            "OBS freeze recovery SUCCEEDED — OBS was restarted and reconnected"
+            + (" (streaming resumed)" if monitor.was_streaming else "")
+            + ". Will not attempt automatic recovery again if it happens once more."
+        )
+        logger.info("OBS freeze recovery completed successfully")
+        return True
 
     def save_playback_on_exit(self):
         """Save current state when program exits."""
@@ -1062,6 +1132,23 @@ class AutomationController:
                 self.download_manager.process_video_registration_queue()
                 self.download_manager.process_pending_database_operations()
                 self._tick_save_playback()
+
+                # OBS freeze detection — check render frame progression
+                if self.obs_controller and self.obs_controller.is_connected:
+                    freeze_status = self.obs_freeze_monitor.check(self.obs_controller.obs_client)
+                    if freeze_status == "frozen":
+                        logger.error("OBS FREEZE DETECTED — initiating recovery")
+                        self.notification_service.notify_automation_error(
+                            "OBS appears frozen (no new render frames for ~60s). Attempting automatic recovery..."
+                        )
+                        if await self._recover_from_obs_freeze():
+                            continue
+                        else:
+                            logger.error("OBS freeze recovery failed")
+                    elif freeze_status == "frozen_final":
+                        self.notification_service.notify_automation_error(
+                            "OBS froze AGAIN after prior recovery. Automatic restart disabled — manual intervention required."
+                        )
 
                 # Proactive OBS health check — detect disconnect even though
                 # OBSController swallows exceptions internally
