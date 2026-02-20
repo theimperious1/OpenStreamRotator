@@ -442,6 +442,11 @@ class AutomationController:
         # 2. Save current playback position for seek-after-reconnect
         self._tick_save_playback()
 
+        # 2.5 Suspend file lock monitor so VLC releasing locks during kill
+        # isn't misread as a video transition (which would delete the file).
+        if self.file_lock_monitor:
+            self.file_lock_monitor.suspend()
+
         # 3. Kill + relaunch OBS
         monitor.kill_obs()
 
