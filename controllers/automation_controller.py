@@ -485,7 +485,7 @@ class AutomationController:
         self.notification_service.notify_automation_error(
             "OBS freeze recovery SUCCEEDED — OBS was restarted and reconnected"
             + (" (streaming resumed)" if monitor.was_streaming else "")
-            + ". Will not attempt automatic recovery again if it happens once more."
+            + ". Automatic recovery remains active for future freezes."
         )
         logger.info("OBS freeze recovery completed successfully")
         return True

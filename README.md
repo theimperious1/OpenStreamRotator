@@ -280,7 +280,7 @@ Separate from crash recovery, the system detects frozen OBS processes. OBS may a
 7. WebSocket reconnection is attempted automatically
 8. Streaming is resumed if it was active before the freeze
 
-Freeze recovery is attempted **once** per session. If OBS freezes again after recovery, a notification is sent but no further restart is attempted to avoid restart loops.
+Freeze recovery is retried on future freezes as long as the previous recovery succeeded. If a recovery fails, further automatic restarts are blocked to avoid restart loops — a notification is sent and manual intervention is required.
 
 ### Skipping Videos
 

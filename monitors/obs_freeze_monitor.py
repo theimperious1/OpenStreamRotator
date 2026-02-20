@@ -5,8 +5,8 @@ fails to advance across several consecutive checks (~60 s), OBS is
 considered frozen and recovery is triggered: kill the process, relaunch it,
 reconnect via WebSocket, and optionally resume streaming.
 
-Recovery is attempted **once**. If OBS freezes again after a successful
-recovery, we log + notify but do not restart a second time.
+Recovery is retried on future freezes if a prior recovery succeeded.
+If recovery fails, further automatic restarts are blocked to avoid loops.
 """
 
 import logging
@@ -238,8 +238,11 @@ class OBSFreezeMonitor:
         After OBS restarts, renderTotalFrames resets to near-zero.
         We must clear the old baseline so the monitor doesn't compare
         against the pre-restart frame count and false-positive.
+
+        If recovery succeeded, the monitor remains armed for future freezes.
+        If it failed, further automatic recovery is blocked to avoid loops.
         """
-        self._recovery_attempted = True
+        self._recovery_attempted = not succeeded  # Only block future recovery on failure
         self._recovery_succeeded = succeeded
         self._reset_sampling()
 
