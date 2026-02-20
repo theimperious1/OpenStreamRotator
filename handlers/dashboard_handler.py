@@ -128,7 +128,7 @@ class DashboardHandler:
             # Only expose dashboard-relevant keys (exclude folder paths)
             for key in (
                 "stream_title_template",
-                "debug_mode",
+                "ignore_streamer",
                 "notify_video_transitions",
                 "min_playlists_per_rotation",
                 "max_playlists_per_rotation",
@@ -391,7 +391,7 @@ class DashboardHandler:
         """
         allowed_keys = {
             "stream_title_template",
-            "debug_mode",
+            "ignore_streamer",
             "notify_video_transitions",
             "min_playlists_per_rotation",
             "max_playlists_per_rotation",

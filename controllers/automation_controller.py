@@ -873,7 +873,7 @@ class AutomationController:
             await self.rotation_manager.handle_normal_rotation()
             return
 
-    def _check_live_status(self, debug_mode: bool) -> None:
+    def _check_live_status(self, ignore_streamer: bool) -> None:
         """Check if the streamer is live and toggle pause/stream scenes accordingly.
 
         Checks both Twitch and Kick if configured. Either platform being live
@@ -919,7 +919,7 @@ class AutomationController:
         if not is_live and target_kick and self.kick_live_checker:
             is_live = self.kick_live_checker.is_stream_live(target_kick)
 
-        if debug_mode:
+        if ignore_streamer:
             is_live = False
 
         if is_live and self.last_stream_status != "live":
@@ -1115,19 +1115,19 @@ class AutomationController:
 
         # Main loop
         loop_count = 0
-        last_debug_mode = False
+        last_ignore_streamer = False
         while True:
             try:
                 settings = self.config_manager.get_settings()
-                debug_mode = settings.get('debug_mode', False)
+                ignore_streamer = settings.get('ignore_streamer', False)
 
-                debug_mode_changed = (debug_mode != last_debug_mode)
-                if debug_mode_changed:
-                    logger.info(f"debug_mode changed to {debug_mode}, forcing live status recheck")
-                last_debug_mode = debug_mode
+                ignore_streamer_changed = (ignore_streamer != last_ignore_streamer)
+                if ignore_streamer_changed:
+                    logger.info(f"ignore_streamer changed to {ignore_streamer}, forcing live status recheck")
+                last_ignore_streamer = ignore_streamer
 
-                if loop_count % 60 == 0 or debug_mode_changed:
-                    self._check_live_status(debug_mode)
+                if loop_count % 60 == 0 or ignore_streamer_changed:
+                    self._check_live_status(ignore_streamer)
 
                 self.download_manager.process_video_registration_queue()
                 self.download_manager.process_pending_database_operations()

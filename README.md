@@ -107,7 +107,7 @@ All settings in this file are **hot-swappable** — you can edit and save while 
   "stream_title_template": "24/7 Reruns | {GAMES} | ",
   "yt_dlp_verbose": false,
   "notify_video_transitions": false,
-  "debug_mode": false,
+  "ignore_streamer": false,
   "yt_dlp_use_cookies": false,
   "yt_dlp_browser_for_cookies": "firefox"
 }
@@ -121,7 +121,7 @@ All settings in this file are **hot-swappable** — you can edit and save while 
 | `stream_title_template` | Title template. `{GAMES}` is replaced with playlist names joined by ` \| ` |
 | `yt_dlp_verbose` | Enable verbose yt-dlp output in logs |
 | `notify_video_transitions` | Send a Discord notification on every video transition (default: `false`, can be noisy with short videos) |
-| `debug_mode` | Prevents the target streamer going live from pausing the 24/7 stream (default: `false`) |
+| `ignore_streamer` | Prevents the target streamer going live from pausing the 24/7 stream (default: `false`) |
 | `yt_dlp_use_cookies` | Use browser cookies for age-restricted videos (default: `false`). Toggle mid-download-retry to recover from 403s. |
 | `yt_dlp_browser_for_cookies` | Browser to extract cookies from: `chrome`, `firefox`, `brave`, `edge`, etc. (default: `firefox`) |
 
@@ -155,11 +155,11 @@ This works because the download retry loop reads cookie settings fresh on every 
 
 > **Tip:** Make sure you're logged into YouTube in the browser specified by `yt_dlp_browser_for_cookies` and that the browser is closed (some browsers lock their cookie database while running).
 
-**Example — Toggling debug mode:**
+**Example — Ignoring streamer live status:**
 
 If the target streamer goes live and you want to keep your 24/7 stream running instead of pausing:
 
-1. Set `"debug_mode": true` in `config/settings.json` and save.
+1. Set `"ignore_streamer": true` in `config/settings.json` and save.
 2. The program ignores live-status checks until you set it back to `false`.
 
 **Example — Adjusting rotation size:**

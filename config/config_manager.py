@@ -77,7 +77,7 @@ class ConfigManager:
             "max_playlists_per_rotation": 4,
             "download_retry_attempts": 3,
             "stream_title_template": "My OpenStreamRotator 24/7 channel! | {GAMES} | lorem epsum",
-            "debug_mode": False,
+            "ignore_streamer": False,
             "yt_dlp_use_cookies": False,
             "yt_dlp_browser_for_cookies": "firefox"
         }

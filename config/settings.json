@@ -1,11 +1,11 @@
 {
   "min_playlists_per_rotation": 2,
-  "max_playlists_per_rotation": 4,
+  "max_playlists_per_rotation": 2,
   "download_retry_attempts": 5,
   "stream_title_template": "My Stream Title | {GAMES} | OpenStreamRotator",
   "yt_dlp_verbose": false,
   "notify_video_transitions": true,
-  "debug_mode": false,
+  "ignore_streamer": true,
   "yt_dlp_use_cookies": true,
   "yt_dlp_browser_for_cookies": "firefox"
 }
