@@ -252,6 +252,14 @@ class DashboardHandler:
                 ctrl.file_lock_monitor._all_content_consumed = True
             await self._push_state_after_command()
 
+        # ── TEMPORARY: Manual freeze recovery trigger (remove after testing) ──
+        elif action == "force_obs_freeze_recovery":
+            logger.warning("Dashboard command: MANUAL OBS freeze recovery triggered")
+            if await ctrl._recover_from_obs_freeze():
+                logger.info("Manual OBS freeze recovery completed successfully")
+            else:
+                logger.error("Manual OBS freeze recovery failed")
+
         elif action == "update_setting":
             key = payload.get("key")
             value = payload.get("value")

@@ -15,6 +15,7 @@ Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays the
 5. **Stream metadata** — The stream title and category are updated on all enabled platforms (Kick, Twitch) each rotation. Categories update per-video based on which playlist the video came from.
 6. **Temp playback** — If the current content runs out before the next rotation's downloads finish, the system temporarily plays already-downloaded files from the pending folder to avoid dead air.
 7. **Twitch live detection** — If a configured target streamer goes live on Twitch, OBS switches to a pause screen. When they go offline, playback resumes automatically.
+8. **OBS freeze detection** — The system monitors OBS render output via WebSocket. If OBS stops rendering frames for ~60 seconds (process alive but frozen), it automatically kills OBS, clears crash sentinels, relaunches it, reconnects, and resumes streaming — all unattended.
 
 ## Prerequisites
 
@@ -68,6 +69,7 @@ cp .env.example .env
 | `VIDEO_FOLDER` | No | `content/live/` | Path to the live playback folder (VLC reads from here) |
 | `NEXT_ROTATION_FOLDER` | No | `content/pending/` | Path to the pending/download folder |
 | `BROADCASTER_ID` | No | — | Twitch broadcaster ID (auto-resolved from `TWITCH_USER_LOGIN` if empty) |
+| `OBS_PATH` | No | *(auto-detected)* | Full path to `obs64.exe`. Auto-detected from standard install locations if not set. |
 
 ### Playlists (`config/playlists.json`)
 
@@ -265,6 +267,21 @@ The system tracks session state in a local SQLite database. If the process is re
 - If mid-download, downloads resume (yt-dlp handles partial file resumption)
 - A Discord notification is sent with the resumed session ID and playback position
 
+### OBS Freeze Recovery
+
+Separate from crash recovery, the system detects frozen OBS processes. OBS may appear running but stop rendering frames (GPU hang, driver issue, etc.). The freeze monitor:
+
+1. Polls OBS render frame count every 20 seconds via WebSocket
+2. If frames don't advance for 3 consecutive checks (~60 seconds), OBS is declared frozen
+3. The current stream state (streaming status, playback position) is captured
+4. OBS is killed via `taskkill` (Windows) or `pkill` (Linux)
+5. OBS crash sentinel files are cleared to prevent the Safe Mode dialog on relaunch
+6. OBS is relaunched with `--minimize-to-tray` and `--disable-missing-files-check`
+7. WebSocket reconnection is attempted automatically
+8. Streaming is resumed if it was active before the freeze
+
+Freeze recovery is attempted **once** per session. If OBS freezes again after recovery, a notification is sent but no further restart is attempted to avoid restart loops.
+
 ### Skipping Videos
 
 You can skip videos directly in OBS by advancing the VLC source. The file lock monitor will detect the transition naturally — the skipped video's lock is released, it gets deleted, and the next video is tracked.
@@ -343,6 +360,8 @@ OpenStreamRotator/
 │       ├── base/stream_platform.py  # Platform interface
 │       ├── kick.py                  # Kick API integration
 │       └── twitch.py                # Twitch API integration
+├── monitors/
+│   └── obs_freeze_monitor.py     # OBS freeze detection and recovery
 ├── managers/
 │   ├── download_manager.py          # Download orchestration and retry logic
 │   ├── obs_connection_manager.py    # OBS WebSocket connection lifecycle
