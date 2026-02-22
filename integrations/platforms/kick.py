@@ -11,6 +11,7 @@ import sqlite3
 import webbrowser
 from typing import Optional
 import aiohttp
+from dotenv import set_key
 from integrations.platforms.base.stream_platform import StreamPlatform
 from config.constants import KICK_FALLBACK_CATEGORY_ID
 from config.constants import _PROJECT_ROOT
@@ -88,7 +89,22 @@ class KickUpdater(StreamPlatform):
                 if os.path.exists(db_path):
                     conn = sqlite3.connect(db_path)
                     cursor = conn.cursor()
-                    cursor.execute("SELECT COUNT(*) FROM tokens WHERE channel_id = ?", (self.channel_id,))
+                    if self.channel_id:
+                        # Known channel ID — look for its specific tokens
+                        cursor.execute("SELECT COUNT(*) FROM tokens WHERE channel_id = ?", (self.channel_id,))
+                    else:
+                        # No channel ID yet — check if any tokens exist at all
+                        # (from a previous OAuth where we resolved the ID)
+                        cursor.execute("SELECT channel_id FROM tokens LIMIT 1")
+                        row = cursor.fetchone()
+                        if row:
+                            # Recover channel_id from previously stored tokens
+                            self.channel_id = str(row[0])
+                            self._persist_channel_id(self.channel_id)
+                            logger.info(
+                                f"[{self.platform_name}] Recovered channel ID from token DB: {self.channel_id}"
+                            )
+                        cursor.execute("SELECT COUNT(*) FROM tokens WHERE channel_id = ?", (self.channel_id or "",))
                     count = cursor.fetchone()[0]
                     tokens_exist = count > 0
                     conn.close()
@@ -121,6 +137,15 @@ class KickUpdater(StreamPlatform):
                 try:
                     token_data = await self.api.exchange_code(code, code_verifier)
                     logger.info(f"[{self.platform_name}] SUCCESS! Tokens exchanged and saved.")
+
+                    # Auto-resolve channel_id if it wasn't set
+                    if not self.channel_id and token_data and "channel_id" in token_data:
+                        self.channel_id = str(token_data["channel_id"])
+                        self._persist_channel_id(self.channel_id)
+                        logger.info(
+                            f"[{self.platform_name}] Channel ID auto-resolved: {self.channel_id}"
+                        )
+
                     await self.api.start_token_refresh()
                     logger.info(f"[{self.platform_name}] Token refresh started. Authorization complete!")
                 except Exception as e:
@@ -135,6 +160,28 @@ class KickUpdater(StreamPlatform):
         except Exception as e:
             self.log_error("Initialization failed", e)
             raise
+
+    def _persist_channel_id(self, channel_id: str) -> None:
+        """Write the resolved KICK_CHANNEL_ID back to .env and update the running process."""
+        try:
+            env_path = os.path.join(_PROJECT_ROOT, ".env")
+            if os.path.exists(env_path):
+                set_key(env_path, "KICK_CHANNEL_ID", channel_id, quote_mode="never")
+                os.environ["KICK_CHANNEL_ID"] = channel_id
+                logger.info(
+                    f"[{self.platform_name}] KICK_CHANNEL_ID saved to .env — "
+                    "no manual configuration needed"
+                )
+            else:
+                logger.warning(
+                    f"[{self.platform_name}] .env file not found at {env_path}. "
+                    f"Please manually set KICK_CHANNEL_ID={channel_id}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"[{self.platform_name}] Could not auto-save KICK_CHANNEL_ID to .env: {e}. "
+                f"Please manually set KICK_CHANNEL_ID={channel_id}"
+            )
 
     async def _update_channel(self, **kwargs):
         """Internal async method to update channel. Category ID is required by the API."""

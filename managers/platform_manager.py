@@ -69,11 +69,15 @@ class PlatformManager:
                 logger.error(f"Failed to setup Twitch: {e}")
 
         # Setup Kick platform
-        if enable_kick and kick_client_id and kick_client_secret and kick_channel_id:
+        # channel_id is optional — if missing, it will be auto-resolved during OAuth
+        if enable_kick and kick_client_id and kick_client_secret:
             self.add_kick(
                 kick_client_id, kick_client_secret, kick_channel_id, kick_redirect_uri
             )
-            logger.info(f"Kick enabled for channel ID: {kick_channel_id}")
+            if kick_channel_id:
+                logger.info(f"Kick enabled for channel ID: {kick_channel_id}")
+            else:
+                logger.info("Kick enabled — channel ID will be resolved during OAuth")
 
         # Log summary
         enabled = self.get_enabled_platforms()
