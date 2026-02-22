@@ -33,9 +33,10 @@ echo Copying default screen images...
 copy /Y content\pause\default.png dist\content\pause\default.png >nul
 copy /Y content\rotation\default.png dist\content\rotation\default.png >nul
 
-:: Copy setup script
-echo Copying setup script...
+:: Copy setup scripts
+echo Copying setup scripts...
 copy /Y setup.bat dist\setup.bat >nul
+copy /Y setup.sh dist\setup.sh >nul
 
 echo.
 echo === Build complete! ===
