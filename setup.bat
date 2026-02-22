@@ -49,7 +49,7 @@ set "VAL_KICK_REDIRECT_URI=http://localhost:8080/callback"
 set "VAL_TARGET_TWITCH_STREAMER="
 set "VAL_TARGET_KICK_STREAMER="
 
-set "VAL_OBS_HOST="
+set "VAL_OBS_HOST=localhost"
 set "VAL_OBS_PORT=4455"
 set "VAL_OBS_PASSWORD="
 set "VAL_SCENE_PAUSE=OSR Pause screen"
@@ -76,7 +76,7 @@ echo  Open OBS, then go to Tools, then WebSocket Server Settings to find these v
 echo.
 set /p VAL_OBS_PASSWORD="  OBS WebSocket password: "
 echo.
-set /p INPUT="  OBS WebSocket host [leave blank for localhost]: "
+set /p INPUT="  OBS WebSocket host [localhost]: "
 if not "!INPUT!"=="" set "VAL_OBS_HOST=!INPUT!"
 set /p INPUT="  OBS WebSocket port [4455]: "
 if not "!INPUT!"=="" set "VAL_OBS_PORT=!INPUT!"

@@ -76,7 +76,7 @@ VAL_KICK_REDIRECT_URI="http://localhost:8080/callback"
 VAL_TARGET_TWITCH_STREAMER=""
 VAL_TARGET_KICK_STREAMER=""
 
-VAL_OBS_HOST=""
+VAL_OBS_HOST="localhost"
 VAL_OBS_PORT="4455"
 VAL_OBS_PASSWORD=""
 VAL_SCENE_PAUSE="OSR Pause screen"
@@ -103,8 +103,7 @@ echo " Open OBS > Tools > WebSocket Server Settings to find these values."
 echo ""
 VAL_OBS_PASSWORD=$(ask "OBS WebSocket password")
 echo ""
-input=$(ask "OBS WebSocket host" "leave blank for localhost")
-[ "$input" != "leave blank for localhost" ] && VAL_OBS_HOST="$input"
+VAL_OBS_HOST=$(ask "OBS WebSocket host" "localhost")
 input=$(ask "OBS WebSocket port" "4455")
 VAL_OBS_PORT="$input"
 echo ""
