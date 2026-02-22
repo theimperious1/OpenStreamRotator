@@ -29,13 +29,44 @@ Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays the
 ```bash
 git clone https://github.com/theimperious1/OpenStreamRotator.git
 cd OpenStreamRotator
-pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and fill in your credentials:
+### Quick Setup (recommended)
+
+Run the interactive setup script — it walks you through every option and creates your `.env` file:
+
+**Windows:**
+```bash
+setup.bat
+```
+
+**Linux/Mac:**
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+Then start OSR:
+
+**Windows:**
+```bash
+run.bat
+```
+
+**Linux/Mac:**
+```bash
+./run.sh
+```
+
+### Manual Setup
+
+If you prefer to configure everything yourself:
 
 ```bash
+pip install -r requirements.txt
 cp .env.example .env
+# Edit .env with your credentials
+python main.py
 ```
 
 ## Configuration
@@ -53,7 +84,7 @@ cp .env.example .env
 | `ENABLE_KICK` | No | `false` | Enable Kick integration (optional — not required if only using Twitch) |
 | `KICK_CLIENT_ID` | If Kick enabled | — | Kick application client ID |
 | `KICK_CLIENT_SECRET` | If Kick enabled | — | Kick application client secret |
-| `KICK_CHANNEL_ID` | If Kick enabled | — | Your 24/7 Kick channel ID |
+| `KICK_CHANNEL_ID` | No | *(auto-resolved)* | Your 24/7 Kick channel ID. Leave empty — auto-resolved during first OAuth login. |
 | `KICK_REDIRECT_URI` | If Kick enabled | `http://localhost:8080/callback` | OAuth redirect URI for Kick |
 | `TARGET_KICK_STREAMER` | No | *(empty)* | Kick channel slug whose live status pauses the rerun. If empty, Kick live detection is disabled. |
 | `OBS_HOST` | No | `localhost` | OBS WebSocket host |
@@ -224,6 +255,19 @@ If you change your Twitch password or disconnect the app, the refresh token beco
 
 ## Running
 
+Use the run script (recommended) or start manually:
+
+**Windows:**
+```bash
+run.bat
+```
+
+**Linux/Mac:**
+```bash
+./run.sh
+```
+
+**Or manually:**
 ```bash
 python main.py
 ```
