@@ -53,6 +53,8 @@ class DownloadManager:
         # Callbacks set by the automation controller after construction
         self._get_current_session_id: Callable[[], Optional[int]] = lambda: None
         self._set_next_prepared_playlists: Callable = lambda v: None
+        self._on_download_failure: Optional[Callable[[], None]] = None
+        self._on_download_success: Optional[Callable[[], None]] = None
 
     # ------------------------------------------------------------------
     # Callback wiring (called once by AutomationController.__init__)
@@ -62,9 +64,13 @@ class DownloadManager:
         self,
         get_current_session_id: Callable[[], Optional[int]],
         set_next_prepared_playlists: Callable,
+        on_download_failure: Optional[Callable[[], None]] = None,
+        on_download_success: Optional[Callable[[], None]] = None,
     ) -> None:
         self._get_current_session_id = get_current_session_id
         self._set_next_prepared_playlists = set_next_prepared_playlists
+        self._on_download_failure = on_download_failure
+        self._on_download_success = on_download_success
 
     # ------------------------------------------------------------------
     # Background download trigger
@@ -156,12 +162,18 @@ class DownloadManager:
                 logger.info(f"Background download completed: {[p['name'] for p in playlists]}")
                 self._pending_db_playlists_to_complete = [p["name"] for p in playlists]
                 self.notification_service.notify_next_rotation_ready([p["name"] for p in playlists])
+                if self._on_download_success:
+                    self._on_download_success()
             else:
                 logger.warning("Background download had failures")
                 self.notification_service.notify_background_download_warning()
+                if self._on_download_failure:
+                    self._on_download_failure()
         except Exception as e:
             logger.error(f"Background download error: {e}")
             self.notification_service.notify_background_download_error(str(e))
+            if self._on_download_failure:
+                self._on_download_failure()
         finally:
             self.background_download_in_progress = False
 

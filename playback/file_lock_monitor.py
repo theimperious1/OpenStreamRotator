@@ -166,6 +166,16 @@ class FileLockMonitor:
         self._pending_transition_file = None
         logger.info(f"File lock monitor temp playback mode: {'enabled' if enabled else 'disabled'}")
 
+    def set_no_delete_mode(self, enabled: bool) -> None:
+        """Enable or disable no-delete mode.
+
+        When enabled, finished videos are NOT deleted — VLC loops the whole
+        folder.  Used by the fallback system (Tier 1 fallback folder and
+        Tier 2 loop-remaining).
+        """
+        self._delete_on_transition = not enabled
+        logger.info(f"File lock monitor no-delete mode: {'enabled' if enabled else 'disabled'}")
+
     @property
     def all_content_consumed(self) -> bool:
         """Whether all videos have been played and the rotation is complete."""
@@ -344,11 +354,15 @@ class FileLockMonitor:
             else:
                 self._current_video = None
         else:
-            # Prepared rotation mode — keep files, advance to next in list
+            # No-delete mode — keep files, advance to next in list
             files = self._get_video_files()
             cur_idx = files.index(previous_video) if previous_video in files else -1
             if cur_idx >= 0 and cur_idx + 1 < len(files):
                 self._current_video = files[cur_idx + 1]
+            elif files:
+                # Loop back to start in no-delete mode
+                self._current_video = files[0]
+                logger.info(f"No-delete mode: looping back to first video")
             else:
                 self._current_video = None
         
@@ -435,9 +449,21 @@ class FileLockMonitor:
                     # Try to delete - may fail if VLC still has lock
                     if not is_file_locked(filepath):
                         self._delete_video(filepath)
-                
-                self._all_content_consumed = True
-                self._current_video = None
+                    self._all_content_consumed = True
+                    self._current_video = None
+                elif not self._delete_on_transition:
+                    # No-delete mode (fallback): loop back to first video
+                    files = self._get_video_files()
+                    if files:
+                        self._current_video = files[0]
+                        result['current_video'] = strip_ordering_prefix(self._current_video)
+                        logger.info(f"No-delete mode: looping back to first video: {result['current_video']}")
+                    else:
+                        self._all_content_consumed = True
+                        self._current_video = None
+                else:
+                    self._all_content_consumed = True
+                    self._current_video = None
                 result['current_video'] = None
                 result['all_consumed'] = True
         

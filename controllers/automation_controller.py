@@ -23,6 +23,7 @@ from managers.download_manager import DownloadManager
 from managers.rotation_manager import RotationManager
 from managers.platform_manager import PlatformManager
 from managers.prepared_rotation_manager import PreparedRotationManager
+from managers.fallback_manager import FallbackManager
 from services.notification_service import NotificationService
 from playback.file_lock_monitor import FileLockMonitor
 from services.twitch_live_checker import TwitchLiveChecker
@@ -35,9 +36,11 @@ from services.web_dashboard_client import WebDashboardClient
 from monitors.obs_freeze_monitor import OBSFreezeMonitor
 from config.constants import (
     DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER,
+    DEFAULT_FALLBACK_FOLDER, DEFAULT_FALLBACK_FAILURE_THRESHOLD,
     DEFAULT_PAUSE_IMAGE, DEFAULT_ROTATION_IMAGE,
     DEFAULT_SCENE_PAUSE, DEFAULT_SCENE_STREAM,
     DEFAULT_SCENE_ROTATION_SCREEN, DEFAULT_VLC_SOURCE_NAME,
+    DEFAULT_ALERT_SOURCE_NAME,
 )
 
 # Load environment variables from project root
@@ -55,6 +58,7 @@ SCENE_PAUSE = os.getenv("SCENE_PAUSE", os.getenv("SCENE_LIVE", DEFAULT_SCENE_PAU
 SCENE_STREAM = os.getenv("SCENE_STREAM", os.getenv("SCENE_OFFLINE", DEFAULT_SCENE_STREAM))
 SCENE_ROTATION_SCREEN = os.getenv("SCENE_ROTATION_SCREEN", DEFAULT_SCENE_ROTATION_SCREEN)
 VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", DEFAULT_VLC_SOURCE_NAME)
+ALERT_SOURCE_NAME = os.getenv("ALERT_SOURCE_NAME", DEFAULT_ALERT_SOURCE_NAME)
 
 # Twitch Configuration (used for live checker)
 TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
@@ -132,6 +136,9 @@ class AutomationController:
         )
         self.prepared_rotation_manager.set_download_manager(self.download_manager)
 
+        # Fallback manager (emergency content when downloads fail)
+        self.fallback_manager: Optional[FallbackManager] = None  # Initialized after OBS connection
+
         # Handlers (initialized in _initialize_handlers)
         self.content_switch_handler: Optional[ContentSwitchHandler] = None
         self.temp_playback_handler: Optional[TempPlaybackHandler] = None
@@ -199,6 +206,8 @@ class AutomationController:
         self.download_manager.set_callbacks(
             get_current_session_id=lambda: self.current_session_id,
             set_next_prepared_playlists=self._set_next_prepared_playlists,
+            on_download_failure=self._on_download_failure,
+            on_download_success=self._on_download_success,
         )
 
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -208,13 +217,46 @@ class AutomationController:
         """Callback for download manager to set prepared playlists."""
         self.next_prepared_playlists = playlists
 
+    def _on_download_failure(self) -> None:
+        """Called (from download thread) when a background download fails."""
+        if not self.fallback_manager:
+            return
+        should_activate = self.fallback_manager.record_download_failure()
+        if should_activate and not self.fallback_manager.is_active:
+            # Schedule activation on the event loop (we're in a thread)
+            try:
+                loop = asyncio.get_event_loop()
+                settings = self.config_manager.get_settings()
+                live_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
+                asyncio.run_coroutine_threadsafe(
+                    self.fallback_manager.activate(live_folder), loop
+                )
+            except Exception as e:
+                logger.error(f"Failed to schedule fallback activation: {e}")
+
+    def _on_download_success(self) -> None:
+        """Called (from download thread) when a background download succeeds."""
+        if not self.fallback_manager:
+            return
+        self.fallback_manager.record_download_success()
+        if self.fallback_manager.is_active:
+            try:
+                loop = asyncio.get_event_loop()
+                settings = self.config_manager.get_settings()
+                live_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
+                asyncio.run_coroutine_threadsafe(
+                    self.fallback_manager.deactivate(live_folder), loop
+                )
+            except Exception as e:
+                logger.error(f"Failed to schedule fallback deactivation: {e}")
+
     def reload_env(self) -> dict:
         """Re-read .env file and update module-level constants + instance attrs.
 
         Returns a dict summarising what changed so the caller can log it.
         """
         global OBS_HOST, OBS_PORT, OBS_PASSWORD
-        global SCENE_PAUSE, SCENE_STREAM, SCENE_ROTATION_SCREEN, VLC_SOURCE_NAME
+        global SCENE_PAUSE, SCENE_STREAM, SCENE_ROTATION_SCREEN, VLC_SOURCE_NAME, ALERT_SOURCE_NAME
         global TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET
         global KICK_CLIENT_ID, KICK_CLIENT_SECRET
         global DISCORD_WEBHOOK_URL
@@ -246,6 +288,7 @@ class AutomationController:
         SCENE_STREAM = os.getenv("SCENE_STREAM", os.getenv("SCENE_OFFLINE", DEFAULT_SCENE_STREAM))
         SCENE_ROTATION_SCREEN = os.getenv("SCENE_ROTATION_SCREEN", DEFAULT_SCENE_ROTATION_SCREEN)
         VLC_SOURCE_NAME = os.getenv("VLC_SOURCE_NAME", DEFAULT_VLC_SOURCE_NAME)
+        ALERT_SOURCE_NAME = os.getenv("ALERT_SOURCE_NAME", DEFAULT_ALERT_SOURCE_NAME)
         TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
         TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET", "")
         KICK_CLIENT_ID = os.getenv("KICK_CLIENT_ID", "")
@@ -400,6 +443,14 @@ class AutomationController:
 
         self._initialize_handlers()
 
+        # Re-create alert text source on new OBS connection
+        if self.obs_controller:
+            self.obs_controller.ensure_alert_text_source(SCENE_STREAM, ALERT_SOURCE_NAME)
+
+        # Update fallback manager with new OBS controller reference
+        if self.fallback_manager:
+            self.fallback_manager.obs_controller = self.obs_controller
+
         # Restore temp playback state on the new handler instance
         if temp_was_active and self.temp_playback_handler:
             self.temp_playback_handler._active = True
@@ -413,6 +464,11 @@ class AutomationController:
         if monitor_was_temp and self.file_lock_monitor:
             self.file_lock_monitor.set_temp_playback_mode(True)
             logger.info("Preserved file lock monitor temp playback mode across OBS reconnect")
+
+        # Restore no-delete mode if fallback was active
+        if self.fallback_manager and self.fallback_manager.is_active and self.file_lock_monitor:
+            self.file_lock_monitor.set_no_delete_mode(True)
+            logger.info("Preserved no-delete mode across OBS reconnect (fallback active)")
 
         # Restore playback position — VLC restarts from the beginning after
         # OBS reconnects, so use the deferred-seek mechanism (same as crash
@@ -556,6 +612,15 @@ class AutomationController:
             self.file_lock_monitor.obs_controller = self.obs_controller
         
         self.file_lock_monitor.initialize(str(video_folder))
+
+    def _set_no_delete_mode(self, enabled: bool) -> None:
+        """Toggle no-delete mode on the file lock monitor.
+
+        Called by FallbackManager to prevent video deletion during
+        fallback/loop tiers.
+        """
+        if self.file_lock_monitor:
+            self.file_lock_monitor.set_no_delete_mode(enabled)
 
     async def _update_category_for_current_video(self) -> None:
         """Update stream category based on the video currently playing.
@@ -1002,6 +1067,10 @@ class AutomationController:
         self.notification_service.notify_automation_shutdown()
         self.save_playback_on_exit()
 
+        # Hide fallback alert overlay if active
+        if self.fallback_manager and self.fallback_manager.is_active and self.obs_controller:
+            self.obs_controller.hide_alert_text(SCENE_STREAM, ALERT_SOURCE_NAME)
+
         # Disconnect web dashboard client
         if self.web_dashboard:
             await self.web_dashboard.close()
@@ -1051,6 +1120,30 @@ class AutomationController:
         ):
             logger.error("Failed to set up required OBS scenes")
             return
+
+        # Create hidden alert text source for fallback overlay
+        self.obs_controller.ensure_alert_text_source(SCENE_STREAM, ALERT_SOURCE_NAME)
+
+        # Initialize fallback manager now that OBS is connected
+        settings = self.config_manager.get_settings()
+        fallback_folder = settings.get('fallback_folder', DEFAULT_FALLBACK_FOLDER)
+        self.fallback_manager = FallbackManager(
+            obs_controller=self.obs_controller,
+            notification_service=self.notification_service,
+            fallback_folder=fallback_folder,
+            scene_stream=SCENE_STREAM,
+            scene_pause=SCENE_PAUSE,
+            scene_rotation=SCENE_ROTATION_SCREEN,
+            vlc_source_name=VLC_SOURCE_NAME,
+            alert_source_name=ALERT_SOURCE_NAME,
+            failure_threshold=int(os.getenv("FALLBACK_FAILURE_THRESHOLD",
+                                            str(DEFAULT_FALLBACK_FAILURE_THRESHOLD))),
+        )
+        self.fallback_manager.set_callbacks(
+            set_no_delete_mode=self._set_no_delete_mode,
+            reinit_file_lock_monitor=self._initialize_file_lock_monitor,
+        )
+        FallbackManager.startup_warning(fallback_folder)
 
         self.setup_platforms()
         self._initialize_handlers()
@@ -1169,6 +1262,14 @@ class AutomationController:
                     if current_time - self.temp_playback_handler._last_folder_check >= 2.0:
                         await self.temp_playback_handler.monitor()
                         self.temp_playback_handler._last_folder_check = current_time
+
+                # Fallback mode: periodically retry downloads
+                if (self.fallback_manager and self.fallback_manager.is_active
+                        and self.fallback_manager.should_retry_download()
+                        and not self.download_manager.background_download_in_progress):
+                    logger.info("Fallback retry: attempting a fresh download to check if yt-dlp recovered")
+                    self.fallback_manager.mark_retry_attempted()
+                    self.download_manager.maybe_start_background_download(None)
 
                 await self.check_for_rotation()
 

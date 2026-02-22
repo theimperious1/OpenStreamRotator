@@ -528,3 +528,135 @@ class OBSController:
             return None
         
         return status.get('media_state')
+
+    # ── Alert text overlay ───────────────────────────────────────────
+
+    def ensure_alert_text_source(self, scene_name: str, source_name: str) -> bool:
+        """Create a hidden text (GDI+) source on the stream scene for fallback alerts.
+
+        The source is created once and left hidden.  ``show_alert_text`` /
+        ``hide_alert_text`` toggle its scene-item visibility so there is no
+        flicker from repeatedly creating / destroying inputs.
+        """
+        if self._scene_has_input(scene_name, source_name):
+            self._set_scene_item_enabled(scene_name, source_name, False)
+            logger.debug(f"Alert text source '{source_name}' already exists in '{scene_name}'")
+            return True
+
+        try:
+            canvas_width, canvas_height = self._get_canvas_size()
+            font_size = max(36, canvas_height // 20)
+
+            self.obs_client.create_input(
+                sceneName=scene_name,
+                inputName=source_name,
+                inputKind="text_gdiplus_v2",
+                inputSettings={
+                    "text": "",
+                    "font": {"face": "Arial", "size": font_size, "style": "Bold"},
+                    "color": 0xFFFFFFFF,
+                    "bk_color": 0xCC000000,
+                    "bk_opacity": 80,
+                    "outline": True,
+                    "outline_color": 0xFF000000,
+                    "outline_size": 3,
+                    "align": "center",
+                    "valign": "center",
+                    "extents": True,
+                    "extents_cx": canvas_width,
+                    "extents_cy": font_size * 3,
+                    "extents_wrap": True,
+                },
+                sceneItemEnabled=False,
+            )
+            self._position_alert_source(scene_name, source_name, canvas_width, canvas_height, font_size)
+            logger.info(f"Created alert text source '{source_name}' in '{scene_name}' (hidden)")
+            return True
+        except OBSSDKRequestError as req_err:
+            if req_err.code == 601:
+                try:
+                    self.obs_client.create_scene_item(scene_name, source_name, enabled=False)
+                    canvas_width, canvas_height = self._get_canvas_size()
+                    font_size = max(36, canvas_height // 20)
+                    self._position_alert_source(scene_name, source_name, canvas_width, canvas_height, font_size)
+                    logger.info(f"Added existing alert source '{source_name}' to '{scene_name}' (hidden)")
+                    return True
+                except Exception as e2:
+                    logger.error(f"Failed to add existing alert source to scene: {e2}")
+                    return False
+            logger.error(f"OBS error creating alert source: {req_err}")
+            return False
+        except Exception as e:
+            self._check_connection_error(e)
+            logger.error(f"Failed to create alert text source: {e}")
+            return False
+
+    def _position_alert_source(self, scene_name: str, source_name: str,
+                               canvas_width: int, canvas_height: int,
+                               font_size: int) -> None:
+        """Position the alert text at the bottom of the canvas."""
+        try:
+            items = self.obs_client.get_scene_item_list(scene_name)
+            item_id = None
+            for item in items.scene_items:  # type: ignore
+                if item.get('sourceName') == source_name:
+                    item_id = item.get('sceneItemId')
+                    break
+            if item_id is None:
+                return
+            text_height = float(font_size * 3)
+            self.obs_client.set_scene_item_transform(
+                scene_name=scene_name,
+                item_id=item_id,
+                transform={
+                    "positionX": 0.0,
+                    "positionY": float(canvas_height) - text_height - 20.0,
+                    "boundsType": "OBS_BOUNDS_NONE",
+                },
+            )
+        except Exception as e:
+            logger.warning(f"Failed to position alert source: {e}")
+
+    def set_alert_text(self, source_name: str, text: str) -> bool:
+        """Update the alert text content."""
+        try:
+            self.obs_client.set_input_settings(
+                name=source_name,
+                settings={"text": text},
+                overlay=True,
+            )
+            return True
+        except Exception as e:
+            self._check_connection_error(e)
+            logger.error(f"Failed to set alert text: {e}")
+            return False
+
+    def show_alert_text(self, scene_name: str, source_name: str, text: str) -> bool:
+        """Set text and make the alert source visible."""
+        self.set_alert_text(source_name, text)
+        return self._set_scene_item_enabled(scene_name, source_name, True)
+
+    def hide_alert_text(self, scene_name: str, source_name: str) -> bool:
+        """Hide the alert text source."""
+        return self._set_scene_item_enabled(scene_name, source_name, False)
+
+    def _set_scene_item_enabled(self, scene_name: str, source_name: str, enabled: bool) -> bool:
+        """Toggle visibility of a scene item."""
+        try:
+            items = self.obs_client.get_scene_item_list(scene_name)
+            for item in items.scene_items:  # type: ignore
+                if item.get('sourceName') == source_name:
+                    item_id = item.get('sceneItemId')
+                    self.obs_client.set_scene_item_enabled(
+                        scene_name=scene_name,
+                        item_id=item_id,
+                        enabled=enabled,
+                    )
+                    logger.debug(f"{'Showed' if enabled else 'Hid'} '{source_name}' in '{scene_name}'")
+                    return True
+            logger.warning(f"Source '{source_name}' not found in scene '{scene_name}'")
+            return False
+        except Exception as e:
+            self._check_connection_error(e)
+            logger.error(f"Failed to toggle scene item visibility: {e}")
+            return False

@@ -10,7 +10,7 @@ from typing import Optional
 from config.constants import (
     COLOR_SUCCESS, COLOR_ERROR, COLOR_WARNING, COLOR_INFO,
     COLOR_STREAM_LIVE, COLOR_ROTATION_START, COLOR_NEXT_READY,
-    COLOR_MUTED,
+    COLOR_MUTED, COLOR_FALLBACK,
 )
 
 logger = logging.getLogger(__name__)
@@ -222,4 +222,28 @@ class NotificationService:
             "Automation Error",
             f"Unexpected error: {error_message}",
             color=COLOR_ERROR
+        )
+
+    def notify_fallback_activated(self, tier: str):
+        """Notify that fallback mode was activated due to download failures."""
+        tier_labels = {
+            "fallback_folder": "Playing backup content from fallback folder",
+            "loop_remaining": "Looping remaining content (no new downloads)",
+            "pause_screen": "No content available — stream paused",
+        }
+        desc = tier_labels.get(tier, tier)
+        self.send_discord(
+            "⚠ Fallback Mode Activated",
+            f"Downloads are repeatedly failing.\n**Action:** {desc}\n\n"
+            f"The system will automatically retry downloads every 5 minutes "
+            f"and resume normal operation once a download succeeds.",
+            color=COLOR_FALLBACK
+        )
+
+    def notify_fallback_deactivated(self):
+        """Notify that fallback mode was deactivated (downloads recovered)."""
+        self.send_discord(
+            "✅ Fallback Mode Deactivated",
+            "Downloads have recovered — resuming normal operation.",
+            color=COLOR_SUCCESS
         )

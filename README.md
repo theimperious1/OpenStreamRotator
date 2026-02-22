@@ -16,6 +16,7 @@ Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays the
 6. **Temp playback** — If the current content runs out before the next rotation's downloads finish, the system temporarily plays already-downloaded files from the pending folder to avoid dead air.
 7. **Twitch live detection** — If a configured target streamer goes live on Twitch, OBS switches to a pause screen. When they go offline, playback resumes automatically.
 8. **OBS freeze detection** — The system monitors OBS render output via WebSocket. If OBS stops rendering frames for ~60 seconds (process alive but frozen), it automatically kills OBS, clears crash sentinels, relaunches it, reconnects, and resumes streaming — all unattended.
+9. **Fallback content** — If yt-dlp downloads fail repeatedly (e.g. site changes, network outages), the system automatically switches to backup content from a fallback folder, loops remaining live content, or shows a pause screen — with an OBS text overlay alert and Discord notifications. Downloads are retried every 5 minutes and normal operation resumes automatically once they succeed.
 
 ## Prerequisites
 
@@ -301,6 +302,25 @@ If the current rotation's content runs out before the next rotation's downloads 
 
 This prevents dead air during long downloads.
 
+### Fallback Content System
+
+If yt-dlp downloads fail repeatedly (site changes, network outages, API breakage), the system automatically activates **fallback mode** with three tiers of emergency content:
+
+| Tier | Condition | Behavior |
+|------|-----------|----------|
+| **1 — Fallback Folder** | `content/fallback/` has videos | VLC switches to fallback folder, videos loop without deleting |
+| **2 — Loop Remaining** | No fallback videos, but `content/live/` still has videos | Stop deleting finished videos, loop existing content |
+| **3 — Pause Screen** | No content anywhere | Switch to the pause scene |
+
+**How it works:**
+- After 3 consecutive download failures (configurable via `FALLBACK_FAILURE_THRESHOLD`), fallback mode activates
+- An **OBS text overlay** ("OSR Alert") appears on the stream scene showing the current fallback tier
+- A **Discord notification** is sent when fallback activates and deactivates
+- Every 5 minutes, the system retries a download. If it succeeds, fallback mode deactivates automatically and normal rotation resumes
+- On shutdown, the alert overlay is hidden
+
+**Setup:** Pre-load `content/fallback/` with some backup videos. If the folder is empty at startup, a warning is logged. You can use any video files (.mp4, .mkv, .avi, .webm, .flv, .mov).
+
 ### Crash Recovery
 
 The system tracks session state in a local SQLite database. If the process is restarted:
@@ -342,6 +362,7 @@ If `DISCORD_WEBHOOK_URL` is set, the system sends notifications for:
 - **Now Playing** — playlist names after a content switch completes
 - **Session Resumed** — crash recovery with video name and timestamp
 - **Temp Playback Activated / Complete** — long download handling
+- **Fallback Mode Activated / Deactivated** — emergency content due to download failures
 - **Video Transition** — per-video notifications (opt-in via `notify_video_transitions` in `settings.json`)
 - **Rotation downloads** — started, ready, errors, warnings
 - **Stream metadata failures** — title/category update errors
@@ -408,6 +429,7 @@ OpenStreamRotator/
 │   └── obs_freeze_monitor.py     # OBS freeze detection and recovery
 ├── managers/
 │   ├── download_manager.py          # Download orchestration and retry logic
+│   ├── fallback_manager.py          # Emergency fallback content when downloads fail
 │   ├── obs_connection_manager.py    # OBS WebSocket connection lifecycle
 │   ├── platform_manager.py          # Multi-platform broadcast orchestration
 │   ├── playlist_manager.py          # Folder management and video renaming

@@ -23,6 +23,7 @@ VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.avi', '.webm', '.flv', '.mov')
 # Default Paths (can be overridden in config)
 DEFAULT_VIDEO_FOLDER = os.path.join(_PROJECT_ROOT, 'content', 'live', '')
 DEFAULT_NEXT_ROTATION_FOLDER = os.path.join(_PROJECT_ROOT, 'content', 'pending', '')
+DEFAULT_FALLBACK_FOLDER = os.path.join(_PROJECT_ROOT, 'content', 'fallback', '')
 DEFAULT_PAUSE_IMAGE = os.path.join(_PROJECT_ROOT, 'content', 'pause', 'default.png')
 DEFAULT_ROTATION_IMAGE = os.path.join(_PROJECT_ROOT, 'content', 'rotation', 'default.png')
 
@@ -32,6 +33,10 @@ DEFAULT_SCENE_PAUSE = "OSR Pause screen"
 DEFAULT_SCENE_STREAM = "OSR Stream"
 DEFAULT_SCENE_ROTATION_SCREEN = "OSR Rotation screen"
 DEFAULT_VLC_SOURCE_NAME = "OSR Playlist"
+DEFAULT_ALERT_SOURCE_NAME = "OSR Alert"
+
+# Fallback system
+DEFAULT_FALLBACK_FAILURE_THRESHOLD = 3
 
 # Playlist Constraints
 DEFAULT_MIN_PLAYLISTS = 2
@@ -46,3 +51,4 @@ COLOR_STREAM_LIVE = 0x9146FF
 COLOR_ROTATION_START = 0xFFA500
 COLOR_NEXT_READY = 0x00FF00
 COLOR_MUTED = 0x808080
+COLOR_FALLBACK = 0xFF6600
