@@ -33,9 +33,13 @@ echo Copying default screen images...
 copy /Y content\pause\default.png dist\content\pause\default.png >nul
 copy /Y content\rotation\default.png dist\content\rotation\default.png >nul
 
+:: Copy setup script
+echo Copying setup script...
+copy /Y setup.bat dist\setup.bat >nul
+
 echo.
 echo === Build complete! ===
 echo Output: dist\OpenStreamRotator.exe
 echo.
-echo Remember: dist\.env is from .env.example — configure it before running.
+echo Remember: Run setup.bat to configure, or edit dist\.env manually.
 pause
