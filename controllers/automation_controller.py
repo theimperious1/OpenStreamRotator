@@ -274,15 +274,7 @@ class AutomationController:
             logger.info("reload_env: .env re-read — no changes detected")
             return changed
 
-        # Log changed keys — separate secret keys from safe keys so that
-        # tainted values never flow into the logger call.
-        _SECRET_KEYWORDS = ("SECRET", "PASSWORD", "API_KEY")
-        secret_keys = [k for k in changed if any(s in k for s in _SECRET_KEYWORDS)]
-        safe_keys = [k for k in changed if k not in secret_keys]
-        safe_log = {k: changed[k] for k in safe_keys}
-        if secret_keys:
-            safe_log.update({k: "****" for k in secret_keys})
-        logger.info("reload_env: changed keys → %s", safe_log)
+        logger.info("reload_env: changed keys → %s", list(changed.keys()))
 
         # ── Update instance attrs ──
         self._scene_pause = SCENE_PAUSE
