@@ -274,7 +274,9 @@ class AutomationController:
             logger.info("reload_env: .env re-read — no changes detected")
             return changed
 
-        logger.info("reload_env: changed keys → %s", list(changed.keys()))
+        # Mask secret values in logs
+        safe = {k: ("****" if "SECRET" in k or "PASSWORD" in k or "API_KEY" in k else v) for k, v in changed.items()}
+        logger.info(f"reload_env: changed keys → {safe}")
 
         # ── Update instance attrs ──
         self._scene_pause = SCENE_PAUSE
