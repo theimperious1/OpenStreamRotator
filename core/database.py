@@ -471,32 +471,14 @@ class DatabaseManager:
             return None
 
     def end_session(self, session_id: int):
-        """Mark a rotation session as ended and update playlists' last_played timestamp."""
+        """Mark a rotation session as ended.
+
+        Note: last_played / play_count for each playlist are updated at
+        the moment the content switch completes (see execute_content_switch
+        and temp_playback_handler.exit), NOT here.  Doing it here would
+        double-count and stamp all playlists with the same time.
+        """
         with self._cursor() as cursor:
-            # Get playlists used in this session
-            cursor.execute("""
-                SELECT playlists_selected FROM rotation_sessions WHERE id = ?
-            """, (session_id,))
-            result = cursor.fetchone()
-
-            if result:
-                playlists_json = result[0]
-                if playlists_json:
-                    try:
-                        playlist_ids = json.loads(playlists_json)
-                        # Update last_played for all playlists in this session
-                        now = datetime.now()
-                        for playlist_id in playlist_ids:
-                            cursor.execute("""
-                                UPDATE playlists 
-                                SET last_played = ?, 
-                                    play_count = play_count + 1,
-                                    updated_at = ?
-                                WHERE id = ?
-                            """, (now, now, playlist_id))
-                    except (json.JSONDecodeError, TypeError) as e:
-                        logger.warning(f"Failed to parse playlists for session {session_id}: {e}")
-
             cursor.execute("""
                 UPDATE rotation_sessions 
                 SET ended_at = ?, is_current = 0

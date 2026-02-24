@@ -107,16 +107,35 @@ class DashboardHandler:
         # ── Extended data ──
 
         # Playlists from config (name, url, twitch_category, kick_category, enabled, priority)
+        # Merge in last_played / play_count from the database.
         playlists = []
         try:
+            # Build a lookup of DB stats keyed by playlist name
+            db_stats: dict[str, dict] = {}
+            try:
+                # Also grab disabled ones so the dashboard shows stats for every playlist
+                with ctrl.db._cursor() as _cur:
+                    _cur.execute("SELECT name, last_played, play_count FROM playlists")
+                    for row in _cur.fetchall():
+                        db_stats[row["name"]] = {
+                            "last_played": row["last_played"],
+                            "play_count": row["play_count"] or 0,
+                        }
+            except Exception:
+                pass
+
             for p in ctrl.config_manager.get_playlists():
+                name = p.get("name", "")
+                stats = db_stats.get(name, {})
                 playlists.append({
-                    "name": p.get("name", ""),
+                    "name": name,
                     "url": p.get("url", ""),
                     "twitch_category": p.get("twitch_category", "") or p.get("category", ""),
                     "kick_category": p.get("kick_category", "") or p.get("category", ""),
                     "enabled": p.get("enabled", True),
                     "priority": p.get("priority", 1),
+                    "last_played": stats.get("last_played"),
+                    "play_count": stats.get("play_count", 0),
                 })
         except Exception:
             pass
