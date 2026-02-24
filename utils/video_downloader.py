@@ -189,6 +189,8 @@ class VideoDownloader:
                     # 'ratelimit': 50000000,  # 50MB/s rate limit for balanced speed
                     # Write info.json for metadata-aware resumption of interrupted downloads
                     'write_info_json': True,
+                    # Auto-download JS challenge solver from GitHub (required for YouTube signatures)
+                    'remote_components': ['ejs:github'],
                     # 'extractor_args': {
                         # 'youtube': {
                             # Use ios_downgraded to avoid YouTube's aggressive IP-based blocking
