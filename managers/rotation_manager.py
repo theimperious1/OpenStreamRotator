@@ -361,6 +361,20 @@ class RotationManager:
             assert ctrl.stream_manager is not None, "Stream manager not initialized"
             await ctrl.stream_manager.update_title(session['stream_title'])
 
+        # Re-sync the OBS VLC source with the actual live folder contents.
+        # After a crash (e.g. network outage) the VLC source may still contain
+        # a stale playlist (or even files from the pending folder) that no
+        # longer reflects what is actually in the live folder.
+        video_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
+        if ctrl.obs_controller:
+            success, _ = ctrl.obs_controller.update_vlc_source(
+                self._vlc_source, video_folder
+            )
+            if success:
+                logger.info(f"Re-synced VLC source to live folder on resume: {video_folder}")
+            else:
+                logger.warning("Failed to re-sync VLC source to live folder on resume")
+
         ctrl._initialize_file_lock_monitor()
         await ctrl._update_category_for_current_video()
 

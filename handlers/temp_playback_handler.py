@@ -104,7 +104,7 @@ class TempPlaybackHandler:
         if self._set_background_download_in_progress:
             self._set_background_download_in_progress(value)
 
-    async def activate(self, session: dict) -> None:
+    async def activate(self, session: dict) -> bool:
         """Activate temporary playback while large playlist downloads complete.
         
         Scenario: Current rotation finished but next large playlist (e.g., 28 videos)
@@ -112,6 +112,13 @@ class TempPlaybackHandler:
         while downloads continue. Videos are deleted after playing (handled by skip detector).
         The archive.txt file ensures yt-dlp won't re-download deleted videos.
         Once all downloads complete, do normal rotation: nuke live, move pending to live.
+        
+        If no complete files are available yet, polls every few seconds until content
+        appears (up to 2 minutes). The rotation screen is shown while waiting so the
+        stream isn't dead.
+        
+        Returns:
+            True if temp playback was successfully activated, False otherwise.
         """
         logger.info("===== TEMP PLAYBACK ACTIVATION =====")
         
@@ -121,7 +128,7 @@ class TempPlaybackHandler:
         # Switch to Rotation screen scene briefly for VLC source update
         if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_rotation_screen):
             logger.error("Failed to switch to Rotation screen scene for temp playback setup")
-            return
+            return False
         
         await asyncio.sleep(1.5)  # Wait for scene switch
         
@@ -130,25 +137,44 @@ class TempPlaybackHandler:
             complete_files = self.playlist_manager.get_complete_video_files(pending_folder)
             
             if not complete_files:
-                logger.error("No complete files found in pending folder, cannot activate temp playback")
-                return
+                # No files ready yet — poll until downloads produce content.
+                # The rotation screen is already shown so the stream isn't dead.
+                logger.info("No complete files in pending folder yet — waiting for downloads to produce content...")
+                max_wait = 120  # 2 minutes
+                poll_interval = 5  # seconds
+                waited = 0
+                while waited < max_wait:
+                    await asyncio.sleep(poll_interval)
+                    waited += poll_interval
+                    complete_files = self.playlist_manager.get_complete_video_files(pending_folder)
+                    if complete_files:
+                        logger.info(f"Content appeared after waiting {waited}s: {len(complete_files)} file(s) ready")
+                        break
+                    if waited % 30 == 0:
+                        logger.info(f"Still waiting for content in pending folder... ({waited}s elapsed)")
+                
+                if not complete_files:
+                    logger.warning(f"Timed out after {max_wait}s waiting for content — will retry on next tick")
+                    # Leave the rotation screen showing so the stream isn't
+                    # dead while the tick loop retries on the next iteration.
+                    return False
             
             # Point OBS VLC source directly at pending folder (no copying needed)
             # archive.txt ensures yt-dlp won't re-download videos deleted during playback
             if not self.obs_controller:
                 logger.error("No OBS controller available")
-                return
+                return False
             
             success, playlist = self.obs_controller.update_vlc_source(self.vlc_source_name, pending_folder)
             if not success:
                 logger.error("Failed to update VLC source to pending folder")
-                return
+                return False
             
             # Switch back to Stream scene to resume streaming
             await asyncio.sleep(0.5)
             if not self.obs_controller.switch_scene(self.scene_stream):
                 logger.error("Failed to switch back to Stream scene after temp playback setup")
-                return
+                return False
             
             # Mark temp playback as active
             self._active = True
@@ -221,6 +247,8 @@ class TempPlaybackHandler:
             if self.notification_service:
                 self.notification_service.notify_temp_playback_activated(len(complete_files))
             
+            return True
+            
         except Exception as e:
             logger.error(f"Error during temp playback activation: {e}")
             # Switch back to Stream scene on error
@@ -230,6 +258,7 @@ class TempPlaybackHandler:
                     self.obs_controller.switch_scene(self.scene_stream)
             except Exception as scene_error:
                 logger.error(f"Failed to recover scene after temp playback error: {scene_error}")
+            return False
 
     async def restore(self, session: dict, temp_state: dict) -> bool:
         """Restore temp playback after a crash/restart.

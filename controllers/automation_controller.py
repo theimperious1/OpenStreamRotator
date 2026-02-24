@@ -864,18 +864,31 @@ class AutomationController:
                         pending_incomplete = True
                         break
             
-            # Activate temp playback if downloads in progress with files ready
-            if pending_has_files and pending_incomplete and self.temp_playback_handler:
-                logger.info(f"Long playlist detected downloading ({len(pending_complete_files)} files ready in pending) - activating temp playback")
-                await self.temp_playback_handler.activate(session)
-                # Re-initialize file lock monitor to watch the pending folder
-                self._initialize_file_lock_monitor(pending_folder)
-                if self.file_lock_monitor:
-                    self.file_lock_monitor.set_temp_playback_mode(True)
+            # Also treat an active background download (DB may not have been
+            # updated yet) as "downloads in progress".
+            downloads_active = pending_incomplete or self.download_manager.background_download_in_progress
+            
+            # Activate temp playback if downloads are in progress.
+            # activate() handles the case where no files are ready yet by
+            # polling until the first file appears (shows rotation screen
+            # while waiting so the stream isn't dead).
+            if downloads_active and self.temp_playback_handler:
+                if pending_has_files:
+                    logger.info(f"Long playlist detected downloading ({len(pending_complete_files)} files ready in pending) - activating temp playback")
+                else:
+                    logger.info("Content exhausted while downloads in progress — activating temp playback (will wait for first file)")
                 
-                # Correct the category based on the actual video VLC is playing
-                # (activate() guesses from playlist order, but VLC picks alphabetically)
-                await self._update_category_for_current_video()
+                activated = await self.temp_playback_handler.activate(session)
+                
+                if activated:
+                    # Re-initialize file lock monitor to watch the pending folder
+                    self._initialize_file_lock_monitor(pending_folder)
+                    if self.file_lock_monitor:
+                        self.file_lock_monitor.set_temp_playback_mode(True)
+                    
+                    # Correct the category based on the actual video VLC is playing
+                    # (activate() guesses from playlist order, but VLC picks alphabetically)
+                    await self._update_category_for_current_video()
                 
                 return
         
