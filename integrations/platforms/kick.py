@@ -128,18 +128,30 @@ class KickUpdater(StreamPlatform):
                 logger.info(f"[{self.platform_name}] Waiting for you to authorize and copy the code...")
                 
                 # Prompt user to paste code
-                code = input(f"[{self.platform_name}] Paste the authorization code from the redirect URL: ").strip()
+                raw_input = input(f"[{self.platform_name}] Paste the authorization code from the redirect URL: ").strip()
                 
-                if not code:
+                if not raw_input:
                     raise RuntimeError("OAuth authorization code is required.")
+                
+                # If the user pasted the full redirect URL, extract the code parameter
+                code_match = re.search(r'[?&]code=([^&\s]+)', raw_input)
+                if code_match:
+                    code = code_match.group(1)
+                    logger.debug(f"[{self.platform_name}] Extracted authorization code from redirect URL")
+                else:
+                    code = raw_input
                 
                 logger.info(f"[{self.platform_name}] Exchanging authorization code for tokens...")
                 try:
                     token_data = await self.api.exchange_code(code, code_verifier)
+                    
+                    if not token_data:
+                        raise RuntimeError("Token exchange failed — Kick returned an error (check logs above)")
+
                     logger.info(f"[{self.platform_name}] SUCCESS! Tokens exchanged and saved.")
 
                     # Auto-resolve channel_id if it wasn't set
-                    if not self.channel_id and token_data and "channel_id" in token_data:
+                    if not self.channel_id and "channel_id" in token_data:
                         self.channel_id = str(token_data["channel_id"])
                         self._persist_channel_id(self.channel_id)
                         logger.info(
