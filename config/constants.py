@@ -6,6 +6,9 @@ Centralized location for magic numbers, strings, and IDs.
 import os
 import sys
 
+# Application Version
+VERSION = "1.1.0"
+
 # Project root directory — when frozen by PyInstaller the exe unpacks to a temp
 # dir so __file__ no longer points at the real project folder.  Use the
 # directory containing the exe instead.

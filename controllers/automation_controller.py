@@ -24,6 +24,7 @@ from managers.rotation_manager import RotationManager
 from managers.platform_manager import PlatformManager
 from managers.prepared_rotation_manager import PreparedRotationManager
 from managers.fallback_manager import FallbackManager
+from managers.update_manager import UpdateManager
 from services.notification_service import NotificationService
 from playback.file_lock_monitor import FileLockMonitor
 from services.twitch_live_checker import TwitchLiveChecker
@@ -40,7 +41,7 @@ from config.constants import (
     DEFAULT_PAUSE_IMAGE, DEFAULT_ROTATION_IMAGE,
     DEFAULT_SCENE_PAUSE, DEFAULT_SCENE_STREAM,
     DEFAULT_SCENE_ROTATION_SCREEN, DEFAULT_VLC_SOURCE_NAME,
-    DEFAULT_ALERT_SOURCE_NAME,
+    DEFAULT_ALERT_SOURCE_NAME, VERSION,
 )
 
 # Load environment variables from project root
@@ -74,6 +75,10 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 # Web Dashboard Configuration
 WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "")      # e.g. ws://localhost:8000
 WEB_DASHBOARD_API_KEY = os.getenv("WEB_DASHBOARD_API_KEY", "")  # from team page
+
+# Auto-Update Configuration
+AUTO_UPDATE_ENABLED = os.getenv("AUTO_UPDATE", "true").lower() == "true"
+AUTO_UPDATE_CHECK_INTERVAL = int(os.getenv("AUTO_UPDATE_CHECK_INTERVAL", "1800"))  # seconds (default: 30 min)
 
 
 class AutomationController:
@@ -138,6 +143,9 @@ class AutomationController:
 
         # Fallback manager (emergency content when downloads fail)
         self.fallback_manager: Optional[FallbackManager] = None  # Initialized after OBS connection
+
+        # Update manager (checks for new releases from GitHub)
+        self.update_manager: Optional[UpdateManager] = None  # Initialized after OBS connection
 
         # Handlers (initialized in _initialize_handlers)
         self.content_switch_handler: Optional[ContentSwitchHandler] = None
@@ -261,6 +269,7 @@ class AutomationController:
         global KICK_CLIENT_ID, KICK_CLIENT_SECRET
         global DISCORD_WEBHOOK_URL
         global WEB_DASHBOARD_URL, WEB_DASHBOARD_API_KEY
+        global AUTO_UPDATE_ENABLED, AUTO_UPDATE_CHECK_INTERVAL
 
         # Snapshot old values for diff
         old = {
@@ -275,6 +284,8 @@ class AutomationController:
             "DISCORD_WEBHOOK_URL": DISCORD_WEBHOOK_URL,
             "WEB_DASHBOARD_URL": WEB_DASHBOARD_URL,
             "WEB_DASHBOARD_API_KEY": WEB_DASHBOARD_API_KEY,
+            "AUTO_UPDATE_ENABLED": AUTO_UPDATE_ENABLED,
+            "AUTO_UPDATE_CHECK_INTERVAL": AUTO_UPDATE_CHECK_INTERVAL,
         }
 
         # Re-read .env into os.environ (override=True so changed values win)
@@ -296,6 +307,8 @@ class AutomationController:
         DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
         WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "")
         WEB_DASHBOARD_API_KEY = os.getenv("WEB_DASHBOARD_API_KEY", "")
+        AUTO_UPDATE_ENABLED = os.getenv("AUTO_UPDATE", "true").lower() == "true"
+        AUTO_UPDATE_CHECK_INTERVAL = int(os.getenv("AUTO_UPDATE_CHECK_INTERVAL", "1800"))
 
         # Build diff
         new = {
@@ -1145,6 +1158,14 @@ class AutomationController:
         )
         FallbackManager.startup_warning(fallback_folder)
 
+        # Initialize update manager (checks GitHub for new releases)
+        if AUTO_UPDATE_ENABLED:
+            self.update_manager = UpdateManager(
+                current_version=VERSION,
+                notification_service=self.notification_service,
+            )
+            logger.info(f"Update manager initialized (v{VERSION}, check interval: {AUTO_UPDATE_CHECK_INTERVAL}s)")
+
         self.setup_platforms()
         self._initialize_handlers()
         self.notification_service.notify_automation_started()
@@ -1279,6 +1300,45 @@ class AutomationController:
                     if scheduled_folder and not self.prepared_rotation_manager.is_executing:
                         logger.info(f"Scheduled prepared rotation ready — executing: {scheduled_folder}")
                         await self.dashboard_handler.execute_prepared_rotation(scheduled_folder)
+
+                # Check for updates from GitHub (default: every 30 minutes)
+                if loop_count % AUTO_UPDATE_CHECK_INTERVAL == 0:
+                    if self.update_manager and not self.update_manager.is_suppressed():
+                        try:
+                            if await self.update_manager.check_for_updates():
+                                self.update_manager.mark_update_available()
+                                update_info = self.update_manager.get_update_info()
+                                if update_info:
+                                    is_critical = update_info['is_critical']
+                                    version = update_info['version']
+                                    if is_critical:
+                                        logger.info(f"CRITICAL update available: v{version} (will auto-install if fallback activates)")
+                                        self.notification_service.notify(
+                                            title="🔴 Critical Update Available",
+                                            message=f"OpenStreamRotator v{version} includes critical yt-dlp fixes.\n"
+                                                    f"Auto-install will proceed if stream recovery is needed.",
+                                            level="error"
+                                        )
+                                    else:
+                                        logger.info(f"Normal update available: v{version}")
+                                        self.notification_service.notify(
+                                            title="📦 Update Available",
+                                            message=f"OpenStreamRotator v{version} is available.\n"
+                                                    f"Restart application to install (no auto-install for normal updates).",
+                                            level="warning"
+                                        )
+                        except Exception as e:
+                            logger.debug(f"Error checking for updates: {e}")
+
+                # Auto-install critical updates if fallback is active
+                if self.update_manager and self.fallback_manager:
+                    if await self.update_manager.should_auto_install(self.fallback_manager.is_active):
+                        logger.error("AUTO-RESTARTING for critical update (fallback mode active)")
+                        self.notification_service.notify_automation_error(
+                            f"Auto-restarting for critical update v{self.update_manager._available_version}"
+                        )
+                        self._shutdown_requested = True
+                        continue
 
                 if self.config_manager.has_config_changed():
                     logger.info("Config changed, syncing...")
