@@ -62,7 +62,8 @@ class OBSFreezeMonitor:
         polls OBS every ``_POLL_INTERVAL`` seconds.
 
         Args:
-            obs_client: An ``obsws_python.ReqClient`` instance.
+            obs_client: An ``obsws_python.ReqClient`` instance, or *None*
+                        when OBS is disconnected.
 
         Returns:
             ``None``      — everything normal, or not time to check yet.
@@ -75,15 +76,28 @@ class OBSFreezeMonitor:
             return None
         self._last_check_time = now
 
+        # No client means OBS is disconnected — count as a stall
+        if obs_client is None:
+            self._stall_count += 1
+            logger.warning(
+                f"OBS freeze monitor: OBS disconnected "
+                f"({self._stall_count}/{_STALL_THRESHOLD})"
+            )
+            return self._evaluate_stall_threshold()
+
         try:
             stats = obs_client.get_stats()
             render_total = stats.render_total_frames  # type: ignore[attr-defined]
         except Exception as e:
-            # If we can't even reach OBS, the existing disconnect detector
-            # in automation_controller will handle it — not our job here.
-            logger.debug(f"OBS freeze monitor: GetStats failed ({e}), skipping check")
-            self._reset_sampling()
-            return None
+            # WebSocket timeout / connection failure — treat as a stall.
+            # A truly frozen OBS process will keep timing out, accumulating
+            # stall counts until the threshold is reached.
+            self._stall_count += 1
+            logger.warning(
+                f"OBS freeze monitor: WebSocket unreachable "
+                f"({self._stall_count}/{_STALL_THRESHOLD}) — {e}"
+            )
+            return self._evaluate_stall_threshold()
 
         if self._last_render_frames is None:
             # First sample — just record baseline
@@ -104,12 +118,15 @@ class OBSFreezeMonitor:
             f"renderTotalFrames={render_total}"
         )
 
+        return self._evaluate_stall_threshold()
+
+    def _evaluate_stall_threshold(self) -> Optional[str]:
+        """Check if stall count has reached the threshold and return the appropriate action."""
         if self._stall_count >= _STALL_THRESHOLD:
             self._stall_count = 0
             self._last_render_frames = None
 
             if self._recovery_attempted:
-                # Already tried once — don't loop
                 logger.error(
                     "OBS freeze detected AGAIN after prior recovery — "
                     "not restarting. Manual intervention required."

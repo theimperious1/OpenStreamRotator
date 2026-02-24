@@ -470,7 +470,30 @@ class AutomationController:
         self._reinitialize_after_obs_reconnect()
         logger.info("OBS freeze recovery: handlers re-initialized after restart")
 
-        # 6. Resume streaming if it was active
+        # 6. Ensure all scenes/sources exist and VLC source has its playlist
+        if self.obs_controller:
+            self.obs_controller.ensure_scenes(
+                scene_stream=SCENE_STREAM,
+                scene_pause=SCENE_PAUSE,
+                scene_rotation=SCENE_ROTATION_SCREEN,
+                vlc_source_name=VLC_SOURCE_NAME,
+                video_folder=self.config_manager.video_folder,
+                pause_image=DEFAULT_PAUSE_IMAGE,
+                rotation_image=DEFAULT_ROTATION_IMAGE,
+            )
+            # Repopulate VLC source playlist from the live folder
+            self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, self.config_manager.video_folder)
+            logger.info("OBS freeze recovery: scenes and VLC source restored")
+
+        # 7. Switch to the stream scene so OBS shows the right content
+        if self.obs_controller:
+            try:
+                self.obs_controller.switch_scene(SCENE_STREAM)
+                logger.info("OBS freeze recovery: switched to stream scene")
+            except Exception as e:
+                logger.warning(f"OBS freeze recovery: failed to switch scene: {e}")
+
+        # 7. Resume streaming if it was active
         if monitor.was_streaming and self.obs_controller:
             # Give OBS a moment to fully initialize before starting stream
             await asyncio.sleep(3.0)
@@ -1133,9 +1156,13 @@ class AutomationController:
                 self.download_manager.process_pending_database_operations()
                 self._tick_save_playback()
 
-                # OBS freeze detection — check render frame progression
-                if self.obs_controller and self.obs_controller.is_connected:
-                    freeze_status = self.obs_freeze_monitor.check(self.obs_controller.obs_client)
+                # OBS freeze detection — check render frame progression.
+                # Runs even when disconnected: WebSocket timeouts count as
+                # stalls so a truly frozen OBS will accumulate enough to
+                # trigger kill-and-relaunch recovery.
+                if self.obs_controller:
+                    obs_client = self.obs_controller.obs_client if self.obs_controller.is_connected else None
+                    freeze_status = self.obs_freeze_monitor.check(obs_client)
                     if freeze_status == "frozen":
                         logger.error("OBS FREEZE DETECTED — initiating recovery")
                         self.notification_service.notify_automation_error(
@@ -1155,11 +1182,16 @@ class AutomationController:
                 if self.obs_controller and not self.obs_controller.is_connected:
                     logger.warning("OBS connection lost (detected via health check)")
                     self.notification_service.notify_automation_error("OBS disconnected, attempting reconnect...")
-                    if self.obs_connection.reconnect():
+                    if self.obs_connection.reconnect(max_retries=3):
                         self._reinitialize_after_obs_reconnect()
                         logger.info("OBS reconnected, handlers re-initialized")
                         continue
                     else:
+                        # Reconnect exhausted retries — attempt freeze recovery
+                        # (kill + relaunch) as a last resort before giving up.
+                        logger.warning("OBS reconnect failed — attempting freeze recovery (kill + relaunch)")
+                        if await self._recover_from_obs_freeze():
+                            continue
                         logger.error("Failed to reconnect to OBS, shutting down")
                         break
 
@@ -1194,11 +1226,15 @@ class AutomationController:
                 if any(hint in error_msg.lower() for hint in ('websocket', 'connection', 'socket', 'connect')):
                     logger.warning(f"OBS connection lost: {e}")
                     self.notification_service.notify_automation_error(f"OBS disconnected: {error_msg}")
-                    if self.obs_connection.reconnect():
+                    if self.obs_connection.reconnect(max_retries=3):
                         self._reinitialize_after_obs_reconnect()
                         logger.info("OBS reconnected, handlers re-initialized")
                         continue
                     else:
+                        # Reconnect failed — try freeze recovery as last resort
+                        logger.warning("OBS reconnect failed — attempting freeze recovery (kill + relaunch)")
+                        if await self._recover_from_obs_freeze():
+                            continue
                         logger.error("Failed to reconnect to OBS, shutting down")
                         break
                 logger.error(f"Error in main loop: {e}", exc_info=True)
