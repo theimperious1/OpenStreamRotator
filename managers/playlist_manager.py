@@ -133,6 +133,9 @@ class PlaylistManager:
                     except Exception as e:
                         logger.error(f"Error deleting {file_path}: {e}")
 
+            # Ensure current folder exists (may have been removed or never created)
+            os.makedirs(current_folder, exist_ok=True)
+
             # Move next folder contents to current folder
             if os.path.exists(next_folder):
                 for filename in os.listdir(next_folder):
