@@ -8,7 +8,7 @@ import json
 import os
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, List, Dict, Optional
 import logging
 
@@ -273,7 +273,7 @@ class DatabaseManager:
                     play_count = play_count + 1,
                     updated_at = ?
                 WHERE id = ?
-            """, (datetime.now(), datetime.now(), playlist_id))
+            """, (datetime.now(timezone.utc), datetime.now(timezone.utc), playlist_id))
 
 
     def log_playback(self, video_filename: str, session_id: Optional[int] = None) -> None:
@@ -502,7 +502,7 @@ class DatabaseManager:
                 UPDATE rotation_sessions 
                 SET ended_at = ?, is_current = 0
                 WHERE id = ?
-            """, (datetime.now(), session_id))
+            """, (datetime.now(timezone.utc), session_id))
 
 
 
@@ -535,7 +535,7 @@ class DatabaseManager:
             # Update playlists table
             cursor.execute(
                 "UPDATE playlists SET name = ?, updated_at = ? WHERE name = ?",
-                (new_name, datetime.now().isoformat(), old_name)
+                (new_name, datetime.now(timezone.utc).isoformat(), old_name)
             )
             # Update videos table
             cursor.execute(
@@ -703,7 +703,7 @@ class DatabaseManager:
                 if row:
                     cursor.execute(
                         "UPDATE playlists SET enabled = ?, priority = ?, youtube_url = ?, updated_at = ? WHERE name = ?",
-                        (enabled, priority, url, datetime.now().isoformat(), name)
+                        (enabled, priority, url, datetime.now(timezone.utc).isoformat(), name)
                     )
                 else:
                     cursor.execute(
