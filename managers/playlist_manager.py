@@ -38,18 +38,20 @@ class PlaylistManager:
         config_playlists = self.config.get_playlists()
         
         # Get playlist names from database by their IDs
-        playlist_names = []
+        db_playlists = {}
         for pid in playlist_ids:
             playlist = self.db.get_playlist(pid)
             if playlist:
-                playlist_names.append(playlist.get('name'))
+                db_playlists[playlist.get('name')] = pid
         
-        # Find matching playlists in config
+        # Find matching playlists in config, enriched with DB id
         result = []
-        for name in playlist_names:
+        for name, pid in db_playlists.items():
             for p in config_playlists:
                 if p.get('name') == name:
-                    result.append(p)
+                    enriched = dict(p)
+                    enriched['id'] = pid
+                    result.append(enriched)
                     break
         
         return result
@@ -85,22 +87,6 @@ class PlaylistManager:
             Dict with 'success' and 'total_duration_seconds' keys
         """
         return self.downloader.download_playlists(playlists, output_folder, verbose=verbose)
-
-    def extract_playlists_from_folder(self, folder: str) -> List[str]:
-        """Extract unique playlist names from files in folder."""
-        playlists = set()
-
-        if not os.path.exists(folder):
-            return []
-
-        for filename in os.listdir(folder):
-            if filename.lower().endswith(VIDEO_EXTENSIONS):
-                # Extract playlist name (everything before _NUMBER_)
-                match = re.match(r'^(.+?)_\d+_', filename)
-                if match:
-                    playlists.add(match.group(1))
-
-        return sorted(list(playlists))
 
     def generate_stream_title(self, playlists: List[str]) -> str:
         """Generate stream title based on current playlists."""
@@ -145,6 +131,9 @@ class PlaylistManager:
                     # Skip archive.txt - it's used by yt-dlp to track downloaded videos
                     # and should not be moved to live folder
                     if filename == 'archive.txt':
+                        continue
+                    # Skip .info.json metadata files left by yt-dlp
+                    if filename.endswith('.info.json'):
                         continue
                     src = os.path.join(next_folder, filename)
                     dst = os.path.join(current_folder, filename)

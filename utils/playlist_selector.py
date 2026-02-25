@@ -137,14 +137,20 @@ class PlaylistSelector:
         max_playlists = settings.get('max_playlists_per_rotation', DEFAULT_MAX_PLAYLISTS)
 
         all_playlists = self.db.get_enabled_playlists()
+        total_enabled = len(all_playlists)
         
         # Filter to only include playlists in config AND not currently preparing
+        not_in_config = [p['name'] for p in all_playlists if p['name'] not in allowed_names]
         all_playlists = [p for p in all_playlists 
                         if p['name'] in allowed_names 
                         and p['name'] not in excluded_names]
 
         if len(all_playlists) == 0:
-            logger.error("No eligible playlists available! (all in preparation or disabled)")
+            logger.error(
+                f"No eligible playlists available! "
+                f"(enabled={total_enabled}, not_in_config={not_in_config}, "
+                f"excluded_preparing={excluded_names})"
+            )
             return []
 
         # Sort by last_played (oldest first) and priority

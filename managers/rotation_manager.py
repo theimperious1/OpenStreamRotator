@@ -284,16 +284,6 @@ class RotationManager:
             ctrl.db.end_session(ctrl.current_session_id)
 
         if await self.start_session():
-            # Record the new playlists being prepared
-            try:
-                session = ctrl.db.get_current_session()
-                if session and ctrl.next_prepared_playlists:
-                    next_playlist_names = [p['name'] for p in ctrl.next_prepared_playlists]
-                    ctrl.db.set_next_playlists(session['id'], next_playlist_names)
-                    logger.info(f"Recorded next playlists for session {session['id']}: {next_playlist_names}")
-            except Exception as e:
-                logger.warning(f"Failed to record next playlists: {e}")
-
             # Reset download flag when starting new rotation
             ctrl.download_manager.downloads_triggered_this_rotation = False
             ctrl.download_manager.background_download_in_progress = False
