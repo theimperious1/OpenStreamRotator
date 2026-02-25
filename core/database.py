@@ -346,16 +346,35 @@ class DatabaseManager:
             videos = [dict(row) for row in cursor.fetchall()]
             return videos
 
-    def get_video_by_filename(self, filename: str) -> Optional[Dict]:
-        """Get a video by its filename (searches across all playlists).
+    def get_video_by_filename(self, filename: str, playlist_names: Optional[List[str]] = None) -> Optional[Dict]:
+        """Get a video by its filename.
+        
+        When *playlist_names* is provided the query first tries to find a
+        record whose ``playlist_name`` is one of the given names.  This
+        avoids non-deterministic results when the same filename was
+        (incorrectly) registered under multiple playlists.
         
         Args:
             filename: Video filename
+            playlist_names: Optional list of playlist names to prefer
         
         Returns:
             Video dict with playlist_name, or None if not found
         """
         with self._cursor() as cursor:
+            # Prefer a record from one of the requested playlists
+            if playlist_names:
+                placeholders = ','.join('?' * len(playlist_names))
+                cursor.execute(f"""
+                    SELECT * FROM videos
+                    WHERE filename = ? AND playlist_name IN ({placeholders})
+                    LIMIT 1
+                """, (filename, *playlist_names))
+                row = cursor.fetchone()
+                if row:
+                    return dict(row)
+
+            # Fallback: any playlist
             cursor.execute("""
                 SELECT * FROM videos 
                 WHERE filename = ?

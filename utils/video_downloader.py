@@ -82,6 +82,11 @@ class VideoDownloader:
                 logger.info("Shutdown requested, aborting remaining playlist downloads")
                 return {'success': False, 'total_duration_seconds': total_duration}
 
+            # Snapshot files before this playlist starts — batch registration will
+            # only process files that appeared after this point, preventing
+            # cross-playlist contamination when multiple playlists share a folder.
+            pre_existing_files = set(os.listdir(output_folder)) if os.path.exists(output_folder) else set()
+
             result = self._download_single_playlist(
                 playlist['youtube_url'], output_folder, max_retries, verbose=verbose,
                 playlist_id=playlist['id'], playlist_name=playlist['name']
@@ -92,7 +97,8 @@ class VideoDownloader:
                 duration = self._register_downloaded_videos(
                     playlist['id'],
                     output_folder,
-                    playlist['name']
+                    playlist['name'],
+                    pre_existing_files=pre_existing_files
                 )
                 total_duration += duration
             else:
@@ -237,7 +243,8 @@ class VideoDownloader:
         logger.error(f"Failed to download playlist after {max_retries} attempts: {playlist_url}")
         return {'success': False}
 
-    def _register_downloaded_videos(self, playlist_id: int, folder: str, playlist_name: str) -> int:
+    def _register_downloaded_videos(self, playlist_id: int, folder: str, playlist_name: str,
+                                      pre_existing_files: Optional[Set[str]] = None) -> int:
         """
         Register newly downloaded videos in the queue for later database insertion.
         
@@ -248,6 +255,9 @@ class VideoDownloader:
             playlist_id: Database playlist ID
             folder: Folder containing downloaded videos
             playlist_name: Name of playlist for logging
+            pre_existing_files: Set of filenames that existed before this playlist's
+                download started. Files in this set are skipped to prevent
+                cross-playlist contamination.
         
         Returns:
             Total duration of newly registered videos in seconds
@@ -263,6 +273,12 @@ class VideoDownloader:
 
         for video_path in video_files:
             filename = os.path.basename(video_path)
+
+            # Skip files that existed before this playlist's download started —
+            # they belong to a different playlist and must not be re-registered
+            # under this one (prevents cross-playlist prefix misassignment)
+            if pre_existing_files is not None and filename in pre_existing_files:
+                continue
 
             # Skip files already registered via per-video post_hooks (prevents
             # cross-playlist registration when multiple playlists share a folder)

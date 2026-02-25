@@ -352,8 +352,11 @@ class PlaylistManager:
                 if re.match(r'^\d{2}_', filename):
                     continue
                 
-                # Look up this video's playlist in the database
-                video = self.db.get_video_by_filename(filename)
+                # Look up this video's playlist in the database, preferring
+                # records from playlists in the current rotation so that stale
+                # cross-playlist registrations don't cause wrong prefixes
+                rotation_names = list(playlist_prefix.keys())
+                video = self.db.get_video_by_filename(filename, playlist_names=rotation_names)
                 if not video:
                     logger.debug(f"Video not in database, skipping prefix: {filename}")
                     continue
