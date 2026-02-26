@@ -340,8 +340,9 @@ class DashboardHandler:
             if not folder:
                 logger.warning(f"execute_prepared_rotation: invalid slug {slug!r}")
                 return
-            logger.info(f"Dashboard command: execute prepared rotation '{slug}'")
-            await self.execute_prepared_rotation(folder)
+            restore_cursor = bool(payload.get("restore_cursor", False))
+            logger.info(f"Dashboard command: execute prepared rotation '{slug}' (restore_cursor={restore_cursor})")
+            await self.execute_prepared_rotation(folder, restore_cursor=restore_cursor)
 
         elif action == "delete_prepared_rotation":
             slug = payload.get("slug", "")
@@ -566,7 +567,7 @@ class DashboardHandler:
 
     # ── Prepared rotation execution ───────────────────────────────
 
-    async def execute_prepared_rotation(self, folder: str) -> None:
+    async def execute_prepared_rotation(self, folder: str, *, restore_cursor: bool = False) -> None:
         """Execute a prepared rotation by playing directly from its folder.
 
         Saves the current live playback state, renames videos in the prepared
@@ -591,6 +592,7 @@ class DashboardHandler:
         ctrl._saved_live_folder = live_folder
         ctrl._saved_live_video = None
         ctrl._saved_live_cursor_ms = 0
+        ctrl._restore_cursor_after_prepared = restore_cursor
 
         if ctrl.playback_monitor and ctrl.obs_controller:
             try:
@@ -703,14 +705,16 @@ class DashboardHandler:
         # Reinitialise playback monitor on live/
         ctrl._initialize_playback_monitor(live_folder)
 
-        # Seek back to where we left off
-        if ctrl._saved_live_video and ctrl._saved_live_cursor_ms > 0:
+        # Seek back to where we left off (if restore_cursor was requested)
+        if ctrl._restore_cursor_after_prepared and ctrl._saved_live_video and ctrl._saved_live_cursor_ms > 0:
             ctrl._pending_seek_ms = ctrl._saved_live_cursor_ms
             ctrl._pending_seek_video = ctrl._saved_live_video
             logger.info(
                 f"Queued deferred seek: {ctrl._saved_live_video} at "
                 f"{ctrl._saved_live_cursor_ms}ms ({ctrl._saved_live_cursor_ms / 1000:.1f}s)"
             )
+        elif not ctrl._restore_cursor_after_prepared:
+            logger.info("Skipping cursor restore — restore_cursor was not requested for this execution")
 
         # Restore stream title & category from the active session
         try:
@@ -730,6 +734,7 @@ class DashboardHandler:
         ctrl._saved_live_video = None
         ctrl._saved_live_cursor_ms = 0
         ctrl._saved_live_folder = None
+        ctrl._restore_cursor_after_prepared = False
 
         logger.info("Live playback restored after prepared rotation")
 

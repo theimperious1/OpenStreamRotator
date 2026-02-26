@@ -165,6 +165,7 @@ class AutomationController:
         self._saved_live_video: Optional[str] = None  # Original name of live video that was playing
         self._saved_live_cursor_ms: int = 0  # Cursor position within that video
         self._saved_live_folder: Optional[str] = None  # Path to live folder to restore
+        self._restore_cursor_after_prepared = False  # Per-execution flag from dashboard
         
         # Dashboard handler — owns all web-dashboard state / command logic
         self.dashboard_handler = DashboardHandler(self)
@@ -1284,9 +1285,8 @@ class AutomationController:
         self.notification_service.notify_automation_started()
 
         # Start web dashboard client if configured
-        dashboard_task: Optional[asyncio.Task] = None
         if self.web_dashboard:
-            dashboard_task = asyncio.create_task(self.web_dashboard.run())
+            asyncio.create_task(self.web_dashboard.run())
             logger.info("Web dashboard client started")
 
         # Sync and check for startup conditions
