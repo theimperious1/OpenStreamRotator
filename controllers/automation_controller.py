@@ -1362,7 +1362,7 @@ class AutomationController:
                     logger.info(f"ignore_streamer changed to {ignore_streamer}, forcing live status recheck")
                 last_ignore_streamer = ignore_streamer
 
-                if loop_count % 15 == 0 or ignore_streamer_changed:
+                if loop_count % max(int(settings.get('live_check_interval_seconds', 30)), 5) == 0 or ignore_streamer_changed:
                     await self._check_live_status(ignore_streamer)
 
                 self.download_manager.process_video_registration_queue()
