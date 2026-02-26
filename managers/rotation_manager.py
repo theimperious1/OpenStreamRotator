@@ -381,10 +381,6 @@ class RotationManager:
         # Restore prepared playlists from database
         await self._restore_prepared_playlists(session, settings)
 
-        if session.get('stream_title'):
-            assert ctrl.stream_manager is not None, "Stream manager not initialized"
-            await ctrl.stream_manager.update_title(session['stream_title'])
-
         # Re-sync the OBS VLC source with the actual live folder contents.
         # After a crash (e.g. network outage) the VLC source may still contain
         # a stale playlist (or even files from the pending folder) that no
@@ -400,7 +396,16 @@ class RotationManager:
                 logger.warning("Failed to re-sync VLC source to live folder on resume")
 
         ctrl._initialize_playback_monitor()
+
+        # Update category BEFORE title — Kick's API requires category_id on
+        # every channel update, so _update_category_for_current_video() must
+        # run first so the platform object caches the correct ID.  Otherwise
+        # update_title() falls back to the "Just Chatting" default.
         await ctrl._update_category_for_current_video()
+
+        if session.get('stream_title'):
+            assert ctrl.stream_manager is not None, "Stream manager not initialized"
+            await ctrl.stream_manager.update_title(session['stream_title'])
 
         # Restore playback position from crash recovery
         saved_video = session.get('playback_current_video')
