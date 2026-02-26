@@ -405,7 +405,34 @@ class RotationManager:
 
         if session.get('stream_title'):
             assert ctrl.stream_manager is not None, "Stream manager not initialized"
-            await ctrl.stream_manager.update_title(session['stream_title'])
+            # Regenerate the title with preview names if the next rotation is
+            # already prepared, rather than blindly restoring the stale DB value
+            # (which may be missing preview playlists from last session).
+            stored_title = session['stream_title']
+            playlists_json = session.get('playlists_selected')
+            if playlists_json:
+                try:
+                    playlist_ids = json.loads(playlists_json)
+                    playlist_names = []
+                    for pid in playlist_ids:
+                        p = ctrl.db.get_playlist(pid)
+                        if p:
+                            playlist_names.append(p['name'])
+                    if playlist_names:
+                        preview_names = ctrl._get_next_rotation_preview_names()
+                        title = ctrl.playlist_manager.generate_stream_title(
+                            playlist_names, preview_playlists=preview_names
+                        )
+                    else:
+                        title = stored_title
+                except Exception:
+                    title = stored_title
+            else:
+                title = stored_title
+            await ctrl.stream_manager.update_title(title)
+            if title != stored_title:
+                ctrl.db.update_session_stream_title(ctrl.current_session_id, title)
+                logger.info(f"Resumed with refreshed title: '{title}'")
 
         # Restore playback position from crash recovery
         saved_video = session.get('playback_current_video')
@@ -440,7 +467,7 @@ class RotationManager:
                 if files_exist:
                     playlist_objects = ctrl.db.get_playlists_with_ids_by_names(playlist_list)
                     if playlist_objects:
-                        ctrl.next_prepared_playlists = playlist_objects
+                        ctrl._set_next_prepared_playlists(playlist_objects)
                         logger.info(f"Restored prepared playlists from database: {playlist_list}")
                     else:
                         logger.warning(f"Could not fetch playlist objects for: {playlist_list}")

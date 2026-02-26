@@ -157,6 +157,7 @@ class AutomationController:
         self._rotation_postpone_logged = False
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
         self._shutdown_requested = False
+        self._title_refresh_needed = False  # Set by download callback to append preview names to title
         self._start_time = time.time()  # For uptime tracking
 
         # Prepared rotation overlay state
@@ -208,6 +209,8 @@ class AutomationController:
     def _set_next_prepared_playlists(self, playlists) -> None:
         """Callback for download manager to set prepared playlists."""
         self.next_prepared_playlists = playlists
+        if playlists:
+            self._title_refresh_needed = True
 
     def reload_env(self) -> dict:
         """Re-read .env file and update module-level constants + instance attrs.
@@ -653,7 +656,9 @@ class AutomationController:
             if not playlist_names:
                 return
 
-            new_title = self.playlist_manager.generate_stream_title(playlist_names)
+            new_title = self.playlist_manager.generate_stream_title(
+                playlist_names, preview_playlists=self._get_next_rotation_preview_names()
+            )
             old_title = session.get('stream_title', '')
 
             if new_title != old_title:
@@ -664,6 +669,129 @@ class AutomationController:
                 logger.debug("Config changed but stream title unchanged, skipping title update")
         except Exception as e:
             logger.warning(f"Failed to update stream title on config change: {e}")
+
+    async def _remove_playlist_from_title(self, video_record: dict) -> None:
+        """Remove a completed playlist from the stream title.
+
+        Called when the last video of a playlist finishes and playback moves
+        to the next playlist.  Updates ``playlists_selected`` in the session
+        so the title only shows content that is still playing or upcoming.
+
+        If there is room after removing the completed playlist, names from
+        the next prepared rotation are appended as a preview so viewers
+        always see what content is coming up.
+        """
+        try:
+            if not self.stream_manager or not self.current_session_id:
+                return
+
+            playlist_id = video_record.get('playlist_id')
+            if not playlist_id:
+                return
+
+            session = self.db.get_current_session()
+            if not session:
+                return
+
+            playlists_json = session.get('playlists_selected')
+            if not playlists_json:
+                return
+
+            playlist_ids: list = json.loads(playlists_json)
+            if playlist_id not in playlist_ids:
+                return
+
+            playlist_ids.remove(playlist_id)
+            if not playlist_ids:
+                # Don't empty the title entirely — the last playlist will
+                # be removed naturally when the next rotation starts.
+                return
+
+            # Persist the trimmed list and regenerate the title
+            self.db.update_session_playlists_selected(self.current_session_id, playlist_ids)
+
+            playlist_names = []
+            for pid in playlist_ids:
+                p = self.db.get_playlist(pid)
+                if p:
+                    playlist_names.append(p['name'])
+
+            if not playlist_names:
+                return
+
+            # Gather next-rotation preview names (if downloads are done)
+            preview_names = self._get_next_rotation_preview_names()
+
+            new_title = self.playlist_manager.generate_stream_title(
+                playlist_names, preview_playlists=preview_names
+            )
+            old_title = session.get('stream_title', '')
+
+            if new_title != old_title:
+                await self.stream_manager.update_title(new_title)
+                self.db.update_session_stream_title(self.current_session_id, new_title)
+                logger.info(
+                    f"Removed completed playlist from title: '{old_title}' -> '{new_title}'"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to remove playlist from title: {e}")
+
+    def _get_next_rotation_preview_names(self) -> list[str]:
+        """Return playlist names for the next prepared rotation, if available.
+
+        Used to preview upcoming content in the stream title when there is
+        room after the current rotation's playlists.
+        """
+        if not self.next_prepared_playlists:
+            return []
+        return [p['name'] for p in self.next_prepared_playlists if p.get('name')]
+
+    async def _refresh_title_with_previews(self) -> None:
+        """Regenerate the stream title to include next-rotation preview names.
+
+        Called from the main loop when the background download finishes and
+        ``_title_refresh_needed`` is set.  Adds upcoming playlist names to
+        the title (space permitting) so viewers see what content is next.
+        """
+        try:
+            if not self.stream_manager or not self.current_session_id:
+                return
+
+            session = self.db.get_current_session()
+            if not session:
+                return
+
+            playlists_json = session.get('playlists_selected')
+            if not playlists_json:
+                return
+
+            playlist_ids = json.loads(playlists_json)
+            playlist_names = []
+            for pid in playlist_ids:
+                p = self.db.get_playlist(pid)
+                if p:
+                    playlist_names.append(p['name'])
+
+            if not playlist_names:
+                return
+
+            preview_names = self._get_next_rotation_preview_names()
+            if not preview_names:
+                return  # nothing new to add
+
+            new_title = self.playlist_manager.generate_stream_title(
+                playlist_names, preview_playlists=preview_names
+            )
+            old_title = session.get('stream_title', '')
+
+            if new_title != old_title:
+                await self.stream_manager.update_title(new_title)
+                self.db.update_session_stream_title(self.current_session_id, new_title)
+                logger.info(
+                    f"Title updated with next-rotation preview: '{old_title}' -> '{new_title}'"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to refresh title with previews: {e}")
 
     async def _handle_temp_playback_vlc_refresh(self) -> None:
         """Refresh VLC source at the natural end of a video during temp playback.
@@ -824,6 +952,10 @@ class AutomationController:
                         name = self.db.mark_playlist_played_for_video(previous_video)
                         if name:
                             logger.info(f"Marked playlist '{name}' as played (last video transitioned)")
+                        # Remove completed playlist from the title — its
+                        # content has finished so it should no longer appear.
+                        if prev_rec:
+                            await self._remove_playlist_from_title(prev_rec)
 
                 # Mark the final playlist as played when all content is consumed.
                 # Without this, the last playlist in a rotation is never marked
@@ -1203,7 +1335,7 @@ class AutomationController:
                                     playlist_list
                                 )
                                 if objs:
-                                    self.next_prepared_playlists = objs
+                                    self._set_next_prepared_playlists(objs)
                                     logger.info(
                                         f"Found completed prepared playlists in "
                                         f"pending, will rotate to: {playlist_list}"
@@ -1296,6 +1428,10 @@ class AutomationController:
                     logger.info("Config changed, syncing...")
                     self.db.sync_playlists_from_config(self.config_manager.get_playlists())
                     await self._apply_config_changes_to_stream()
+
+                if self._title_refresh_needed:
+                    self._title_refresh_needed = False
+                    await self._refresh_title_with_previews()
 
                 if self._shutdown_requested:
                     await self._shutdown_cleanup()
