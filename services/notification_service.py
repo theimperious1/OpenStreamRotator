@@ -6,6 +6,7 @@ and status changes with local rate-limit tracking.
 import requests
 import time
 import logging
+import threading
 from typing import Optional
 from config.constants import (
     COLOR_SUCCESS, COLOR_ERROR, COLOR_WARNING, COLOR_INFO,
@@ -35,6 +36,9 @@ class NotificationService:
     def send_discord(self, title: str, description: str, color: int = COLOR_SUCCESS):
         """
         Send a Discord notification via webhook with rate-limit awareness.
+
+        The actual HTTP POST runs in a daemon thread so it never blocks
+        the caller (especially the async main loop).
         
         Args:
             title: Embed title
@@ -45,12 +49,16 @@ class NotificationService:
             logger.debug("Discord webhook not configured, skipping notification")
             return
 
-        # Pre-flight rate limit check (local)
+        # Pre-flight rate limit check (local) — keep in calling thread for accuracy
         now = time.time()
         self._discord_send_times = [t for t in self._discord_send_times if now - t < _DISCORD_RATE_LIMIT_WINDOW]
         if len(self._discord_send_times) >= _DISCORD_RATE_LIMIT_MAX:
             logger.warning(f"Discord rate limit reached ({_DISCORD_RATE_LIMIT_MAX}/{_DISCORD_RATE_LIMIT_WINDOW}s), dropping notification: {title}")
             return
+
+        # Record the send time now (before the thread starts) so rapid-fire
+        # callers respect the rate limit immediately
+        self._discord_send_times.append(time.time())
 
         payload = {
             "embeds": [{
@@ -60,10 +68,19 @@ class NotificationService:
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             }]
         }
-        
+
+        thread = threading.Thread(
+            target=self._send_discord_sync,
+            args=(payload, title),
+            daemon=True,
+        )
+        thread.start()
+
+    def _send_discord_sync(self, payload: dict, title: str):
+        """Execute the Discord webhook POST (runs in a background thread)."""
+        assert self.discord_webhook_url is not None  # guaranteed by send_discord() guard
         try:
             response = requests.post(self.discord_webhook_url, json=payload, timeout=10)
-            self._discord_send_times.append(time.time())
             if response.status_code == 429:
                 retry_after = response.json().get('retry_after', 1.0)
                 logger.warning(f"Discord 429 rate limited, retry_after={retry_after}s — dropping: {title}")
@@ -187,7 +204,7 @@ class NotificationService:
     def notify_automation_started(self):
         """Notify that the automation system has started."""
         self.send_discord(
-            "Automation Started",
+            "OpenStreamRotator Started",
             "24/7 stream automation is online",
             color=COLOR_SUCCESS
         )
@@ -195,7 +212,7 @@ class NotificationService:
     def notify_automation_shutdown(self):
         """Notify that the automation system is shutting down."""
         self.send_discord(
-            "Automation Shutting Down",
+            "OpenStreamRotator Shutting Down",
             "24/7 stream automation is going offline",
             color=COLOR_WARNING
         )
@@ -216,10 +233,18 @@ class NotificationService:
             color=COLOR_SUCCESS
         )
 
+    def notify_automation_info(self, message: str):
+        """Notify about non-error automation events (e.g. successful recovery)."""
+        self.send_discord(
+            "OpenStreamRotator",
+            message,
+            color=COLOR_SUCCESS
+        )
+
     def notify_automation_error(self, error_message: str):
         """Notify about general automation errors."""
         self.send_discord(
-            "Automation Error",
+            "OpenStreamRotator Error",
             f"Unexpected error: {error_message}",
             color=COLOR_ERROR
         )

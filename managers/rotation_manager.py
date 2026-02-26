@@ -148,8 +148,8 @@ class RotationManager:
         # the live folder.  We'll mark its playlist as played after the switch
         # so the selector knows every playlist in the old rotation was consumed.
         outgoing_last_video: str | None = None
-        if ctrl.file_lock_monitor:
-            outgoing_last_video = ctrl.file_lock_monitor.current_video_original_name
+        if ctrl.playback_monitor:
+            outgoing_last_video = ctrl.playback_monitor.current_video_original_name
 
         settings = ctrl.config_manager.get_settings()
         current_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
@@ -157,7 +157,7 @@ class RotationManager:
 
         try:
             # Prepare for switch
-            if not ctrl.content_switch_handler.prepare_for_switch(self._scene_rotation, self._vlc_source):
+            if not await ctrl.content_switch_handler.prepare_for_switch(self._scene_rotation, self._vlc_source):
                 logger.error("Failed to prepare for content switch")
                 ctrl.is_rotating = False
                 return False
@@ -195,8 +195,8 @@ class RotationManager:
                 ctrl.is_rotating = False
                 return False
 
-            # Initialize file lock monitor for this rotation
-            ctrl._initialize_file_lock_monitor(current_folder)
+            # Initialize playback monitor for this rotation
+            ctrl._initialize_playback_monitor(current_folder)
 
             # Update stream title and category based on current video
             try:
@@ -206,8 +206,8 @@ class RotationManager:
 
                     # Get category from first video in rotation
                     category = None
-                    if ctrl.file_lock_monitor:
-                        category = ctrl.file_lock_monitor.get_category_for_current_video()
+                    if ctrl.playback_monitor:
+                        category = ctrl.playback_monitor.get_category_for_current_video()
 
                     # Fallback: get category from first playlist
                     if not category and ctrl.content_switch_handler:
@@ -237,7 +237,7 @@ class RotationManager:
             # in the rotation never gets a transition away from it, so mark it
             # here to ensure every playlist in the rotation is counted.
             # We use the outgoing rotation's last video captured BEFORE the
-            # content switch — by now file_lock_monitor tracks the new rotation.
+            # content switch — by now playback_monitor tracks the new rotation.
             try:
                 if outgoing_last_video:
                     name = ctrl.db.mark_playlist_played_for_video(outgoing_last_video)
@@ -343,9 +343,24 @@ class RotationManager:
                 temp_playback_restored = True
                 pending_folder = temp_state.get('folder')
                 if pending_folder:
-                    ctrl._initialize_file_lock_monitor(pending_folder)
-                    if ctrl.file_lock_monitor:
-                        ctrl.file_lock_monitor.set_temp_playback_mode(True)
+                    # Use the main session cursor fields (kept current by
+                    # _tick_save_playback) to override the monitor's pointer
+                    # so it matches the video VLC is actually playing.
+                    resume_video = session.get('playback_current_video')
+                    ctrl._initialize_playback_monitor(pending_folder, resume_video)
+                    if ctrl.playback_monitor:
+                        ctrl.playback_monitor.set_temp_playback_mode(True)
+
+                    # Deferred seek — applied by _tick_save_playback once
+                    # VLC reports "playing" and the video name matches.
+                    resume_cursor = session.get('playback_cursor_ms', 0)
+                    if resume_video and resume_cursor and resume_cursor > 0:
+                        ctrl._pending_seek_ms = resume_cursor
+                        ctrl._pending_seek_video = resume_video
+                        logger.info(
+                            f"Pending resume after temp playback restore: "
+                            f"{resume_video} at {resume_cursor}ms ({resume_cursor/1000:.1f}s)"
+                        )
             else:
                 logger.warning("Failed to restore temp playback, continuing with normal session resume")
                 ctrl.db.clear_temp_playback_state(session['id'])
@@ -354,6 +369,9 @@ class RotationManager:
             # Temp playback owns the pending folder — prevent check_for_rotation
             # from starting new downloads into it while temp playback is active.
             ctrl.download_manager.downloads_triggered_this_rotation = True
+            # Update category so the stream shows the right game (restore()
+            # only sets the title, not the category).
+            await ctrl._update_category_for_current_video()
             return
 
         # Normal session resume
@@ -362,10 +380,6 @@ class RotationManager:
 
         # Restore prepared playlists from database
         await self._restore_prepared_playlists(session, settings)
-
-        if session.get('stream_title'):
-            assert ctrl.stream_manager is not None, "Stream manager not initialized"
-            await ctrl.stream_manager.update_title(session['stream_title'])
 
         # Re-sync the OBS VLC source with the actual live folder contents.
         # After a crash (e.g. network outage) the VLC source may still contain
@@ -381,15 +395,51 @@ class RotationManager:
             else:
                 logger.warning("Failed to re-sync VLC source to live folder on resume")
 
-        ctrl._initialize_file_lock_monitor()
+        ctrl._initialize_playback_monitor()
+
+        # Update category BEFORE title — Kick's API requires category_id on
+        # every channel update, so _update_category_for_current_video() must
+        # run first so the platform object caches the correct ID.  Otherwise
+        # update_title() falls back to the "Just Chatting" default.
         await ctrl._update_category_for_current_video()
+
+        if session.get('stream_title'):
+            assert ctrl.stream_manager is not None, "Stream manager not initialized"
+            # Regenerate the title with preview names if the next rotation is
+            # already prepared, rather than blindly restoring the stale DB value
+            # (which may be missing preview playlists from last session).
+            stored_title = session['stream_title']
+            playlists_json = session.get('playlists_selected')
+            if playlists_json:
+                try:
+                    playlist_ids = json.loads(playlists_json)
+                    playlist_names = []
+                    for pid in playlist_ids:
+                        p = ctrl.db.get_playlist(pid)
+                        if p:
+                            playlist_names.append(p['name'])
+                    if playlist_names:
+                        preview_names = ctrl._get_next_rotation_preview_names()
+                        title = ctrl.playlist_manager.generate_stream_title(
+                            playlist_names, preview_playlists=preview_names
+                        )
+                    else:
+                        title = stored_title
+                except Exception:
+                    title = stored_title
+            else:
+                title = stored_title
+            await ctrl.stream_manager.update_title(title)
+            if title != stored_title:
+                ctrl.db.update_session_stream_title(ctrl.current_session_id, title)
+                logger.info(f"Resumed with refreshed title: '{title}'")
 
         # Restore playback position from crash recovery
         saved_video = session.get('playback_current_video')
         saved_cursor = session.get('playback_cursor_ms', 0)
         if saved_video and saved_cursor and saved_cursor > 0:
-            if (ctrl.file_lock_monitor and
-                ctrl.file_lock_monitor.current_video_original_name == saved_video):
+            if (ctrl.playback_monitor and
+                ctrl.playback_monitor.current_video_original_name == saved_video):
                 ctrl._pending_seek_ms = saved_cursor
                 ctrl._pending_seek_video = saved_video
                 logger.info(f"Pending resume: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s) — waiting for VLC to start")
@@ -417,7 +467,7 @@ class RotationManager:
                 if files_exist:
                     playlist_objects = ctrl.db.get_playlists_with_ids_by_names(playlist_list)
                     if playlist_objects:
-                        ctrl.next_prepared_playlists = playlist_objects
+                        ctrl._set_next_prepared_playlists(playlist_objects)
                         logger.info(f"Restored prepared playlists from database: {playlist_list}")
                     else:
                         logger.warning(f"Could not fetch playlist objects for: {playlist_list}")

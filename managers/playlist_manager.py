@@ -88,18 +88,50 @@ class PlaylistManager:
         """
         return self.downloader.download_playlists(playlists, output_folder, verbose=verbose)
 
-    def generate_stream_title(self, playlists: List[str]) -> str:
-        """Generate stream title based on current playlists."""
+    def generate_stream_title(self, playlists: List[str],
+                              preview_playlists: Optional[List[str]] = None,
+                              max_length: int = 140) -> str:
+        """Generate stream title based on current playlists.
+
+        Playlist names are uppercased and joined with `` | ``.  If
+        *preview_playlists* is provided, they are appended (also uppercased)
+        after the current playlists, space permitting.
+
+        The result is truncated to *max_length* characters by dropping
+        trailing playlist names (preview first, then current) until it fits.
+
+        Args:
+            playlists: Playlist names for the current rotation.
+            preview_playlists: Optional upcoming-rotation names to append.
+            max_length: Hard character limit (default 140, Twitch's cap).
+        """
         settings = self.config.get_settings()
         template = settings.get(
             'stream_title_template',
             '24/7 @example1 / @example2 | {GAMES} | !playlist !streamtime !new'
         )
 
-        games_str = ' | '.join(p.upper() for p in playlists) if playlists else 'VARIETY'
+        SEPARATOR = ' | '
 
-        title = template.replace('{GAMES}', games_str)
-        return title
+        # Build the full list: current playlists, then preview playlists
+        all_names = [p.upper() for p in playlists] if playlists else []
+        if preview_playlists:
+            all_names.extend(p.upper() for p in preview_playlists)
+
+        if not all_names:
+            return template.replace('{GAMES}', 'VARIETY')[:max_length]
+
+        # Fit as many names as possible, dropping from the tail (previews first)
+        while all_names:
+            games_str = SEPARATOR.join(all_names)
+            title = template.replace('{GAMES}', games_str)
+            if len(title) <= max_length:
+                return title
+            # Drop the last name
+            all_names.pop()
+
+        # Even zero playlists may still exceed — hard-truncate as last resort
+        return template.replace('{GAMES}', 'VARIETY')[:max_length]
 
     def switch_content_folders(self, current_folder: str, next_folder: str) -> bool:
         """

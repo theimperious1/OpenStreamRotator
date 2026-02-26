@@ -364,6 +364,8 @@ class KickUpdater(StreamPlatform):
                 return False
         except Exception as e:
             if self._is_204_success(e):
+                if category_id:
+                    self.current_category_id = int(category_id)
                 logger.info(f"[{self.platform_name}] Update successful (API returned 204 No Content)")
                 return True
             logger.error(f"[{self.platform_name}] Update category failed with error: {type(e).__name__}: {e}", exc_info=True)
