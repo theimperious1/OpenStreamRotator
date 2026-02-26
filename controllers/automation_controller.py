@@ -403,6 +403,11 @@ class AutomationController:
 
         self._initialize_handlers()
 
+        # OBS restarted — the old stall count and render-frame baseline are
+        # stale.  Reset sampling so the freeze monitor starts fresh and
+        # doesn't false-positive from pre-restart data.
+        self.obs_freeze_monitor._reset_sampling()
+
         # Restore temp playback state on the new handler instance
         if temp_was_active and self.temp_playback_handler:
             self.temp_playback_handler._active = True
@@ -508,7 +513,7 @@ class AutomationController:
                 )
 
         monitor.mark_recovery_attempted(succeeded=True)
-        self.notification_service.notify_automation_error(
+        self.notification_service.notify_automation_info(
             "OBS freeze recovery SUCCEEDED — OBS was restarted and reconnected"
             + (" (streaming resumed)" if monitor.was_streaming else "")
             + ". Automatic recovery remains active for future freezes."

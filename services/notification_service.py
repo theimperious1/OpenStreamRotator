@@ -78,6 +78,7 @@ class NotificationService:
 
     def _send_discord_sync(self, payload: dict, title: str):
         """Execute the Discord webhook POST (runs in a background thread)."""
+        assert self.discord_webhook_url is not None  # guaranteed by send_discord() guard
         try:
             response = requests.post(self.discord_webhook_url, json=payload, timeout=10)
             if response.status_code == 429:
@@ -203,7 +204,7 @@ class NotificationService:
     def notify_automation_started(self):
         """Notify that the automation system has started."""
         self.send_discord(
-            "Automation Started",
+            "OpenStreamRotator Started",
             "24/7 stream automation is online",
             color=COLOR_SUCCESS
         )
@@ -211,7 +212,7 @@ class NotificationService:
     def notify_automation_shutdown(self):
         """Notify that the automation system is shutting down."""
         self.send_discord(
-            "Automation Shutting Down",
+            "OpenStreamRotator Shutting Down",
             "24/7 stream automation is going offline",
             color=COLOR_WARNING
         )
@@ -232,10 +233,18 @@ class NotificationService:
             color=COLOR_SUCCESS
         )
 
+    def notify_automation_info(self, message: str):
+        """Notify about non-error automation events (e.g. successful recovery)."""
+        self.send_discord(
+            "OpenStreamRotator",
+            message,
+            color=COLOR_SUCCESS
+        )
+
     def notify_automation_error(self, error_message: str):
         """Notify about general automation errors."""
         self.send_discord(
-            "Automation Error",
+            "OpenStreamRotator Error",
             f"Unexpected error: {error_message}",
             color=COLOR_ERROR
         )
