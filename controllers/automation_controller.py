@@ -839,6 +839,12 @@ class AutomationController:
             if self.playback_monitor.needs_vlc_refresh:
                 await self._handle_temp_playback_vlc_refresh()
                 return
+        elif self.playback_monitor and self.last_stream_status == "live":
+            # Drain stale events every tick while paused so they don't
+            # burst-fire false transitions when the streamer goes offline.
+            # check() is bypassed entirely during pause, so its internal
+            # drain paths never execute.
+            self.playback_monitor._drain_queue()
 
         # Trigger background download only if pending folder is empty and not already triggered
         # Skip on first loop after resume to avoid downloading when resuming into existing rotation
@@ -1012,6 +1018,12 @@ class AutomationController:
                 logger.debug("Streamer is OFFLINE but manual pause is active — staying paused")
                 return
             logger.info("Streamer is OFFLINE — resuming 24/7 stream")
+            # Drain any events that accumulated during the pause and
+            # suppress the 'started' event VLC will fire when the scene
+            # switch makes VLC visible/active again.
+            if self.playback_monitor:
+                self.playback_monitor._drain_queue()
+                self.playback_monitor._suppress_started += 1
             if self.obs_controller:
                 self.obs_controller.switch_scene(SCENE_STREAM)
             # Restore playback position — VLC may have lost its cursor while paused
