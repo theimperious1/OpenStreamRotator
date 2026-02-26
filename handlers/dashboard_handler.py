@@ -598,7 +598,9 @@ class DashboardHandler:
 
         if ctrl.file_lock_monitor and ctrl.obs_controller:
             try:
-                ctrl._saved_live_video = ctrl.file_lock_monitor.current_video
+                # Use original_name (prefix-stripped) so it matches the
+                # current_video_original_name used in the deferred-seek check.
+                ctrl._saved_live_video = ctrl.file_lock_monitor.current_video_original_name
                 status = ctrl.obs_controller.get_media_input_status(self._vlc_source_name)
                 if status and status.get('media_cursor') is not None:
                     ctrl._saved_live_cursor_ms = int(status['media_cursor'])

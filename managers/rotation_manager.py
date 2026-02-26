@@ -144,6 +144,13 @@ class RotationManager:
         logger.info(f"Executing content switch")
         ctrl.is_rotating = True
 
+        # Capture the last video of the OUTGOING rotation before we destroy
+        # the live folder.  We'll mark its playlist as played after the switch
+        # so the selector knows every playlist in the old rotation was consumed.
+        outgoing_last_video: str | None = None
+        if ctrl.file_lock_monitor:
+            outgoing_last_video = ctrl.file_lock_monitor.current_video_original_name
+
         settings = ctrl.config_manager.get_settings()
         current_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
         next_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
@@ -224,15 +231,24 @@ class RotationManager:
             pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
             ctrl.playlist_manager.cleanup_temp_downloads(pending_folder)
 
-            # Mark playlists as played so the selector rotates through them
+            # Mark playlists as played so the selector rotates through them.
+            # Most playlists are marked individually during video transitions
+            # (when the playlist changes between videos).  The *last* playlist
+            # in the rotation never gets a transition away from it, so mark it
+            # here to ensure every playlist in the rotation is counted.
+            # We use the outgoing rotation's last video captured BEFORE the
+            # content switch — by now file_lock_monitor tracks the new rotation.
             try:
+                if outgoing_last_video:
+                    name = ctrl.db.mark_playlist_played_for_video(outgoing_last_video)
+                    if name:
+                        logger.info(f"Marked final playlist '{name}' as played (rotation ending)")
+
                 session = ctrl.db.get_current_session()
                 if session:
                     playlists_selected = session.get('playlists_selected', '')
                     if playlists_selected:
                         pids = json.loads(playlists_selected)
-                        for pid in pids:
-                            ctrl.db.update_playlist_played(pid)
                         pls = ctrl.playlist_manager.get_playlists_by_ids(pids)
                         ctrl.notification_service.notify_rotation_switched([p['name'] for p in pls])
             except Exception:

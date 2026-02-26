@@ -492,9 +492,6 @@ class TempPlaybackHandler:
                         if playlist_objects:
                             playlist_ids = [p['id'] for p in playlist_objects]
                             self.db.update_session_playlists_selected(self.current_session_id, playlist_ids)
-                            # Mark playlists as played so the selector rotates through them
-                            for pid in playlist_ids:
-                                self.db.update_playlist_played(pid)
                             logger.info(f"Updated playlists_selected to match temp playback content: {next_playlist_names}")
                 except Exception as e:
                     logger.warning(f"Failed to update playlists_selected after temp playback exit: {e}")

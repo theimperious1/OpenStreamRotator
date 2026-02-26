@@ -793,6 +793,18 @@ class AutomationController:
                 # Log the completed video in playback_log
                 if previous_video:
                     self.db.log_playback(previous_video, session.get('id'))
+
+                # Per-playlist last_played: when the playlist changes between
+                # consecutive videos the previous playlist's content is done.
+                if previous_video and current_video:
+                    prev_rec = self.db.get_video_by_filename(previous_video)
+                    cur_rec = self.db.get_video_by_filename(current_video)
+                    prev_pl = prev_rec.get('playlist_name') if prev_rec else None
+                    cur_pl = cur_rec.get('playlist_name') if cur_rec else None
+                    if prev_pl and prev_pl != cur_pl:
+                        name = self.db.mark_playlist_played_for_video(previous_video)
+                        if name:
+                            logger.info(f"Marked playlist '{name}' as played (last video transitioned)")
                 
                 if current_video and self.content_switch_handler and self.stream_manager:
                     try:

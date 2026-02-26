@@ -275,6 +275,28 @@ class DatabaseManager:
                 WHERE id = ?
             """, (datetime.now(timezone.utc), datetime.now(timezone.utc), playlist_id))
 
+    def mark_playlist_played_for_video(self, video_filename: str) -> Optional[str]:
+        """Mark the playlist that owns *video_filename* as played.
+
+        Looks up the video in the database, finds its playlist, and calls
+        :meth:`update_playlist_played`.  Returns the playlist name on
+        success (for logging) or ``None`` if the video/playlist could not
+        be resolved.
+        """
+        try:
+            video = self.get_video_by_filename(video_filename)
+            if not video:
+                return None
+            playlist_id = video.get('playlist_id')
+            playlist_name = video.get('playlist_name')
+            if not playlist_id:
+                return None
+            self.update_playlist_played(playlist_id)
+            return playlist_name
+        except Exception as e:
+            logger.warning(f"Failed to mark playlist played for video {video_filename}: {e}")
+            return None
+
 
     def log_playback(self, video_filename: str, session_id: Optional[int] = None) -> None:
         """Record a video playback event in the playback log.
