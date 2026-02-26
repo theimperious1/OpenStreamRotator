@@ -3,10 +3,7 @@
 ## Video Playback
 
 ### Skipping to the end of a video may cause it to loop
-You can skip forward through videos in OBS, but if you skip straight to the very end, VLC may loop the video instead of advancing to the next one. The system detects transitions by monitoring file locks, and a skip-to-end can interfere with that detection. If this happens, just skip forward again or let it play through the loop — it will resolve on the next natural transition.
-
-### The last ~1.5 seconds of the final video in a rotation may be cut off
-The system detects the end of the last video by polling VLC's playback position. When less than 1.5 seconds remain, it considers the video done and triggers the next rotation. This only affects the **last** video before a rotation switch — all other videos play to completion.
+You can skip forward through videos in OBS, but if you skip straight to the very end, VLC may loop the video instead of advancing to the next one. The OBS VLC source treats a skip-to-end differently from a natural track advance, so the playback monitor may not detect it as a transition. If this happens, just skip forward again or let it play through the loop — it will resolve on the next natural transition.
 
 ### Only certain video formats are recognized
 The system only picks up files with these extensions: `.mp4`, `.mkv`, `.avi`, `.webm`, `.flv`, `.mov`. Other file types in the video folders are ignored. This is rarely an issue since yt-dlp downloads in supported formats, but manually added videos in other formats won't be played.
@@ -23,9 +20,6 @@ The OBS source used for playback must be a **VLC Video Source** (`vlc_source`), 
 
 ### Brief rotation screen flash during content switches
 When the system switches content between rotations or transitions in/out of temp playback, it briefly shows the Rotation screen scene (~1–3 seconds) while it swaps folders and reloads VLC. Viewers will see whatever image you've placed in that scene during this transition.
-
-### Manually switching OBS scenes pauses video tracking
-If you manually switch to a different scene in OBS, the file lock monitor stops tracking video transitions. VLC continues playing in the background, but no videos are deleted or advanced. When you switch back to the stream scene, monitoring resumes. This is by design to prevent accidental file deletions.
 
 ### OBS disconnection causes a temporary pause in automation
 If OBS crashes or the WebSocket connection drops, the system automatically attempts to reconnect. During reconnection attempts, whatever was last showing in OBS continues to display, but no video transitions are tracked. Once reconnected, the system reinitializes and resumes. A Discord notification is sent when the disconnect is detected.

@@ -24,7 +24,7 @@ from managers.rotation_manager import RotationManager
 from managers.platform_manager import PlatformManager
 from managers.prepared_rotation_manager import PreparedRotationManager
 from services.notification_service import NotificationService
-from playback.file_lock_monitor import FileLockMonitor
+from playback.playback_monitor import PlaybackMonitor
 from services.twitch_live_checker import TwitchLiveChecker
 from services.kick_live_checker import KickLiveChecker
 from handlers.content_switch_handler import ContentSwitchHandler
@@ -91,11 +91,12 @@ class AutomationController:
         self.obs_connection = OBSConnectionManager(
             host=OBS_HOST, port=OBS_PORT, password=OBS_PASSWORD,
             shutdown_event=self._shutdown_event,
+            vlc_source_name=VLC_SOURCE_NAME,
         )
 
         # Services
         self.notification_service = NotificationService(DISCORD_WEBHOOK_URL)
-        self.file_lock_monitor: Optional[FileLockMonitor] = None
+        self.playback_monitor: Optional[PlaybackMonitor] = None
 
         # Download manager
         self.download_manager = DownloadManager(
@@ -330,6 +331,7 @@ class AutomationController:
             self.obs_connection = OBSConnectionManager(
                 host=OBS_HOST, port=OBS_PORT, password=OBS_PASSWORD,
                 shutdown_event=self._shutdown_event,
+                vlc_source_name=VLC_SOURCE_NAME,
             )
             # obs_controller will be reconstructed on next tick's connect attempt
 
@@ -368,7 +370,7 @@ class AutomationController:
             get_background_download_in_progress=lambda: self.download_manager.background_download_in_progress,
             set_background_download_in_progress=lambda v: setattr(self.download_manager, 'background_download_in_progress', v),
             trigger_next_rotation=self.download_manager.trigger_next_rotation_async,
-            reinitialize_file_lock_monitor=self._initialize_file_lock_monitor,
+            reinitialize_playback_monitor=self._initialize_playback_monitor,
             update_category_after_switch=self._update_category_for_current_video
         )
         
@@ -392,10 +394,10 @@ class AutomationController:
             if temp_was_active and self.temp_playback_handler else None
         )
 
-        # Capture file lock monitor temp mode
+        # Capture playback monitor temp mode
         monitor_was_temp = (
-            self.file_lock_monitor is not None
-            and self.file_lock_monitor._temp_playback_mode
+            self.playback_monitor is not None
+            and self.playback_monitor._temp_playback_mode
         )
 
         self._initialize_handlers()
@@ -407,12 +409,12 @@ class AutomationController:
                 self.temp_playback_handler.set_session_id(temp_session_id)
             logger.info("Preserved temp playback active state across OBS reconnect")
 
-        self._initialize_file_lock_monitor()
+        self._initialize_playback_monitor()
 
-        # Restore temp mode on the new file lock monitor
-        if monitor_was_temp and self.file_lock_monitor:
-            self.file_lock_monitor.set_temp_playback_mode(True)
-            logger.info("Preserved file lock monitor temp playback mode across OBS reconnect")
+        # Restore temp mode on the new playback monitor
+        if monitor_was_temp and self.playback_monitor:
+            self.playback_monitor.set_temp_playback_mode(True)
+            logger.info("Preserved playback monitor temp playback mode across OBS reconnect")
 
         # Restore playback position — VLC restarts from the beginning after
         # OBS reconnects, so use the deferred-seek mechanism (same as crash
@@ -442,10 +444,10 @@ class AutomationController:
         # 2. Save current playback position for seek-after-reconnect
         self._tick_save_playback()
 
-        # 2.5 Suspend file lock monitor so VLC releasing locks during kill
-        # isn't misread as a video transition (which would delete the file).
-        if self.file_lock_monitor:
-            self.file_lock_monitor.suspend()
+        # 2.5 Suspend playback monitor so events during OBS kill/restart
+        # aren't misread as video transitions (which would delete files).
+        if self.playback_monitor:
+            self.playback_monitor.suspend()
 
         # 3. Kill + relaunch OBS
         monitor.kill_obs()
@@ -516,11 +518,11 @@ class AutomationController:
     def save_playback_on_exit(self):
         """Save current state when program exits."""
         # Save final playback position for crash recovery
-        if self.current_session_id and self.file_lock_monitor and self.obs_controller:
+        if self.current_session_id and self.playback_monitor and self.obs_controller:
             try:
                 status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
                 if status and status.get('media_cursor') is not None:
-                    current_video = self.file_lock_monitor.current_video_original_name
+                    current_video = self.playback_monitor.current_video_original_name
                     self.db.save_playback_position(
                         self.current_session_id,
                         status['media_cursor'],
@@ -556,8 +558,8 @@ class AutomationController:
         """Initialize enabled streaming platforms."""
         self.platform_manager.setup(self.twitch_live_checker)
 
-    def _initialize_file_lock_monitor(self, video_folder: Optional[str] = None):
-        """Initialize file lock monitor for current rotation.
+    def _initialize_playback_monitor(self, video_folder: Optional[str] = None):
+        """Initialize playback monitor for current rotation.
         
         Args:
             video_folder: Path to the video folder to monitor. If None, uses config default.
@@ -569,30 +571,31 @@ class AutomationController:
             settings = self.config_manager.get_settings()
             video_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
         
-        if self.file_lock_monitor is None:
-            self.file_lock_monitor = FileLockMonitor(
+        if self.playback_monitor is None:
+            self.playback_monitor = PlaybackMonitor(
                 self.db, self.obs_controller, VLC_SOURCE_NAME,
+                event_queue=self.obs_connection.media_event_queue,
                 config=self.config_manager, scene_stream=SCENE_STREAM
             )
         else:
             # Update reference after OBS reconnect (new OBSController instance)
-            self.file_lock_monitor.obs_controller = self.obs_controller
+            self.playback_monitor.obs_controller = self.obs_controller
         
-        self.file_lock_monitor.initialize(str(video_folder))
+        self.playback_monitor.initialize(str(video_folder))
 
     async def _update_category_for_current_video(self) -> None:
         """Update stream category based on the video currently playing.
         
-        Called after file lock monitor (re)initialization to ensure the category
+        Called after playback monitor (re)initialization to ensure the category
         matches the actual video VLC is playing.
         """
-        if not self.file_lock_monitor or not self.stream_manager:
+        if not self.playback_monitor or not self.stream_manager:
             return
         
         # Ensure any pending video registrations are in DB first
         self.download_manager.process_video_registration_queue()
         
-        category = self.file_lock_monitor.get_category_for_current_video()
+        category = self.playback_monitor.get_category_for_current_video()
         if category:
             try:
                 await self.stream_manager.update_category(category)
@@ -649,7 +652,7 @@ class AutomationController:
     async def _handle_temp_playback_vlc_refresh(self) -> None:
         """Refresh VLC source at the natural end of a video during temp playback.
         
-        Called when the file lock monitor detects the last video finished while
+        Called when the playback monitor detects the last video finished while
         in temp playback mode.  New files may have been downloaded since VLC was
         last loaded — this is the safe moment to reload (video just ended, no
         mid-video disruption for viewers).
@@ -658,21 +661,21 @@ class AutomationController:
         If no new files     → delete the finished video, mark consumed, let the
                               normal temp-playback-exit flow handle it.
         """
-        if not self.file_lock_monitor:
+        if not self.playback_monitor:
             return
         
         settings = self.config_manager.get_settings()
         pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
         
-        # Stop VLC to release file locks before deleting the finished video.
-        # A scene switch alone doesn't release VLC's grip on the file.
+        # Stop VLC to release its grip on the file before deleting.
+        # A scene switch alone doesn't make VLC release the file handle.
         if self.obs_controller:
             self.obs_controller.switch_scene(SCENE_ROTATION_SCREEN)
             self.obs_controller.stop_vlc_source(VLC_SOURCE_NAME)
             await asyncio.sleep(0.5)
         
         # Delete the finished video now (monitor deferred deletion for us)
-        finished_video = self.file_lock_monitor.current_video
+        finished_video = self.playback_monitor.current_video
         undeletable_file = None
         if finished_video:
             filepath = os.path.join(pending_folder, finished_video)
@@ -705,10 +708,10 @@ class AutomationController:
             self.obs_controller.switch_scene(SCENE_STREAM)
             
             # Reinitialize monitor to track the refreshed file list
-            self.file_lock_monitor.clear_vlc_refresh_flag()
-            self._initialize_file_lock_monitor(pending_folder)
-            if self.file_lock_monitor:
-                self.file_lock_monitor.set_temp_playback_mode(True)
+            self.playback_monitor.clear_vlc_refresh_flag()
+            self._initialize_playback_monitor(pending_folder)
+            if self.playback_monitor:
+                self.playback_monitor.set_temp_playback_mode(True)
             
             # Update category for the new video
             await self._update_category_for_current_video()
@@ -717,8 +720,8 @@ class AutomationController:
         else:
             # No new files — mark consumed so normal exit flow kicks in
             logger.info("No new files in pending after last temp video — marking consumed")
-            self.file_lock_monitor.clear_vlc_refresh_flag()
-            self.file_lock_monitor._all_content_consumed = True
+            self.playback_monitor.clear_vlc_refresh_flag()
+            self.playback_monitor._all_content_consumed = True
 
     async def _try_recover_session(self) -> None:
         """Attempt to start a fresh session when none is active.
@@ -780,10 +783,10 @@ class AutomationController:
             await self._try_recover_session()
             return
 
-        # Check file lock monitor for video transitions
+        # Check playback monitor for video transitions
         # Skip when on the pause screen — VLC isn't playing so all files appear unlocked
-        if self.file_lock_monitor and self.last_stream_status != "live":
-            check_result = self.file_lock_monitor.check()
+        if self.playback_monitor and self.last_stream_status != "live":
+            check_result = self.playback_monitor.check()
             
             if check_result['transition']:
                 # Video transition detected - update stream category
@@ -805,6 +808,16 @@ class AutomationController:
                         name = self.db.mark_playlist_played_for_video(previous_video)
                         if name:
                             logger.info(f"Marked playlist '{name}' as played (last video transitioned)")
+
+                # Mark the final playlist as played when all content is consumed.
+                # Without this, the last playlist in a rotation is never marked
+                # because there's no "next" video to trigger the playlist-change
+                # check above.  (execute_content_switch also does this for normal
+                # rotations, but temp playback activation bypasses that path.)
+                if previous_video and not current_video and check_result.get('all_consumed'):
+                    name = self.db.mark_playlist_played_for_video(previous_video)
+                    if name:
+                        logger.info(f"Marked playlist '{name}' as played (rotation content exhausted)")
                 
                 if current_video and self.content_switch_handler and self.stream_manager:
                     try:
@@ -814,7 +827,7 @@ class AutomationController:
                         # Optional video transition notification
                         settings = self.config_manager.get_settings()
                         if settings.get('notify_video_transitions', False):
-                            cat_dict = self.file_lock_monitor.get_category_for_current_video() if self.file_lock_monitor else None
+                            cat_dict = self.playback_monitor.get_category_for_current_video() if self.playback_monitor else None
                             cat_label = " / ".join(f"{k}: {v}" for k, v in cat_dict.items()) if cat_dict else None
                             self.notification_service.notify_video_transition(current_video, cat_label)
                     except Exception as e:
@@ -823,7 +836,7 @@ class AutomationController:
             # Handle VLC refresh during temp playback: last video finished but
             # new files may have been downloaded.  Refresh VLC at this natural
             # transition point (no mid-video disruption) and reinitialize.
-            if self.file_lock_monitor.needs_vlc_refresh:
+            if self.playback_monitor.needs_vlc_refresh:
                 await self._handle_temp_playback_vlc_refresh()
                 return
 
@@ -847,7 +860,7 @@ class AutomationController:
             self._just_resumed_session = False
 
         # Check if all content is consumed
-        all_consumed = self.file_lock_monitor is not None and self.file_lock_monitor.all_content_consumed
+        all_consumed = self.playback_monitor is not None and self.playback_monitor.all_content_consumed
         has_pending_content = not self.playlist_manager.is_folder_empty(pending_folder)
 
         # ── Prepared rotation finished → restore live playback ──
@@ -893,10 +906,10 @@ class AutomationController:
                 activated = await self.temp_playback_handler.activate(session)
                 
                 if activated:
-                    # Re-initialize file lock monitor to watch the pending folder
-                    self._initialize_file_lock_monitor(pending_folder)
-                    if self.file_lock_monitor:
-                        self.file_lock_monitor.set_temp_playback_mode(True)
+                    # Re-initialize playback monitor to watch the pending folder
+                    self._initialize_playback_monitor(pending_folder)
+                    if self.playback_monitor:
+                        self.playback_monitor.set_temp_playback_mode(True)
                     
                     # Correct the category based on the actual video VLC is playing
                     # (activate() guesses from playlist order, but VLC picks alphabetically)
@@ -921,12 +934,15 @@ class AutomationController:
             await self.rotation_manager.handle_normal_rotation()
             return
 
-    def _check_live_status(self, ignore_streamer: bool) -> None:
+    async def _check_live_status(self, ignore_streamer: bool) -> None:
         """Check if the streamer is live and toggle pause/stream scenes accordingly.
 
         Checks both Twitch and Kick if configured. Either platform being live
         triggers a pause. Skipped entirely when neither TARGET_TWITCH_STREAMER
         nor TARGET_KICK_STREAMER is set.
+
+        HTTP calls to Twitch/Kick APIs run in background threads via
+        ``asyncio.to_thread`` so they never block the event loop.
         """
         target_twitch = os.getenv("TARGET_TWITCH_STREAMER", "").split("#")[0].strip()
         target_kick = os.getenv("TARGET_KICK_STREAMER", "").split("#")[0].strip()
@@ -947,25 +963,25 @@ class AutomationController:
                 self.last_stream_status = "offline"
             return
 
-        # Refresh tokens for whichever platform(s) are configured
+        # Refresh tokens in background threads (each can block up to 10s)
         if target_twitch and self.twitch_live_checker:
             try:
-                self.twitch_live_checker.refresh_token_if_needed()
+                await asyncio.to_thread(self.twitch_live_checker.refresh_token_if_needed)
             except Exception as e:
                 logger.warning(f"Failed to refresh Twitch app token: {e}")
 
         if target_kick and self.kick_live_checker:
             try:
-                self.kick_live_checker.refresh_token_if_needed()
+                await asyncio.to_thread(self.kick_live_checker.refresh_token_if_needed)
             except Exception as e:
                 logger.warning(f"Failed to refresh Kick app token: {e}")
 
-        # Check live status on each configured platform
+        # Check live status in background threads (each can block up to 10s)
         is_live = False
         if target_twitch and self.twitch_live_checker:
-            is_live = self.twitch_live_checker.is_stream_live(target_twitch)
+            is_live = await asyncio.to_thread(self.twitch_live_checker.is_stream_live, target_twitch)
         if not is_live and target_kick and self.kick_live_checker:
-            is_live = self.kick_live_checker.is_stream_live(target_kick)
+            is_live = await asyncio.to_thread(self.kick_live_checker.is_stream_live, target_kick)
 
         if ignore_streamer:
             is_live = False
@@ -973,11 +989,11 @@ class AutomationController:
         if is_live and self.last_stream_status != "live":
             logger.info("Streamer is LIVE — pausing 24/7 stream")
             # Save playback position before pausing so we can resume later
-            if self.current_session_id and self.file_lock_monitor and self.obs_controller:
+            if self.current_session_id and self.playback_monitor and self.obs_controller:
                 try:
                     status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
                     if status and status.get('media_cursor') is not None:
-                        current_video = self.file_lock_monitor.current_video_original_name
+                        current_video = self.playback_monitor.current_video_original_name
                         self.db.save_playback_position(
                             self.current_session_id,
                             status['media_cursor'],
@@ -988,8 +1004,6 @@ class AutomationController:
                     logger.debug(f"Failed to save playback position before pause: {e}")
             if self.obs_controller:
                 self.obs_controller.switch_scene(SCENE_PAUSE)
-            if self.file_lock_monitor:
-                self.file_lock_monitor._pending_transition_file = None
             self.last_stream_status = "live"
             self.notification_service.notify_streamer_live()
         elif not is_live and self.last_stream_status != "offline":
@@ -1016,14 +1030,14 @@ class AutomationController:
 
     def _tick_save_playback(self) -> None:
         """Save playback position every tick and apply deferred seek if pending."""
-        if not (self.current_session_id and self.file_lock_monitor and self.obs_controller):
+        if not (self.current_session_id and self.playback_monitor and self.obs_controller):
             return
         try:
             status = self.obs_controller.get_media_input_status(VLC_SOURCE_NAME)
             if not status or status.get('media_cursor') is None:
                 return
 
-            current_video = self.file_lock_monitor.current_video_original_name
+            current_video = self.playback_monitor.current_video_original_name
             self.db.save_playback_position(
                 self.current_session_id,
                 status['media_cursor'],
@@ -1174,8 +1188,8 @@ class AutomationController:
                     logger.info(f"ignore_streamer changed to {ignore_streamer}, forcing live status recheck")
                 last_ignore_streamer = ignore_streamer
 
-                if loop_count % 60 == 0 or ignore_streamer_changed:
-                    self._check_live_status(ignore_streamer)
+                if loop_count % 15 == 0 or ignore_streamer_changed:
+                    await self._check_live_status(ignore_streamer)
 
                 self.download_manager.process_video_registration_queue()
                 self.download_manager.process_pending_database_operations()

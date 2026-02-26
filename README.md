@@ -10,7 +10,7 @@ Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays the
 
 1. **Playlist selection** — Each rotation, the system picks a configurable number of enabled playlists (prioritizing least-recently-played) and downloads their videos via yt-dlp into a pending folder.
 2. **Content switch** — Once downloads finish, OBS briefly shows a transition scene while the live folder is swapped with the new content. VLC reloads and playback begins.
-3. **File lock monitoring** — The system detects video transitions by checking OS-level file locks. On Windows, VLC locks the file it's currently playing. When a lock is released, that video is deleted and the next one is identified. No position tracking needed.
+3. **Playback monitoring** — The system detects video transitions via OBS WebSocket media events (`MediaInputPlaybackStarted` / `MediaInputPlaybackEnded`). When a video finishes, it's deleted and the next one is tracked automatically.
 4. **Rotation trigger** — When all videos have been played and deleted (folder is empty), the system triggers the next rotation automatically.
 5. **Stream metadata** — The stream title and category are updated on all enabled platforms (Kick, Twitch) each rotation. Categories update per-video based on which playlist the video came from.
 6. **Temp playback** — If the current content runs out before the next rotation's downloads finish, the system temporarily plays already-downloaded files from the pending folder to avoid dead air.
@@ -288,7 +288,7 @@ The system will:
 5. Videos are renamed with ordering prefixes (`01_video.mp4`, `02_video.mp4`, etc.) so VLC plays them grouped by playlist
 6. VLC reloads, OBS switches back to the playback scene
 7. Stream title and category are updated on all enabled platforms
-8. The file lock monitor begins tracking playback; as each video finishes, it's deleted
+8. The playback monitor begins tracking playback; as each video finishes, it's deleted
 9. When all content is consumed, the cycle repeats
 
 ### Temp Playback
@@ -328,7 +328,7 @@ Freeze recovery is retried on future freezes as long as the previous recovery su
 
 ### Skipping Videos
 
-You can skip videos directly in OBS by advancing the VLC source. The file lock monitor will detect the transition naturally — the skipped video's lock is released, it gets deleted, and the next video is tracked.
+You can skip videos directly in OBS by advancing the VLC source. The playback monitor will detect the transition naturally — the skipped video gets deleted and the next video is tracked.
 
 ### Graceful Shutdown
 
@@ -415,7 +415,7 @@ OpenStreamRotator/
 │   ├── rotation_manager.py          # Rotation lifecycle management
 │   └── stream_manager.py            # Stream title and category updates
 ├── playback/
-│   └── file_lock_monitor.py         # File-lock-based video transition detection
+│   └── playback_monitor.py          # Event-driven video transition detection via OBS WebSocket
 ├── services/
 │   ├── kick_live_checker.py         # Kick live status polling
 │   ├── notification_service.py      # Discord webhook notifications

@@ -3,6 +3,7 @@
 Handles OAuth token management with SQLite-backed storage,
 stream title and category updates via the Helix API.
 """
+import asyncio
 import logging
 import os
 import re
@@ -294,7 +295,8 @@ class TwitchUpdater(StreamPlatform):
         data = {"title": title}
 
         try:
-            response = self._request_with_refresh(
+            response = await asyncio.to_thread(
+                self._request_with_refresh,
                 "PATCH", url, params=params, json=data
             )
             response.raise_for_status()
@@ -306,7 +308,7 @@ class TwitchUpdater(StreamPlatform):
 
     async def update_category(self, category_name: str) -> bool:
         """Update Twitch stream category/game."""
-        game_id = self._get_game_id(category_name)
+        game_id = await self._get_game_id(category_name)
         if not game_id:
             logger.warning(f"[{self.platform_name}] Could not find game ID for: {category_name}")
             return False
@@ -316,7 +318,8 @@ class TwitchUpdater(StreamPlatform):
         data = {"game_id": game_id}
 
         try:
-            response = self._request_with_refresh(
+            response = await asyncio.to_thread(
+                self._request_with_refresh,
                 "PATCH", url, params=params, json=data
             )
             response.raise_for_status()
@@ -326,13 +329,19 @@ class TwitchUpdater(StreamPlatform):
             self.log_error("Update category", e)
             return False
 
-    def _get_game_id(self, game_name: str) -> Optional[str]:
-        """Get Twitch game ID from game name."""
+    async def _get_game_id(self, game_name: str) -> Optional[str]:
+        """Get Twitch game ID from game name.
+
+        Runs the blocking ``requests`` call in a background thread
+        so the event loop stays responsive.
+        """
         url = f"{self.base_url}/games"
         params = {"name": game_name}
 
         try:
-            response = self._request_with_refresh("GET", url, params=params)
+            response = await asyncio.to_thread(
+                self._request_with_refresh, "GET", url, params=params
+            )
             response.raise_for_status()
             data = response.json()
 
@@ -350,12 +359,13 @@ class TwitchUpdater(StreamPlatform):
         data = {"title": title}
 
         if category:
-            game_id = self._get_game_id(category)
+            game_id = await self._get_game_id(category)
             if game_id:
                 data["game_id"] = game_id
 
         try:
-            response = self._request_with_refresh(
+            response = await asyncio.to_thread(
+                self._request_with_refresh,
                 "PATCH", url, params=params, json=data
             )
             response.raise_for_status()

@@ -60,7 +60,7 @@ class TempPlaybackHandler:
         # Callbacks for automation controller coordination
         self._auto_resume_downloads_callback: Optional[Callable] = None
         self._trigger_next_rotation_callback: Optional[Callable] = None
-        self._reinitialize_file_lock_monitor_callback: Optional[Callable] = None
+        self._reinitialize_playback_monitor_callback: Optional[Callable] = None
         self._update_category_after_switch_callback: Optional[Callable] = None
         
         # Reference to background download flag (shared with automation controller)
@@ -77,7 +77,7 @@ class TempPlaybackHandler:
         get_background_download_in_progress: Optional[Callable[[], bool]] = None,
         set_background_download_in_progress: Optional[Callable[[bool], None]] = None,
         trigger_next_rotation: Optional[Callable] = None,
-        reinitialize_file_lock_monitor: Optional[Callable] = None,
+        reinitialize_playback_monitor: Optional[Callable] = None,
         update_category_after_switch: Optional[Callable] = None
     ) -> None:
         """Set callbacks for coordination with automation controller."""
@@ -85,7 +85,7 @@ class TempPlaybackHandler:
         self._get_background_download_in_progress = get_background_download_in_progress
         self._set_background_download_in_progress = set_background_download_in_progress
         self._trigger_next_rotation_callback = trigger_next_rotation
-        self._reinitialize_file_lock_monitor_callback = reinitialize_file_lock_monitor
+        self._reinitialize_playback_monitor_callback = reinitialize_playback_monitor
         self._update_category_after_switch_callback = update_category_after_switch
 
     @property
@@ -520,9 +520,9 @@ class TempPlaybackHandler:
             if self.current_session_id:
                 self.db.clear_temp_playback_state(self.current_session_id)
             
-            # Re-initialize file lock monitor to watch the live folder
-            if self._reinitialize_file_lock_monitor_callback:
-                self._reinitialize_file_lock_monitor_callback(live_folder)
+            # Re-initialize playback monitor to watch the live folder
+            if self._reinitialize_playback_monitor_callback:
+                self._reinitialize_playback_monitor_callback(live_folder)
             
             # Update category based on the actual video now playing
             if self._update_category_after_switch_callback:

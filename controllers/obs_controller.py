@@ -62,7 +62,7 @@ class OBSController:
             return None
 
     def stop_vlc_source(self, source_name: str) -> bool:
-        """Stop VLC source playback to release file locks."""
+        """Stop VLC source playback to release file handles."""
         try:
             # Set the playlist to empty to stop playback and release files
             self.obs_client.set_input_settings(
@@ -440,7 +440,7 @@ class OBSController:
         Args:
             scene_rotation_screen: Name of Rotation screen scene
             vlc_source_name: Name of VLC source
-            wait_seconds: Seconds to wait for OS to release file locks
+            wait_seconds: Seconds to wait for VLC to release file handles
         
         Returns:
             True if successful
@@ -453,7 +453,7 @@ class OBSController:
         if not self.stop_vlc_source(vlc_source_name):
             return False
         
-        # Wait for file locks to release
+        # Wait for VLC to release file handles
         time.sleep(wait_seconds)
         return True
 

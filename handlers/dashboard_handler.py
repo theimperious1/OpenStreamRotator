@@ -26,7 +26,7 @@ class DashboardHandler:
     """Owns all web-dashboard-facing logic.
 
     Receives a back-reference to the :class:`AutomationController` so it can
-    read/write shared state (file lock monitor, OBS controller, managers, etc.)
+    read/write shared state (playback monitor, OBS controller, managers, etc.)
     without duplicating it.
     """
 
@@ -83,8 +83,8 @@ class DashboardHandler:
         current_playlist: Optional[str] = None
         current_category: Optional[dict] = None
 
-        if ctrl.file_lock_monitor:
-            current_video = ctrl.file_lock_monitor.current_video_original_name
+        if ctrl.playback_monitor:
+            current_video = ctrl.playback_monitor.current_video_original_name
 
         session = ctrl.db.get_current_session()
         if session:
@@ -101,8 +101,8 @@ class DashboardHandler:
                 except Exception:
                     pass
 
-        if ctrl.file_lock_monitor:
-            current_category = ctrl.file_lock_monitor.get_category_for_current_video()
+        if ctrl.playback_monitor:
+            current_category = ctrl.playback_monitor.get_category_for_current_video()
 
         # ── Extended data ──
 
@@ -164,8 +164,8 @@ class DashboardHandler:
         # Video queue (files in the current rotation folder)
         queue: list[str] = []
         try:
-            if ctrl.file_lock_monitor and ctrl.file_lock_monitor.video_folder:
-                queue = ctrl.file_lock_monitor._get_video_files()
+            if ctrl.playback_monitor and ctrl.playback_monitor.video_folder:
+                queue = ctrl.playback_monitor._get_video_files()
         except Exception:
             pass
 
@@ -185,8 +185,8 @@ class DashboardHandler:
         download_active = ctrl.download_manager.background_download_in_progress if ctrl.download_manager else False
 
         # Guard flags — determine whether skip/rotation are safe right now
-        videos_remaining = len(queue) - (queue.index(ctrl.file_lock_monitor._current_video) + 1) if (
-            ctrl.file_lock_monitor and ctrl.file_lock_monitor._current_video in queue
+        videos_remaining = len(queue) - (queue.index(ctrl.playback_monitor._current_video) + 1) if (
+            ctrl.playback_monitor and ctrl.playback_monitor._current_video in queue
         ) else 0
         can_skip = videos_remaining > 0 or (not download_active and ctrl.next_prepared_playlists is not None)
         # Disallow trigger-rotation during a prepared rotation overlay
@@ -226,14 +226,10 @@ class DashboardHandler:
         payload = command.get("payload", {})
 
         if action == "skip_video":
-            # Guard: reject if a transition is already in progress (debounce)
-            if ctrl.file_lock_monitor and ctrl.file_lock_monitor._pending_transition_file:
-                logger.warning("Dashboard command: skip video REJECTED — transition already in progress")
-                return
             # Guard: only allow skip if there are more videos in the queue
-            if ctrl.file_lock_monitor:
-                queue = ctrl.file_lock_monitor._get_video_files()
-                current = ctrl.file_lock_monitor._current_video
+            if ctrl.playback_monitor:
+                queue = ctrl.playback_monitor._get_video_files()
+                current = ctrl.playback_monitor._current_video
                 idx = queue.index(current) if current and current in queue else -1
                 videos_after = len(queue) - (idx + 1) if idx >= 0 else 0
                 if videos_after <= 0 and ctrl.download_manager.background_download_in_progress:
@@ -243,7 +239,7 @@ class DashboardHandler:
                     # Last video — VLC would just loop. Mark consumed so the
                     # main loop triggers rotation or prepared-rotation restore.
                     logger.info("Dashboard command: skip video — last video, marking all content consumed")
-                    ctrl.file_lock_monitor._all_content_consumed = True
+                    ctrl.playback_monitor._all_content_consumed = True
                     await self._push_state_after_command()
                     return
             logger.info("Dashboard command: skip video")
@@ -267,8 +263,8 @@ class DashboardHandler:
                 return
             logger.info("Dashboard command: trigger rotation")
             # Force all-content-consumed so rotation triggers on next tick
-            if ctrl.file_lock_monitor:
-                ctrl.file_lock_monitor._all_content_consumed = True
+            if ctrl.playback_monitor:
+                ctrl.playback_monitor._all_content_consumed = True
             await self._push_state_after_command()
 
         elif action == "update_setting":
@@ -512,11 +508,11 @@ class DashboardHandler:
             return
 
         # Save playback position
-        if ctrl.current_session_id and ctrl.file_lock_monitor and ctrl.obs_controller:
+        if ctrl.current_session_id and ctrl.playback_monitor and ctrl.obs_controller:
             try:
                 status = ctrl.obs_controller.get_media_input_status(self._vlc_source_name)
                 if status and status.get('media_cursor') is not None:
-                    current_video = ctrl.file_lock_monitor.current_video_original_name
+                    current_video = ctrl.playback_monitor.current_video_original_name
                     ctrl.db.save_playback_position(
                         ctrl.current_session_id,
                         status['media_cursor'],
@@ -529,8 +525,6 @@ class DashboardHandler:
         # Switch to pause scene
         if ctrl.obs_controller:
             ctrl.obs_controller.switch_scene(self._scene_pause)
-        if ctrl.file_lock_monitor:
-            ctrl.file_lock_monitor._pending_transition_file = None
 
         ctrl.last_stream_status = "live"
         ctrl._manual_pause = True
@@ -575,7 +569,7 @@ class DashboardHandler:
 
         Saves the current live playback state, renames videos in the prepared
         folder with playlist prefixes for correct ordering, switches OBS VLC
-        source to the prepared folder, and reinitialises the file lock monitor.
+        source to the prepared folder, and reinitialises the playback monitor.
 
         Live/ and pending/ are left completely untouched.
         When all prepared content finishes, ``restore_after_prepared_rotation``
@@ -596,11 +590,11 @@ class DashboardHandler:
         ctrl._saved_live_video = None
         ctrl._saved_live_cursor_ms = 0
 
-        if ctrl.file_lock_monitor and ctrl.obs_controller:
+        if ctrl.playback_monitor and ctrl.obs_controller:
             try:
                 # Use original_name (prefix-stripped) so it matches the
                 # current_video_original_name used in the deferred-seek check.
-                ctrl._saved_live_video = ctrl.file_lock_monitor.current_video_original_name
+                ctrl._saved_live_video = ctrl.playback_monitor.current_video_original_name
                 status = ctrl.obs_controller.get_media_input_status(self._vlc_source_name)
                 if status and status.get('media_cursor') is not None:
                     ctrl._saved_live_cursor_ms = int(status['media_cursor'])
@@ -637,11 +631,11 @@ class DashboardHandler:
         await asyncio.sleep(0.5)
         ctrl.obs_controller.switch_scene(self._scene_stream)
 
-        # ── 4. Reinitialise file lock monitor on the prepared folder ──
-        ctrl._initialize_file_lock_monitor(folder)
+        # ── 4. Reinitialise playback monitor on the prepared folder ──
+        ctrl._initialize_playback_monitor(folder)
         # Don't delete videos during prepared rotation — they should be reusable
-        if ctrl.file_lock_monitor:
-            ctrl.file_lock_monitor._delete_on_transition = False
+        if ctrl.playback_monitor:
+            ctrl.playback_monitor._delete_on_transition = False
 
         # ── 5. Update stream title & category ──
         ctrl._prepared_rotation_active = True
@@ -649,8 +643,8 @@ class DashboardHandler:
             title = ctrl.playlist_manager.generate_stream_title(playlist_names)
             # Use first playlist's category as initial
             category = None
-            if ctrl.file_lock_monitor:
-                category = ctrl.file_lock_monitor.get_category_for_current_video()
+            if ctrl.playback_monitor:
+                category = ctrl.playback_monitor.get_category_for_current_video()
             if not category and playlist_names:
                 from utils.video_utils import resolve_playlist_categories
                 for p in ctrl.config_manager.get_playlists():
@@ -668,7 +662,7 @@ class DashboardHandler:
         """Restore live playback after a prepared rotation finishes.
 
         Puts VLC back on the live folder, seeks to the saved position, and
-        reinitialises the file lock monitor.  Marks the prepared rotation as
+        reinitialises the playback monitor.  Marks the prepared rotation as
         completed.  Does NOT trigger a new rotation — the normal loop handles
         that if/when live content is consumed.
         """
@@ -704,8 +698,8 @@ class DashboardHandler:
         await asyncio.sleep(0.5)
         ctrl.obs_controller.switch_scene(self._scene_stream)
 
-        # Reinitialise file lock monitor on live/
-        ctrl._initialize_file_lock_monitor(live_folder)
+        # Reinitialise playback monitor on live/
+        ctrl._initialize_playback_monitor(live_folder)
 
         # Seek back to where we left off
         if ctrl._saved_live_video and ctrl._saved_live_cursor_ms > 0:
@@ -722,8 +716,8 @@ class DashboardHandler:
             if session:
                 stream_title = session.get('stream_title', '')
                 category = None
-                if ctrl.file_lock_monitor:
-                    category = ctrl.file_lock_monitor.get_category_for_current_video()
+                if ctrl.playback_monitor:
+                    category = ctrl.playback_monitor.get_category_for_current_video()
                 if ctrl.stream_manager and stream_title:
                     await ctrl.stream_manager.update_stream_info(stream_title, category)
                     logger.info(f"Restored stream title: {stream_title}")

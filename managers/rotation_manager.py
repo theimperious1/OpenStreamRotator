@@ -148,8 +148,8 @@ class RotationManager:
         # the live folder.  We'll mark its playlist as played after the switch
         # so the selector knows every playlist in the old rotation was consumed.
         outgoing_last_video: str | None = None
-        if ctrl.file_lock_monitor:
-            outgoing_last_video = ctrl.file_lock_monitor.current_video_original_name
+        if ctrl.playback_monitor:
+            outgoing_last_video = ctrl.playback_monitor.current_video_original_name
 
         settings = ctrl.config_manager.get_settings()
         current_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
@@ -157,7 +157,7 @@ class RotationManager:
 
         try:
             # Prepare for switch
-            if not ctrl.content_switch_handler.prepare_for_switch(self._scene_rotation, self._vlc_source):
+            if not await ctrl.content_switch_handler.prepare_for_switch(self._scene_rotation, self._vlc_source):
                 logger.error("Failed to prepare for content switch")
                 ctrl.is_rotating = False
                 return False
@@ -195,8 +195,8 @@ class RotationManager:
                 ctrl.is_rotating = False
                 return False
 
-            # Initialize file lock monitor for this rotation
-            ctrl._initialize_file_lock_monitor(current_folder)
+            # Initialize playback monitor for this rotation
+            ctrl._initialize_playback_monitor(current_folder)
 
             # Update stream title and category based on current video
             try:
@@ -206,8 +206,8 @@ class RotationManager:
 
                     # Get category from first video in rotation
                     category = None
-                    if ctrl.file_lock_monitor:
-                        category = ctrl.file_lock_monitor.get_category_for_current_video()
+                    if ctrl.playback_monitor:
+                        category = ctrl.playback_monitor.get_category_for_current_video()
 
                     # Fallback: get category from first playlist
                     if not category and ctrl.content_switch_handler:
@@ -237,7 +237,7 @@ class RotationManager:
             # in the rotation never gets a transition away from it, so mark it
             # here to ensure every playlist in the rotation is counted.
             # We use the outgoing rotation's last video captured BEFORE the
-            # content switch — by now file_lock_monitor tracks the new rotation.
+            # content switch — by now playback_monitor tracks the new rotation.
             try:
                 if outgoing_last_video:
                     name = ctrl.db.mark_playlist_played_for_video(outgoing_last_video)
@@ -343,9 +343,9 @@ class RotationManager:
                 temp_playback_restored = True
                 pending_folder = temp_state.get('folder')
                 if pending_folder:
-                    ctrl._initialize_file_lock_monitor(pending_folder)
-                    if ctrl.file_lock_monitor:
-                        ctrl.file_lock_monitor.set_temp_playback_mode(True)
+                    ctrl._initialize_playback_monitor(pending_folder)
+                    if ctrl.playback_monitor:
+                        ctrl.playback_monitor.set_temp_playback_mode(True)
             else:
                 logger.warning("Failed to restore temp playback, continuing with normal session resume")
                 ctrl.db.clear_temp_playback_state(session['id'])
@@ -381,15 +381,15 @@ class RotationManager:
             else:
                 logger.warning("Failed to re-sync VLC source to live folder on resume")
 
-        ctrl._initialize_file_lock_monitor()
+        ctrl._initialize_playback_monitor()
         await ctrl._update_category_for_current_video()
 
         # Restore playback position from crash recovery
         saved_video = session.get('playback_current_video')
         saved_cursor = session.get('playback_cursor_ms', 0)
         if saved_video and saved_cursor and saved_cursor > 0:
-            if (ctrl.file_lock_monitor and
-                ctrl.file_lock_monitor.current_video_original_name == saved_video):
+            if (ctrl.playback_monitor and
+                ctrl.playback_monitor.current_video_original_name == saved_video):
                 ctrl._pending_seek_ms = saved_cursor
                 ctrl._pending_seek_video = saved_video
                 logger.info(f"Pending resume: {saved_video} at {saved_cursor}ms ({saved_cursor/1000:.1f}s) — waiting for VLC to start")

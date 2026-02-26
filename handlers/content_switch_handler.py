@@ -3,6 +3,7 @@
 Manages the folder swap, VLC source reload, scene switching,
 and stream metadata updates during a content rotation.
 """
+import asyncio
 import json
 import logging
 import time
@@ -177,7 +178,7 @@ class ContentSwitchHandler:
         logger.info(f"Truncated title from {len(title)} to {len(result)} chars: {result}")
         return result
     
-    def prepare_for_switch(self, scene_rotation_screen: str, vlc_source_name: str) -> bool:
+    async def prepare_for_switch(self, scene_rotation_screen: str, vlc_source_name: str) -> bool:
         """
         Prepare for content switch (switch scene, stop VLC).
         
@@ -194,7 +195,7 @@ class ContentSwitchHandler:
         if not self.obs_controller.stop_vlc_source(vlc_source_name):
             logger.error(f"Failed to stop VLC source: {vlc_source_name}")
             return False
-        time.sleep(3)  # Wait for file locks to release
+        await asyncio.sleep(3)  # Wait for VLC to release file handles
         return True
 
     def execute_switch(self, current_folder: str, next_folder: str) -> bool:
