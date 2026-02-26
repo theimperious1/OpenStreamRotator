@@ -11,7 +11,8 @@ import logging
 import os
 import time
 from typing import Optional, Callable, TYPE_CHECKING
-
+from utils.video_utils import strip_ordering_prefix
+from config.constants import VIDEO_EXTENSIONS
 from config.config_manager import ConfigManager
 from core.database import DatabaseManager
 from managers.playlist_manager import PlaylistManager
@@ -62,6 +63,7 @@ class TempPlaybackHandler:
         self._trigger_next_rotation_callback: Optional[Callable] = None
         self._reinitialize_playback_monitor_callback: Optional[Callable] = None
         self._update_category_after_switch_callback: Optional[Callable] = None
+        self._set_pending_seek_callback: Optional[Callable] = None
         
         # Reference to background download flag (shared with automation controller)
         self._get_background_download_in_progress: Optional[Callable[[], bool]] = None
@@ -78,7 +80,8 @@ class TempPlaybackHandler:
         set_background_download_in_progress: Optional[Callable[[bool], None]] = None,
         trigger_next_rotation: Optional[Callable] = None,
         reinitialize_playback_monitor: Optional[Callable] = None,
-        update_category_after_switch: Optional[Callable] = None
+        update_category_after_switch: Optional[Callable] = None,
+        set_pending_seek: Optional[Callable] = None,
     ) -> None:
         """Set callbacks for coordination with automation controller."""
         self._auto_resume_downloads_callback = auto_resume_downloads
@@ -87,6 +90,7 @@ class TempPlaybackHandler:
         self._trigger_next_rotation_callback = trigger_next_rotation
         self._reinitialize_playback_monitor_callback = reinitialize_playback_monitor
         self._update_category_after_switch_callback = update_category_after_switch
+        self._set_pending_seek_callback = set_pending_seek
 
     @property
     def is_active(self) -> bool:
@@ -276,11 +280,22 @@ class TempPlaybackHandler:
             saved_playlist = temp_state.get('playlist', [])
             saved_position = temp_state.get('position', 0)
             pending_folder = temp_state.get('folder')
-            saved_cursor_ms = temp_state.get('cursor_ms', 0)
             
             if not pending_folder or not saved_playlist:
                 logger.error("Invalid temp playback state - missing folder or playlist")
                 return False
+            
+            # The temp_playback_cursor_ms and temp_playback_position fields
+            # are NOT kept current during playback (only set at activation).
+            # The REAL cursor lives in the main session fields that
+            # _tick_save_playback writes every second.
+            saved_video = session.get('playback_current_video')
+            saved_cursor_ms = session.get('playback_cursor_ms', 0)
+            if saved_video and saved_cursor_ms:
+                logger.info(
+                    f"Crash recovery cursor from session: "
+                    f"{saved_video} at {saved_cursor_ms}ms ({saved_cursor_ms/1000:.1f}s)"
+                )
             
             # Validate that remaining files actually exist
             remaining_playlist = saved_playlist[saved_position:]
@@ -296,6 +311,12 @@ class TempPlaybackHandler:
             if not valid_playlist:
                 logger.error("No valid files remaining for temp playback restore")
                 return False
+            
+            # If we know which video was playing, reorder the playlist so
+            # VLC starts on that file (VLC always begins from index 0).
+            if saved_video and saved_video in valid_playlist and saved_video != valid_playlist[0]:
+                valid_playlist = [saved_video] + [f for f in valid_playlist if f != saved_video]
+                logger.info(f"Reordered VLC playlist for resume: {saved_video}")
             
             logger.info(f"Restoring temp playback: {len(valid_playlist)} valid files from position {saved_position}")
             
@@ -322,14 +343,10 @@ class TempPlaybackHandler:
                 logger.error("Failed to switch back to Stream scene after temp playback restore")
                 return False
             
-            # Seek to saved cursor position if we have one
-            if saved_cursor_ms > 0 and self.obs_controller:
-                await asyncio.sleep(0.5)  # Give VLC time to start playing
-                seek_success = self.obs_controller.seek_media(self.vlc_source_name, saved_cursor_ms)
-                if seek_success:
-                    logger.info(f"Seeked to saved cursor position: {saved_cursor_ms}ms ({saved_cursor_ms/1000:.1f}s)")
-                else:
-                    logger.warning(f"Failed to seek to saved cursor position: {saved_cursor_ms}ms")
+            # NOTE: We do NOT seek here.  The cursor position is restored
+            # by the caller via the deferred-seek mechanism which waits
+            # for VLC to report "playing" before issuing the seek — much
+            # more reliable than the old fixed-delay approach.
             
             # Mark temp playback as active
             self._active = True
@@ -445,6 +462,28 @@ class TempPlaybackHandler:
         try:
             settings = self.config.get_settings()
             
+            # Capture playback position BEFORE switching scenes so we can
+            # resume at the same point after VLC reloads from the live folder.
+            saved_cursor_ms: Optional[int] = None
+            saved_video: Optional[str] = None
+            if self.obs_controller:
+                try:
+                    status = self.obs_controller.get_media_input_status(self.vlc_source_name)
+                    if status and status.get('media_cursor') is not None:
+                        saved_cursor_ms = status['media_cursor']
+                        # Read from DB — _tick_save_playback keeps this current
+                        if self.current_session_id:
+                            session_snap = self.db.get_current_session()
+                            if session_snap:
+                                saved_video = session_snap.get('playback_current_video')
+                        if saved_cursor_ms and saved_video:
+                            logger.info(
+                                f"Captured playback position for resume: "
+                                f"{saved_video} at {saved_cursor_ms}ms ({saved_cursor_ms/1000:.1f}s)"
+                            )
+                except Exception as e:
+                    logger.debug(f"Could not capture playback position before temp exit: {e}")
+            
             # Switch to Rotation screen scene for folder operations
             if not self.obs_controller or not self.obs_controller.switch_scene(self.scene_rotation_screen):
                 logger.error("Failed to switch to Rotation screen scene for temp playback exit")
@@ -496,13 +535,39 @@ class TempPlaybackHandler:
                 except Exception as e:
                     logger.warning(f"Failed to update playlists_selected after temp playback exit: {e}")
             
-            # Update OBS to stream from live folder
+            # Update OBS to stream from live folder.
+            # If we captured a playback position, reorder the playlist so the
+            # video we were watching is first — VLC always starts from index 0,
+            # and the deferred seek only applies when the video name matches.
             await asyncio.sleep(0.5)
             if not self.obs_controller:
                 logger.error("No OBS controller available")
                 return
             
-            success, playlist = self.obs_controller.update_vlc_source(self.vlc_source_name, live_folder)
+            resume_playlist = None
+            if saved_video:
+                try:
+                    all_files = sorted(
+                        f for f in os.listdir(live_folder)
+                        if f.lower().endswith(VIDEO_EXTENSIONS)
+                    )
+                    # Find the prefixed filename that matches the saved original name
+                    resume_file = None
+                    for f in all_files:
+                        if strip_ordering_prefix(f) == saved_video:
+                            resume_file = f
+                            break
+                    if resume_file and resume_file != all_files[0]:
+                        # Move the resume file to the front; keep the rest in order
+                        reordered = [resume_file] + [f for f in all_files if f != resume_file]
+                        resume_playlist = reordered
+                        logger.info(f"Reordered VLC playlist to resume from: {resume_file}")
+                except Exception as e:
+                    logger.debug(f"Could not reorder playlist for resume: {e}")
+            
+            success, playlist = self.obs_controller.update_vlc_source(
+                self.vlc_source_name, live_folder, playlist=resume_playlist
+            )
             if not success:
                 logger.error("Failed to update VLC source to live folder")
                 return
@@ -520,9 +585,24 @@ class TempPlaybackHandler:
             if self.current_session_id:
                 self.db.clear_temp_playback_state(self.current_session_id)
             
-            # Re-initialize playback monitor to watch the live folder
+            # Re-initialize playback monitor to watch the live folder.
+            # If the VLC playlist was reordered for resume, pass the resume
+            # file so the monitor's current-video pointer matches what VLC
+            # is actually playing (instead of the alphabetically first file).
+            resume_file_for_monitor = resume_playlist[0] if resume_playlist else None
             if self._reinitialize_playback_monitor_callback:
-                self._reinitialize_playback_monitor_callback(live_folder)
+                self._reinitialize_playback_monitor_callback(live_folder, resume_file_for_monitor)
+            
+            # Restore playback position — VLC reloaded from scratch so the
+            # cursor is at 0.  Use the deferred-seek mechanism to jump back
+            # to where we left off once VLC reports "playing".
+            if saved_cursor_ms and saved_video and saved_cursor_ms > 0:
+                if self._set_pending_seek_callback:
+                    self._set_pending_seek_callback(saved_cursor_ms, saved_video)
+                    logger.info(
+                        f"Pending seek after temp playback exit: "
+                        f"{saved_video} at {saved_cursor_ms}ms ({saved_cursor_ms/1000:.1f}s)"
+                    )
             
             # Update category based on the actual video now playing
             if self._update_category_after_switch_callback:

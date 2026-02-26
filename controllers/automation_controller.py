@@ -371,7 +371,8 @@ class AutomationController:
             set_background_download_in_progress=lambda v: setattr(self.download_manager, 'background_download_in_progress', v),
             trigger_next_rotation=self.download_manager.trigger_next_rotation_async,
             reinitialize_playback_monitor=self._initialize_playback_monitor,
-            update_category_after_switch=self._update_category_for_current_video
+            update_category_after_switch=self._update_category_for_current_video,
+            set_pending_seek=self._set_pending_seek,
         )
         
         logger.info("Handlers initialized successfully")
@@ -558,11 +559,15 @@ class AutomationController:
         """Initialize enabled streaming platforms."""
         self.platform_manager.setup(self.twitch_live_checker)
 
-    def _initialize_playback_monitor(self, video_folder: Optional[str] = None):
+    def _initialize_playback_monitor(self, video_folder: Optional[str] = None,
+                                     override_current_video: Optional[str] = None):
         """Initialize playback monitor for current rotation.
         
         Args:
             video_folder: Path to the video folder to monitor. If None, uses config default.
+            override_current_video: If set, override the monitor's starting video
+                instead of defaulting to the first alphabetical file. Used when
+                the VLC playlist was reordered for playback resume.
         """
         if not self.obs_controller:
             return
@@ -582,6 +587,12 @@ class AutomationController:
             self.playback_monitor.obs_controller = self.obs_controller
         
         self.playback_monitor.initialize(str(video_folder))
+        
+        # Override the current video pointer if the caller knows which file
+        # VLC is actually playing (e.g. reordered playlist for resume).
+        if override_current_video and self.playback_monitor:
+            self.playback_monitor._current_video = override_current_video
+            logger.info(f"Playback monitor current video overridden to: {override_current_video}")
 
     async def _update_category_for_current_video(self) -> None:
         """Update stream category based on the video currently playing.
@@ -1070,6 +1081,11 @@ class AutomationController:
         except Exception:
             pass  # Non-critical, just skip this tick
 
+    def _set_pending_seek(self, cursor_ms: int, video_name: str) -> None:
+        """Schedule a deferred seek — used by temp playback exit to resume position."""
+        self._pending_seek_ms = cursor_ms
+        self._pending_seek_video = video_name
+
     async def _shutdown_cleanup(self) -> None:
         """Perform graceful shutdown: save state, disconnect, stop threads."""
         logger.info("Shutdown event detected, cleaning up...")
@@ -1150,40 +1166,49 @@ class AutomationController:
                 await self.rotation_manager.execute_content_switch()
         elif not os.path.exists(video_folder) or not os.listdir(video_folder):
             logger.warning(f"Video folder empty/missing: {video_folder}")
-            # Before starting fresh, check if session has completed prepared
-            # playlists sitting in pending/ — rotate to those instead of
-            # re-selecting and re-downloading brand-new playlists.
-            next_pl = session.get('next_playlists')
-            next_pl_status = session.get('next_playlists_status')
-            if next_pl and next_pl_status:
-                try:
-                    playlist_list = DatabaseManager.parse_json_field(next_pl, [])
-                    status_dict = DatabaseManager.parse_json_field(next_pl_status, {})
-                    all_completed = all(
-                        status_dict.get(pl) == "COMPLETED" for pl in playlist_list
-                    )
-                    if all_completed:
-                        next_folder = settings.get(
-                            'next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER
+
+            # Temp playback streams from the *pending* folder, so the live
+            # folder is expected to be empty.  Route to resume_existing_session
+            # which already handles temp playback crash recovery.
+            temp_state = self.db.get_temp_playback_state(session['id'])
+            if temp_state and temp_state.get('active'):
+                logger.info("Temp playback was active — routing to session resume for recovery")
+                await self.rotation_manager.resume_existing_session(session, settings)
+            else:
+                # Before starting fresh, check if session has completed prepared
+                # playlists sitting in pending/ — rotate to those instead of
+                # re-selecting and re-downloading brand-new playlists.
+                next_pl = session.get('next_playlists')
+                next_pl_status = session.get('next_playlists_status')
+                if next_pl and next_pl_status:
+                    try:
+                        playlist_list = DatabaseManager.parse_json_field(next_pl, [])
+                        status_dict = DatabaseManager.parse_json_field(next_pl_status, {})
+                        all_completed = all(
+                            status_dict.get(pl) == "COMPLETED" for pl in playlist_list
                         )
-                        if self.db.validate_prepared_playlists_exist(
-                            session['id'], next_folder
-                        ):
-                            objs = self.db.get_playlists_with_ids_by_names(
-                                playlist_list
+                        if all_completed:
+                            next_folder = settings.get(
+                                'next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER
                             )
-                            if objs:
-                                self.next_prepared_playlists = objs
-                                logger.info(
-                                    f"Found completed prepared playlists in "
-                                    f"pending, will rotate to: {playlist_list}"
+                            if self.db.validate_prepared_playlists_exist(
+                                session['id'], next_folder
+                            ):
+                                objs = self.db.get_playlists_with_ids_by_names(
+                                    playlist_list
                                 )
-                except Exception as e:
-                    logger.warning(f"Failed to check pending playlists: {e}")
-            if session.get('id'):
-                self.db.end_session(session['id'])
-            if await self.rotation_manager.start_session():
-                await self.rotation_manager.execute_content_switch()
+                                if objs:
+                                    self.next_prepared_playlists = objs
+                                    logger.info(
+                                        f"Found completed prepared playlists in "
+                                        f"pending, will rotate to: {playlist_list}"
+                                    )
+                    except Exception as e:
+                        logger.warning(f"Failed to check pending playlists: {e}")
+                if session.get('id'):
+                    self.db.end_session(session['id'])
+                if await self.rotation_manager.start_session():
+                    await self.rotation_manager.execute_content_switch()
         else:
             await self.rotation_manager.resume_existing_session(session, settings)
 

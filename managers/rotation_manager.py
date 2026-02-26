@@ -343,9 +343,24 @@ class RotationManager:
                 temp_playback_restored = True
                 pending_folder = temp_state.get('folder')
                 if pending_folder:
-                    ctrl._initialize_playback_monitor(pending_folder)
+                    # Use the main session cursor fields (kept current by
+                    # _tick_save_playback) to override the monitor's pointer
+                    # so it matches the video VLC is actually playing.
+                    resume_video = session.get('playback_current_video')
+                    ctrl._initialize_playback_monitor(pending_folder, resume_video)
                     if ctrl.playback_monitor:
                         ctrl.playback_monitor.set_temp_playback_mode(True)
+
+                    # Deferred seek — applied by _tick_save_playback once
+                    # VLC reports "playing" and the video name matches.
+                    resume_cursor = session.get('playback_cursor_ms', 0)
+                    if resume_video and resume_cursor and resume_cursor > 0:
+                        ctrl._pending_seek_ms = resume_cursor
+                        ctrl._pending_seek_video = resume_video
+                        logger.info(
+                            f"Pending resume after temp playback restore: "
+                            f"{resume_video} at {resume_cursor}ms ({resume_cursor/1000:.1f}s)"
+                        )
             else:
                 logger.warning("Failed to restore temp playback, continuing with normal session resume")
                 ctrl.db.clear_temp_playback_state(session['id'])
@@ -354,6 +369,9 @@ class RotationManager:
             # Temp playback owns the pending folder — prevent check_for_rotation
             # from starting new downloads into it while temp playback is active.
             ctrl.download_manager.downloads_triggered_this_rotation = True
+            # Update category so the stream shows the right game (restore()
+            # only sets the title, not the category).
+            await ctrl._update_category_for_current_video()
             return
 
         # Normal session resume
