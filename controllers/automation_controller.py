@@ -1097,7 +1097,9 @@ class AutomationController:
 
                 # Per-playlist last_played: when the playlist changes between
                 # consecutive videos the previous playlist's content is done.
-                if previous_video and current_video:
+                # Skip during fallback — emergency content shouldn't pollute
+                # the rotation selector's "least recently played" ordering.
+                if previous_video and current_video and not self._fallback_active:
                     prev_rec = self.db.get_video_by_filename(previous_video)
                     cur_rec = self.db.get_video_by_filename(current_video)
                     prev_pl = prev_rec.get('playlist_name') if prev_rec else None
@@ -1114,9 +1116,8 @@ class AutomationController:
                 # Mark the final playlist as played when all content is consumed.
                 # Without this, the last playlist in a rotation is never marked
                 # because there's no "next" video to trigger the playlist-change
-                # check above.  (execute_content_switch also does this for normal
-                # rotations, but temp playback activation bypasses that path.)
-                if previous_video and not current_video and check_result.get('all_consumed'):
+                # check above.  Skip during fallback for the same reason.
+                if previous_video and not current_video and check_result.get('all_consumed') and not self._fallback_active:
                     name = self.db.mark_playlist_played_for_video(previous_video)
                     if name:
                         logger.info(f"Marked playlist '{name}' as played (rotation content exhausted)")
