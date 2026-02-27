@@ -253,7 +253,6 @@ class NotificationService:
 
     _TIER_LABELS = {
         "prepared": "Fallback prepared rotation",
-        "loop": "Looping remaining content (no-delete mode)",
         "pause": "Pause screen (no content available)",
     }
 

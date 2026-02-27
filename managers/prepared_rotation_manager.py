@@ -477,6 +477,20 @@ class PreparedRotationManager:
                 return meta["folder"]
         return None
 
+    def get_all_fallback_rotations(self) -> List[str]:
+        """Return folders of all ready fallback rotations.
+
+        Returns a list of fallback-marked rotations in ``ready`` or
+        ``completed`` status that have video files, sorted by creation time.
+        """
+        folders = []
+        for meta in self.list_all():
+            if (meta.get("is_fallback")
+                    and meta.get("status") in ("ready", "completed")
+                    and self._count_videos(meta["folder"]) > 0):
+                folders.append(meta["folder"])
+        return folders
+
     def has_fallback_content(self) -> bool:
         """Return True if at least one fallback rotation is ready."""
         return self.get_fallback_rotation() is not None

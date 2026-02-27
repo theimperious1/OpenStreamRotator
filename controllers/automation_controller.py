@@ -11,7 +11,7 @@ import signal
 import asyncio
 import json
 from threading import Event
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
@@ -39,6 +39,7 @@ from config.constants import (
     DEFAULT_SCENE_PAUSE, DEFAULT_SCENE_STREAM,
     DEFAULT_SCENE_ROTATION_SCREEN, DEFAULT_VLC_SOURCE_NAME,
     DEFAULT_FALLBACK_FAILURE_THRESHOLD, FALLBACK_RETRY_INTERVAL,
+    FALLBACK_RETRY_PENDING_ATTEMPTS,
 )
 
 # Load environment variables from project root
@@ -170,9 +171,13 @@ class AutomationController:
 
         # Fallback state — activated when yt-dlp fails repeatedly
         self._fallback_active = False
-        self._fallback_tier: Optional[str] = None  # 'prepared', 'loop', 'pause'
+        self._fallback_needed = False  # Armed by download failures, activated when live empties
+        self._fallback_tier: Optional[str] = None  # 'prepared', 'pause'
         self._consecutive_download_failures = 0
+        self._fallback_retry_count = 0  # How many retries attempted during current fallback
         self._last_fallback_retry: float = 0.0
+        self._fallback_rotation_folders: List[str] = []  # All fallback-marked prepared rotations
+        self._fallback_rotation_index: int = 0  # Current position in the cycle
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None  # Set in run()
         
         # Dashboard handler — owns all web-dashboard state / command logic
@@ -226,19 +231,26 @@ class AutomationController:
     # ── Fallback system ──────────────────────────────────────────
 
     def _on_download_failure(self) -> None:
-        """Called (from download thread) when a background download fails."""
+        """Called (from download thread) when a background download fails.
+
+        Arms fallback mode after reaching the failure threshold.  Actual
+        activation is deferred until live content is exhausted — see
+        ``check_for_rotation``.
+        """
         self._consecutive_download_failures += 1
         logger.warning(
             f"Download failure #{self._consecutive_download_failures} "
             f"(threshold: {DEFAULT_FALLBACK_FAILURE_THRESHOLD})"
         )
         if (self._consecutive_download_failures >= DEFAULT_FALLBACK_FAILURE_THRESHOLD
-                and not self._fallback_active):
-            # Schedule activation on the event loop (we're in a thread)
-            if self._event_loop and self._event_loop.is_running():
-                asyncio.run_coroutine_threadsafe(self._activate_fallback(), self._event_loop)
-            else:
-                logger.error("Cannot schedule fallback activation — event loop not available")
+                and not self._fallback_active and not self._fallback_needed):
+            self._fallback_needed = True
+            logger.warning("Fallback armed — will activate when live content is exhausted")
+
+        # Allow the next main-loop iteration to re-trigger a download attempt,
+        # but stop once fallback is armed — the fallback retry timer takes over.
+        if not self._fallback_needed and not self._fallback_active:
+            self.download_manager.downloads_triggered_this_rotation = False
 
     def _on_download_success(self) -> None:
         """Called (from download thread) when a background download succeeds."""
@@ -248,6 +260,7 @@ class AutomationController:
                 f"(was {self._consecutive_download_failures})"
             )
         self._consecutive_download_failures = 0
+        self._fallback_needed = False
         if self._fallback_active:
             if self._event_loop and self._event_loop.is_running():
                 asyncio.run_coroutine_threadsafe(self._deactivate_fallback(), self._event_loop)
@@ -255,53 +268,59 @@ class AutomationController:
                 logger.error("Cannot schedule fallback deactivation — event loop not available")
 
     async def _activate_fallback(self) -> None:
-        """Enter fallback mode using the best available tier.
+        """Enter fallback mode — live content is exhausted and downloads are failing.
 
         Tier 1: Execute a fallback-marked prepared rotation (full title/category).
-        Tier 2: Loop remaining live content (disable video deletion).
-        Tier 3: Switch to pause scene (nothing to play).
+        Tier 2: Switch to pause scene (nothing to play).
+
+        Called from ``check_for_rotation`` when live empties and
+        ``_fallback_needed`` is True, or from the dashboard ``force_fallback``
+        command.
         """
         if self._fallback_active:
             return
 
+        self._fallback_needed = False
         logger.warning("===== FALLBACK MODE ACTIVATING =====")
 
-        # Tier 1: Fallback prepared rotation
-        fallback_folder = self.prepared_rotation_manager.get_fallback_rotation()
-        if fallback_folder:
+        # Tier 1: Fallback prepared rotations — build cycle list
+        fallback_folders = self.prepared_rotation_manager.get_all_fallback_rotations()
+        if fallback_folders:
             self._fallback_active = True
             self._fallback_tier = "prepared"
+            self._fallback_retry_count = 0
             self._last_fallback_retry = time.time()
-            logger.info(f"Fallback Tier 1: executing fallback prepared rotation from {fallback_folder}")
+            self._fallback_rotation_folders = fallback_folders
+            self._fallback_rotation_index = 0
+            folder = fallback_folders[0]
+            logger.info(
+                f"Fallback Tier 1: executing fallback prepared rotation from {folder} "
+                f"({len(fallback_folders)} fallback rotation(s) available)"
+            )
             self.notification_service.notify_fallback_activated("prepared")
-            await self.dashboard_handler.execute_prepared_rotation(fallback_folder)
+            await self.dashboard_handler.execute_prepared_rotation(folder)
             return
 
-        # Tier 2: Loop remaining live content
-        settings = self.config_manager.get_settings()
-        live_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
-        live_files = self._get_video_files_in(live_folder)
-        if live_files:
-            self._fallback_active = True
-            self._fallback_tier = "loop"
-            self._last_fallback_retry = time.time()
-            if self.playback_monitor:
-                self.playback_monitor._delete_on_transition = False
-            logger.info(f"Fallback Tier 2: looping {len(live_files)} remaining live videos (no-delete mode)")
-            self.notification_service.notify_fallback_activated("loop")
-            return
-
-        # Tier 3: Pause screen
+        # Tier 2: Pause screen
         self._fallback_active = True
         self._fallback_tier = "pause"
+        self._fallback_retry_count = 0
         self._last_fallback_retry = time.time()
+        self._fallback_rotation_folders = []
+        self._fallback_rotation_index = 0
         if self.obs_controller:
             self.obs_controller.switch_scene(SCENE_PAUSE)
-        logger.warning("Fallback Tier 3: no content available — showing pause screen")
+        logger.warning("Fallback Tier 2: no content available — showing pause screen")
         self.notification_service.notify_fallback_activated("pause")
 
     async def _deactivate_fallback(self) -> None:
-        """Exit fallback mode — downloads have recovered."""
+        """Exit fallback mode — downloads have recovered.
+
+        For the "prepared" tier the fallback content may still be playing;
+        restore live playback only if new content is actually available.
+        For "pause" tier, switch back to the stream scene so the normal
+        rotation logic picks up the newly downloaded content.
+        """
         if not self._fallback_active:
             return
 
@@ -309,34 +328,24 @@ class AutomationController:
         logger.info(f"===== EXITING FALLBACK MODE (was tier: {previous_tier}) =====")
 
         if previous_tier == "prepared" and self._prepared_rotation_active:
-            # Before restoring, verify there's actually content to return to
-            settings = self.config_manager.get_settings()
-            live_folder = self._saved_live_folder or settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
-            pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
-
-            live_files = self._get_video_files_in(live_folder)
-            pending_ready = bool(self._get_video_files_in(pending_folder))
-
-            if not live_files and not pending_ready:
-                logger.warning(
-                    "Cannot exit fallback — no live content and no pending content. "
-                    "Staying in fallback mode until downloads recover."
-                )
-                return
-
-            # Immediately restore live playback instead of waiting for content to finish
-            await self.dashboard_handler.restore_after_prepared_rotation()
-
-        if previous_tier == "loop" and self.playback_monitor:
-            # Re-enable video deletion
-            self.playback_monitor._delete_on_transition = True
+            # Don't call restore_after_prepared_rotation() here — live/ is
+            # empty and the downloaded content is in pending/.  Just clear the
+            # prepared-rotation flag and let the current fallback content
+            # finish naturally.  When all_content_consumed fires, the normal
+            # rotation logic will see pending content and rotate into it.
+            self._prepared_rotation_active = False
+            self.prepared_rotation_manager.complete_execution()
 
         if previous_tier == "pause" and self.obs_controller:
             self.obs_controller.switch_scene(SCENE_STREAM)
 
         self._fallback_active = False
         self._fallback_tier = None
+        self._fallback_needed = False
         self._consecutive_download_failures = 0
+        self._fallback_retry_count = 0
+        self._fallback_rotation_folders = []
+        self._fallback_rotation_index = 0
         self.notification_service.notify_fallback_deactivated(previous_tier or "unknown")
         logger.info("Fallback mode deactivated — normal operation resumed")
 
@@ -1163,7 +1172,38 @@ class AutomationController:
         has_pending_content = not self.playlist_manager.is_folder_empty(pending_folder)
 
         # ── Prepared rotation finished → restore live playback ──
+        # If we're in fallback mode with a prepared rotation, cycle to the
+        # next fallback rotation (or loop back to the first one).
         if all_consumed and self._prepared_rotation_active:
+            if self._fallback_active and self._fallback_tier == "prepared":
+                # Minimal cleanup — do NOT call restore_after_prepared_rotation()
+                # because that tries to point VLC back at the (empty) live folder,
+                # causing errors.  We just need to mark the rotation finished so
+                # execute_prepared_rotation() can start cleanly.
+                self._prepared_rotation_active = False
+                self.prepared_rotation_manager.complete_execution()
+
+                # Refresh the list in case rotations were added/removed during fallback
+                self._fallback_rotation_folders = self.prepared_rotation_manager.get_all_fallback_rotations()
+                if self._fallback_rotation_folders:
+                    # Advance to the next fallback rotation (wrap around)
+                    self._fallback_rotation_index = (
+                        (self._fallback_rotation_index + 1) % len(self._fallback_rotation_folders)
+                    )
+                    next_folder = self._fallback_rotation_folders[self._fallback_rotation_index]
+                    logger.info(
+                        f"Fallback cycling to rotation {self._fallback_rotation_index + 1}"
+                        f"/{len(self._fallback_rotation_folders)}: {next_folder}"
+                    )
+                    await self.dashboard_handler.execute_prepared_rotation(next_folder)
+                else:
+                    # All fallback rotations were removed — fall through to pause
+                    logger.warning("No fallback rotations available — switching to pause screen")
+                    self._fallback_tier = "pause"
+                    if self.obs_controller:
+                        self.obs_controller.switch_scene(SCENE_PAUSE)
+                    self.notification_service.notify_fallback_activated("pause")
+                return
             logger.info("Prepared rotation content finished — restoring live playback")
             await self.dashboard_handler.restore_after_prepared_rotation()
             return
@@ -1231,6 +1271,15 @@ class AutomationController:
                 logger.info("All content consumed and pending content exists - triggering rotation (prepared from previous run)")
             
             await self.rotation_manager.handle_normal_rotation()
+            return
+
+        # ── Fallback activation point ──
+        # Live is empty, temp playback can't help, and no rotation content
+        # available.  If downloads have been failing, activate fallback now.
+        if (all_consumed and not temp_active and not should_rotate
+                and self._fallback_needed and not self._fallback_active):
+            logger.warning("Live content exhausted and downloads failing — activating fallback")
+            await self._activate_fallback()
             return
 
     async def _check_live_status(self, ignore_streamer: bool) -> None:
@@ -1569,26 +1618,45 @@ class AutomationController:
                         logger.info(f"Scheduled prepared rotation ready — executing: {scheduled_folder}")
                         await self.dashboard_handler.execute_prepared_rotation(scheduled_folder)
 
-                # Fallback retry: check if content is already available or attempt a fresh download
+                # Fallback retry: escalating strategy
+                #   1) First N retries: re-attempt the same download (yt-dlp
+                #      resumes partials via --continue).
+                #   2) After N retries: wipe pending folder and try a
+                #      completely fresh rotation with different playlists.
                 if self._should_retry_fallback_download():
                     self._last_fallback_retry = time.time()
+                    self._fallback_retry_count += 1
 
-                    # Check if pending folder has new content ready
                     fb_settings = self.config_manager.get_settings()
                     fb_pending = fb_settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
-                    has_pending = bool(self._get_video_files_in(fb_pending))
-                    # For non-loop tiers, also check live folder
-                    has_live = (self._fallback_tier != "loop"
-                                and self._get_video_files_in(
-                                    fb_settings.get('video_folder', DEFAULT_VIDEO_FOLDER)))
-                    if has_pending or has_live:
-                        logger.info("Fallback retry: content available — deactivating fallback")
-                        await self._deactivate_fallback()
-                    else:
-                        logger.info("Fallback retry interval elapsed — attempting new download")
-                        self.download_manager.maybe_start_background_download(
-                            self.next_prepared_playlists
+
+                    if self._fallback_retry_count <= FALLBACK_RETRY_PENDING_ATTEMPTS:
+                        logger.info(
+                            f"Fallback retry {self._fallback_retry_count}/{FALLBACK_RETRY_PENDING_ATTEMPTS} "
+                            f"— retrying pending download"
                         )
+                    else:
+                        logger.info(
+                            f"Fallback retry {self._fallback_retry_count} "
+                            f"(past pending threshold) — trying fresh rotation"
+                        )
+                        # Wipe pending so we don't re-download the same bad playlists
+                        self.playlist_manager.cleanup_temp_downloads(fb_pending)
+                        for fn in os.listdir(fb_pending) if os.path.isdir(fb_pending) else []:
+                            fp = os.path.join(fb_pending, fn)
+                            try:
+                                if os.path.isfile(fp):
+                                    os.unlink(fp)
+                            except Exception:
+                                pass
+                        # Reset so new playlists are selected
+                        self.next_prepared_playlists = None
+
+                    # Allow the download to actually trigger
+                    self.download_manager.downloads_triggered_this_rotation = False
+                    self.download_manager.maybe_start_background_download(
+                        self.next_prepared_playlists
+                    )
 
                 if self.config_manager.has_config_changed():
                     logger.info("Config changed, syncing...")

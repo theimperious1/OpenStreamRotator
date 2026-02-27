@@ -189,7 +189,7 @@ class DashboardHandler:
         videos_remaining = len(queue) - (queue.index(ctrl.playback_monitor._current_video) + 1) if (
             ctrl.playback_monitor and ctrl.playback_monitor._current_video in queue
         ) else 0
-        can_skip = videos_remaining > 0 or (not download_active and ctrl.next_prepared_playlists is not None)
+        can_skip = videos_remaining > 0 or (not download_active and ctrl.next_prepared_playlists is not None) or ctrl._fallback_active
         # Disallow trigger-rotation during a prepared rotation overlay
         can_trigger_rotation = not download_active and not ctrl.is_rotating and not ctrl._prepared_rotation_active
 

@@ -49,6 +49,7 @@ class DownloadManager:
         # Cross-thread DB queues (written by background thread, consumed by main)
         self._pending_db_playlists_to_initialize: Optional[List[str]] = None
         self._pending_db_playlists_to_complete: Optional[List[str]] = None
+        self._pending_db_clear_next_playlists: bool = False
 
         # Callbacks set by the automation controller after construction
         self._get_current_session_id: Callable[[], Optional[int]] = lambda: None
@@ -158,11 +159,13 @@ class DownloadManager:
                     self._on_download_success()
             else:
                 logger.warning("Background download had failures")
+                self._pending_db_clear_next_playlists = True
                 self.notification_service.notify_background_download_warning()
                 if self._on_download_failure:
                     self._on_download_failure()
         except Exception as e:
             logger.error(f"Background download error: {e}")
+            self._pending_db_clear_next_playlists = True
             self.notification_service.notify_background_download_error(str(e))
             if self._on_download_failure:
                 self._on_download_failure()
@@ -199,16 +202,26 @@ class DownloadManager:
                     )
                     if result.get("success"):
                         logger.info(f"Auto-resumed downloads completed for: {pending_playlists}")
+                        self._set_next_prepared_playlists(playlist_objects)
                         for playlist in pending_playlists:
                             self.db.update_playlist_status(session_id, playlist, "COMPLETED")
+                        self.notification_service.notify_next_rotation_ready(pending_playlists)
+                        if self._on_download_success:
+                            self._on_download_success()
                         self.background_download_in_progress = False
                     else:
                         logger.warning(f"Auto-resumed downloads had failures for: {pending_playlists}")
+                        self._pending_db_clear_next_playlists = True
                         self.notification_service.notify_background_download_warning()
+                        if self._on_download_failure:
+                            self._on_download_failure()
                         self.background_download_in_progress = False
                 except Exception as e:
                     logger.error(f"Error during auto-resume of downloads: {e}")
+                    self._pending_db_clear_next_playlists = True
                     self.notification_service.notify_background_download_error(str(e))
+                    if self._on_download_failure:
+                        self._on_download_failure()
                     self.background_download_in_progress = False
 
             self.background_download_in_progress = True
@@ -274,6 +287,10 @@ class DownloadManager:
         if self._pending_db_playlists_to_complete is not None and session_id:
             self.db.complete_next_playlists(session_id, self._pending_db_playlists_to_complete)
             self._pending_db_playlists_to_complete = None
+
+        if self._pending_db_clear_next_playlists and session_id:
+            self.db.set_next_playlists(session_id, [])
+            self._pending_db_clear_next_playlists = False
 
     # ------------------------------------------------------------------
     # Shutdown

@@ -15,7 +15,7 @@ Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays the
 5. **Stream metadata** — The stream title and category are updated on all enabled platforms (Kick, Twitch) each rotation. Categories update per-video based on which playlist the video came from.
 6. **Temp playback** — If the current content runs out before the next rotation's downloads finish, the system temporarily plays already-downloaded files from the pending folder to avoid dead air.
 7. **Prepared rotations** — Pre-download future rotations to a staging folder for on-demand or scheduled execution via the web dashboard. Supports custom titles, categories, and optional cursor restore.
-8. **Fallback mode** — If yt-dlp downloads fail repeatedly (3 consecutive failures by default), the system gracefully degrades through 3 tiers: fallback prepared rotation → loop remaining content → pause screen. Retries downloads every 5 minutes until recovery.
+8. **Fallback mode** — If yt-dlp downloads fail repeatedly (3 consecutive failures by default), the system arms fallback mode. Once all live content and temp playback are exhausted, it activates: cycling through fallback-marked prepared rotations (with full title/category support), or the pause screen if none are available. Retries downloads every 5 minutes with escalation (retry pending, then try fresh playlists).
 9. **Twitch live detection** — If a configured target streamer goes live on Twitch, OBS switches to a pause screen. When they go offline, playback resumes automatically.
 10. **OBS freeze detection** — The system monitors OBS render output via WebSocket. If OBS stops rendering frames for ~60 seconds (process alive but frozen), it automatically kills OBS, clears crash sentinels, relaunches it, reconnects, and resumes streaming — all unattended.
 
@@ -316,17 +316,23 @@ Prepared rotations are managed entirely through the web dashboard — create, sc
 
 ### Fallback Mode
 
-If yt-dlp downloads fail repeatedly (3 consecutive failures by default), the system enters **fallback mode** with a 3-tier graceful degradation:
+If yt-dlp downloads fail repeatedly (3 consecutive failures by default), the system **arms** fallback mode. Fallback does not activate immediately — it waits until all live content is naturally consumed and temp playback can no longer fill the gap. This ensures viewers aren't interrupted while content is still playing.
+
+Once live content is exhausted, fallback activates with the best available option:
 
 | Tier | Name | Condition | Behavior |
 |------|------|-----------|----------|
-| 1 | **Prepared rotation** | A prepared rotation marked as "fallback" exists and is ready | Executes the fallback rotation with full title/category support |
-| 2 | **Loop remaining** | Videos still exist in the live folder | Disables video deletion, looping remaining content indefinitely |
-| 3 | **Pause screen** | No content available at all | Switches to the pause scene |
+| 1 | **Prepared rotation** | One or more prepared rotations marked as "fallback" exist and are ready | Cycles through all fallback rotations in order, looping back to the first when the last one finishes. Full title/category support per rotation. |
+| 2 | **Pause screen** | No fallback content available | Switches to the pause scene |
 
-While in fallback, the system retries downloads every 5 minutes. When a download succeeds, fallback mode is automatically deactivated and normal operation resumes.
+While in fallback, the system retries downloads every 5 minutes with an escalating strategy:
 
-You can mark any ready prepared rotation as a fallback candidate via the web dashboard's "Use as fallback" toggle. The dashboard also provides a "Deactivate" button to manually exit fallback mode.
+1. **First 3 retries**: Re-attempt the same download (yt-dlp resumes partial files).
+2. **Subsequent retries**: Wipe the pending folder and try a completely fresh rotation with different playlists — in case the original playlists are broken or blocked.
+
+When a download succeeds, fallback mode is automatically deactivated and normal operation resumes.
+
+You can mark any ready prepared rotation as a fallback candidate via the web dashboard's "Use as fallback" toggle. Multiple fallback rotations can be designated — the system cycles through all of them in creation order. The dashboard also provides a "Deactivate" button to manually exit fallback mode.
 
 ### Crash Recovery
 

@@ -105,6 +105,13 @@ class VideoDownloader:
                 all_success = False
                 logger.warning(f"Failed to download playlist: {playlist['name']}")
 
+        # Final sanity check: if yt-dlp reported success for every playlist but
+        # zero video files actually landed (e.g. ignoreerrors skipped all videos
+        # due to network failure), treat the whole download as a failure.
+        if all_success and not VideoProcessor.get_video_files_in_folder(output_folder):
+            logger.warning("All playlists reported success but no video files were downloaded — treating as failure")
+            all_success = False
+
         return {
             'success': all_success,
             'total_duration_seconds': total_duration
@@ -169,9 +176,9 @@ class VideoDownloader:
                     'no_warnings': not verbose,
                     'ignoreerrors': True,  # Skip unavailable/private videos after retries instead of failing entire playlist
                     'extractor_retries': 3,  # Retry extraction errors (private/unavailable) 3 times per video before skipping
-                    'retries': 5,  # Retry download HTTP errors 5 times per video before skipping
+                    'retries': 3,  # Retry download HTTP errors 3 times per video before skipping
                     'extract_flat': False,  # Extract video URLs
-                    'fragment_retries': 6,
+                    'fragment_retries': 3,
                     'concurrent_fragment_downloads': 5,  # Download 4 fragments in parallel
                     'http_chunk_size': 10485760,  # 10MB chunks - I tried raising this higher, doesn't work
                     'outtmpl': '%(playlist)s_%(playlist_index)03d_%(title)s.%(ext)s',

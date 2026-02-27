@@ -34,8 +34,9 @@ DEFAULT_SCENE_ROTATION_SCREEN = "OSR Rotation screen"
 DEFAULT_VLC_SOURCE_NAME = "OSR Playlist"
 
 # Fallback system
-DEFAULT_FALLBACK_FAILURE_THRESHOLD = 3  # Consecutive download failures before activating fallback
+DEFAULT_FALLBACK_FAILURE_THRESHOLD = 3  # Consecutive download failures before arming fallback
 FALLBACK_RETRY_INTERVAL = 300  # Seconds between retry attempts while in fallback (5 min)
+FALLBACK_RETRY_PENDING_ATTEMPTS = 3  # Retry pending playlists N times before trying a fresh rotation
 
 # Playlist Constraints
 DEFAULT_MIN_PLAYLISTS = 2
