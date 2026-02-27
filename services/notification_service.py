@@ -11,7 +11,7 @@ from typing import Optional
 from config.constants import (
     COLOR_SUCCESS, COLOR_ERROR, COLOR_WARNING, COLOR_INFO,
     COLOR_STREAM_LIVE, COLOR_ROTATION_START, COLOR_NEXT_READY,
-    COLOR_MUTED,
+    COLOR_MUTED, COLOR_FALLBACK,
 )
 
 logger = logging.getLogger(__name__)
@@ -247,4 +247,31 @@ class NotificationService:
             "OpenStreamRotator Error",
             f"Unexpected error: {error_message}",
             color=COLOR_ERROR
+        )
+
+    # ── Fallback notifications ───────────────────────────────────
+
+    _TIER_LABELS = {
+        "prepared": "Fallback prepared rotation",
+        "pause": "Pause screen (no content available)",
+    }
+
+    def notify_fallback_activated(self, tier: str):
+        """Notify that fallback mode has been activated."""
+        tier_label = self._TIER_LABELS.get(tier, tier)
+        self.send_discord(
+            "⚠️ Fallback Mode ACTIVATED",
+            f"Downloads are failing — switched to **{tier_label}**.\n"
+            "Will retry automatically every 5 minutes.",
+            color=COLOR_FALLBACK,
+        )
+
+    def notify_fallback_deactivated(self, previous_tier: str):
+        """Notify that fallback mode has been deactivated."""
+        tier_label = self._TIER_LABELS.get(previous_tier, previous_tier)
+        self.send_discord(
+            "✅ Fallback Mode DEACTIVATED",
+            f"Downloads recovered — exiting **{tier_label}**.\n"
+            "Normal rotation resumed.",
+            color=COLOR_SUCCESS,
         )

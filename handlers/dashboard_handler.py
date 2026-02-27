@@ -189,7 +189,7 @@ class DashboardHandler:
         videos_remaining = len(queue) - (queue.index(ctrl.playback_monitor._current_video) + 1) if (
             ctrl.playback_monitor and ctrl.playback_monitor._current_video in queue
         ) else 0
-        can_skip = videos_remaining > 0 or (not download_active and ctrl.next_prepared_playlists is not None)
+        can_skip = videos_remaining > 0 or (not download_active and ctrl.next_prepared_playlists is not None) or ctrl._fallback_active
         # Disallow trigger-rotation during a prepared rotation overlay
         can_trigger_rotation = not download_active and not ctrl.is_rotating and not ctrl._prepared_rotation_active
 
@@ -215,6 +215,8 @@ class DashboardHandler:
             "can_skip": can_skip,
             "can_trigger_rotation": can_trigger_rotation,
             "env_config": env_config,
+            "fallback_active": ctrl._fallback_active,
+            "fallback_tier": ctrl._fallback_tier,
             **prepared_state,
         }
 
@@ -376,6 +378,24 @@ class DashboardHandler:
                 return
             logger.info(f"Dashboard command: cancel schedule for '{slug}'")
             ctrl.prepared_rotation_manager.cancel_schedule(folder)
+
+        elif action == "toggle_prepared_fallback":
+            slug = payload.get("slug", "")
+            folder = ctrl.prepared_rotation_manager.resolve_folder(slug)
+            if not folder:
+                logger.warning(f"toggle_prepared_fallback: invalid slug {slug!r}")
+                return
+            value = bool(payload.get("is_fallback", False))
+            logger.info(f"Dashboard command: toggle fallback for '{slug}' -> {value}")
+            ctrl.prepared_rotation_manager.set_fallback(folder, value)
+
+        elif action == "force_fallback":
+            logger.warning("Dashboard command: FORCE ACTIVATE fallback mode (testing)")
+            await ctrl._activate_fallback()
+
+        elif action == "deactivate_fallback":
+            logger.info("Dashboard command: manually deactivate fallback mode")
+            await ctrl._deactivate_fallback()
 
         elif action == "reload_env":
             logger.info("Dashboard command: reload .env configuration")

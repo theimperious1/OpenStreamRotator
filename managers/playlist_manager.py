@@ -190,38 +190,6 @@ class PlaylistManager:
             logger.error(f"Failed to switch content folders: {e}")
             return False
 
-    def backup_current_content(self, current_folder: str, backup_folder: str) -> bool:
-        """
-        Backup current folder contents to backup folder.
-        Preserves original content before switching.
-        """
-        try:
-            # Normalize paths to avoid Windows path issues
-            current_folder = os.path.normpath(current_folder)
-            backup_folder = os.path.normpath(backup_folder)
-            
-            # Create backup folder
-            os.makedirs(backup_folder, exist_ok=True)
-            
-            # Move current folder contents to backup
-            if os.path.exists(current_folder):
-                for filename in os.listdir(current_folder):
-                    src = os.path.join(current_folder, filename)
-                    dst = os.path.join(backup_folder, filename)
-                    try:
-                        if os.path.isfile(src) or os.path.isdir(src):
-                            shutil.move(src, dst)
-                            logger.info(f"Backed up: {filename}")
-                    except Exception as e:
-                        logger.error(f"Error backing up {src} to {dst}: {e}")
-            
-            logger.info(f"Backup complete: {current_folder} → {backup_folder}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to backup content: {e}")
-            return False
-
     def validate_downloads(self, folder: str) -> bool:
         """Validate that downloads completed successfully."""
 

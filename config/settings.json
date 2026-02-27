@@ -1,7 +1,7 @@
 {
   "min_playlists_per_rotation": 2,
   "max_playlists_per_rotation": 2,
-  "download_retry_attempts": 5,
+  "download_retry_attempts": 3,
   "stream_title_template": "My Stream Title | {GAMES} | OpenStreamRotator",
   "yt_dlp_verbose": false,
   "notify_video_transitions": true,

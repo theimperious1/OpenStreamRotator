@@ -14,8 +14,10 @@ Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays the
 4. **Rotation trigger** — When all videos have been played and deleted (folder is empty), the system triggers the next rotation automatically.
 5. **Stream metadata** — The stream title and category are updated on all enabled platforms (Kick, Twitch) each rotation. Categories update per-video based on which playlist the video came from.
 6. **Temp playback** — If the current content runs out before the next rotation's downloads finish, the system temporarily plays already-downloaded files from the pending folder to avoid dead air.
-7. **Twitch live detection** — If a configured target streamer goes live on Twitch, OBS switches to a pause screen. When they go offline, playback resumes automatically.
-8. **OBS freeze detection** — The system monitors OBS render output via WebSocket. If OBS stops rendering frames for ~60 seconds (process alive but frozen), it automatically kills OBS, clears crash sentinels, relaunches it, reconnects, and resumes streaming — all unattended.
+7. **Prepared rotations** — Pre-download future rotations to a staging folder for on-demand or scheduled execution via the web dashboard. Supports custom titles, categories, and optional cursor restore.
+8. **Fallback mode** — If yt-dlp downloads fail repeatedly (3 consecutive failures by default), the system arms fallback mode. Once all live content and temp playback are exhausted, it activates: cycling through fallback-marked prepared rotations (with full title/category support), or the pause screen if none are available. Retries downloads every 5 minutes with escalation (retry pending, then try fresh playlists).
+9. **Twitch live detection** — If a configured target streamer goes live on Twitch, OBS switches to a pause screen. When they go offline, playback resumes automatically.
+10. **OBS freeze detection** — The system monitors OBS render output via WebSocket. If OBS stops rendering frames for ~60 seconds (process alive but frozen), it automatically kills OBS, clears crash sentinels, relaunches it, reconnects, and resumes streaming — all unattended.
 
 ## Prerequisites
 
@@ -155,6 +157,7 @@ All settings in this file are **hot-swappable** — you can edit and save while 
 | `ignore_streamer` | Prevents the target streamer going live from pausing the 24/7 stream (default: `false`) |
 | `yt_dlp_use_cookies` | Use browser cookies for age-restricted videos (default: `false`). Toggle mid-download-retry to recover from 403s. |
 | `yt_dlp_browser_for_cookies` | Browser to extract cookies from: `chrome`, `firefox`, `brave`, `edge`, etc. (default: `firefox`) |
+| `live_check_interval_seconds` | How often (in seconds) to poll for target streamer live status (default: `30`, minimum: `5`) |
 
 ### Hot-Swappable Configuration
 
@@ -301,6 +304,36 @@ If the current rotation's content runs out before the next rotation's downloads 
 
 This prevents dead air during long downloads.
 
+### Prepared Rotations
+
+Prepared rotations let you pre-download specific playlists into a staging folder and execute them on demand or on a schedule via the web dashboard. While a prepared rotation is playing:
+
+- The live folder is temporarily swapped for the prepared content
+- Stream title and category are updated based on the prepared playlists
+- When the prepared rotation content finishes (or is manually stopped), the system restores the original live content and resumes where it left off (if "Resume where I left off" was enabled)
+
+Prepared rotations are managed entirely through the web dashboard — create, schedule, execute, and delete.
+
+### Fallback Mode
+
+If yt-dlp downloads fail repeatedly (3 consecutive failures by default), the system **arms** fallback mode. Fallback does not activate immediately — it waits until all live content is naturally consumed and temp playback can no longer fill the gap. This ensures viewers aren't interrupted while content is still playing.
+
+Once live content is exhausted, fallback activates with the best available option:
+
+| Tier | Name | Condition | Behavior |
+|------|------|-----------|----------|
+| 1 | **Prepared rotation** | One or more prepared rotations marked as "fallback" exist and are ready | Cycles through all fallback rotations in order, looping back to the first when the last one finishes. Full title/category support per rotation. |
+| 2 | **Pause screen** | No fallback content available | Switches to the pause scene |
+
+While in fallback, the system retries downloads every 5 minutes with an escalating strategy:
+
+1. **First 3 retries**: Re-attempt the same download (yt-dlp resumes partial files).
+2. **Subsequent retries**: Wipe the pending folder and try a completely fresh rotation with different playlists — in case the original playlists are broken or blocked.
+
+When a download succeeds, fallback mode is automatically deactivated and normal operation resumes.
+
+You can mark any ready prepared rotation as a fallback candidate via the web dashboard's "Use as fallback" toggle. Multiple fallback rotations can be designated — the system cycles through all of them in creation order. The dashboard also provides a "Deactivate" button to manually exit fallback mode.
+
 ### Crash Recovery
 
 The system tracks session state in a local SQLite database. If the process is restarted:
@@ -344,13 +377,14 @@ If `DISCORD_WEBHOOK_URL` is set, the system sends notifications for:
 - **Temp Playback Activated / Complete** — long download handling
 - **Video Transition** — per-video notifications (opt-in via `notify_video_transitions` in `settings.json`)
 - **Rotation downloads** — started, ready, errors, warnings
+- **Fallback mode** — activated (with tier) and deactivated notifications
 - **Stream metadata failures** — title/category update errors
 - **Streamer live/offline** — target streamer status changes
 - **Automation errors** — unexpected exceptions
 
 ## Live Detection
 
-The system polls configured platforms every 60 seconds to check if the target streamer is live:
+The system polls configured platforms every 30 seconds (configurable via `live_check_interval_seconds` in `settings.json`) to check if the target streamer is live:
 
 - **Twitch** — set `TARGET_TWITCH_STREAMER` to a Twitch username (requires `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET`)
 - **Kick** — set `TARGET_KICK_STREAMER` to a Kick channel slug (requires `KICK_CLIENT_ID` / `KICK_CLIENT_SECRET`)
