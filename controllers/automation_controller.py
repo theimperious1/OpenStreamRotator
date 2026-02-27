@@ -1664,8 +1664,12 @@ class AutomationController:
                     await self._apply_config_changes_to_stream()
 
                 if self._title_refresh_needed:
-                    self._title_refresh_needed = False
-                    await self._refresh_title_with_previews()
+                    # Don't push preview titles while fallback content is
+                    # still playing — the downloaded playlists won't start
+                    # until the current fallback rotation finishes naturally.
+                    if not self._fallback_active:
+                        self._title_refresh_needed = False
+                        await self._refresh_title_with_previews()
 
                 if self._shutdown_requested:
                     await self._shutdown_cleanup()
