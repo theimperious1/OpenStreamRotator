@@ -103,13 +103,6 @@ echo "Cleaning backup folders..."
 # Get parent directory of video folder for temp backup folders
 VIDEO_PARENT=$(dirname "$VIDEO_FOLDER")
 
-# Delete temp_pending_backup (prepared rotation backup)
-if [ -d "$VIDEO_PARENT/temp_pending_backup" ]; then
-    echo "Deleting $VIDEO_PARENT/temp_pending_backup/*..."
-    rm -rf "$VIDEO_PARENT/temp_pending_backup"/*
-    rmdir "$VIDEO_PARENT/temp_pending_backup" 2>/dev/null || true
-fi
-
 echo ""
 
 # Delete temp_playback folder (created during large playlist downloads)

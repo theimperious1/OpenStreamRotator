@@ -111,14 +111,6 @@ REM Get parent directory of video folder for temp backup folders
 for %%A in ("!VIDEO_FOLDER!") do set "VIDEO_PARENT=%%~dpA"
 set "VIDEO_PARENT=!VIDEO_PARENT:~0,-1!"
 
-REM Delete temp_pending_backup (prepared rotation backup)
-if exist "!VIDEO_PARENT!\temp_pending_backup" (
-    echo Deleting !VIDEO_PARENT!\temp_pending_backup\*...
-    del /f /q "!VIDEO_PARENT!\temp_pending_backup\*" 2>nul
-    for /d %%x in ("!VIDEO_PARENT!\temp_pending_backup\*") do @rmdir /s /q "%%x" 2>nul
-    rmdir /q "!VIDEO_PARENT!\temp_pending_backup" 2>nul
-)
-
 echo.
 
 REM Delete temp_playback folder (created during large playlist downloads)

@@ -12,7 +12,7 @@ from threading import Event
 from typing import Callable, List, Optional
 
 from config.config_manager import ConfigManager
-from config.constants import DEFAULT_NEXT_ROTATION_FOLDER, DEFAULT_VIDEO_FOLDER
+from config.constants import DEFAULT_NEXT_ROTATION_FOLDER
 from core.database import DatabaseManager
 from core.video_registration_queue import VideoRegistrationQueue
 from managers.playlist_manager import PlaylistManager
@@ -53,6 +53,8 @@ class DownloadManager:
         # Callbacks set by the automation controller after construction
         self._get_current_session_id: Callable[[], Optional[int]] = lambda: None
         self._set_next_prepared_playlists: Callable = lambda v: None
+        self._on_download_failure: Optional[Callable[[], None]] = None
+        self._on_download_success: Optional[Callable[[], None]] = None
 
     # ------------------------------------------------------------------
     # Callback wiring (called once by AutomationController.__init__)
@@ -62,9 +64,13 @@ class DownloadManager:
         self,
         get_current_session_id: Callable[[], Optional[int]],
         set_next_prepared_playlists: Callable,
+        on_download_failure: Optional[Callable[[], None]] = None,
+        on_download_success: Optional[Callable[[], None]] = None,
     ) -> None:
         self._get_current_session_id = get_current_session_id
         self._set_next_prepared_playlists = set_next_prepared_playlists
+        self._on_download_failure = on_download_failure
+        self._on_download_success = on_download_success
 
     # ------------------------------------------------------------------
     # Background download trigger
@@ -101,20 +107,12 @@ class DownloadManager:
         """Start a background download if conditions are met.
 
         Checks whether downloads should be triggered (no download in progress,
-        no prepared playlists waiting, no backup folder content) and, if so,
-        selects playlists and kicks off the download in the thread pool.
+        no prepared playlists waiting) and, if so, selects playlists and kicks
+        off the download in the thread pool.
 
         Called from ``check_for_rotation`` in the main loop.
         """
         if self.background_download_in_progress or next_prepared_playlists is not None:
-            return
-
-        # Check if we have prepared content waiting in backup
-        settings = self.config_manager.get_settings()
-        base_path = os.path.dirname(settings.get('video_folder', DEFAULT_VIDEO_FOLDER))
-        pending_backup_folder = os.path.normpath(os.path.join(base_path, 'temp_pending_backup'))
-
-        if os.path.exists(pending_backup_folder) and os.listdir(pending_backup_folder):
             return
 
         # Select playlists in main thread (can't be done in executor thread due to SQLite)
@@ -156,12 +154,18 @@ class DownloadManager:
                 logger.info(f"Background download completed: {[p['name'] for p in playlists]}")
                 self._pending_db_playlists_to_complete = [p["name"] for p in playlists]
                 self.notification_service.notify_next_rotation_ready([p["name"] for p in playlists])
+                if self._on_download_success:
+                    self._on_download_success()
             else:
                 logger.warning("Background download had failures")
                 self.notification_service.notify_background_download_warning()
+                if self._on_download_failure:
+                    self._on_download_failure()
         except Exception as e:
             logger.error(f"Background download error: {e}")
             self.notification_service.notify_background_download_error(str(e))
+            if self._on_download_failure:
+                self._on_download_failure()
         finally:
             self.background_download_in_progress = False
 

@@ -33,6 +33,10 @@ DEFAULT_SCENE_STREAM = "OSR Stream"
 DEFAULT_SCENE_ROTATION_SCREEN = "OSR Rotation screen"
 DEFAULT_VLC_SOURCE_NAME = "OSR Playlist"
 
+# Fallback system
+DEFAULT_FALLBACK_FAILURE_THRESHOLD = 3  # Consecutive download failures before activating fallback
+FALLBACK_RETRY_INTERVAL = 300  # Seconds between retry attempts while in fallback (5 min)
+
 # Playlist Constraints
 DEFAULT_MIN_PLAYLISTS = 2
 DEFAULT_MAX_PLAYLISTS = 4
@@ -46,3 +50,4 @@ COLOR_STREAM_LIVE = 0x9146FF
 COLOR_ROTATION_START = 0xFFA500
 COLOR_NEXT_READY = 0x00FF00
 COLOR_MUTED = 0x808080
+COLOR_FALLBACK = 0xFF6600

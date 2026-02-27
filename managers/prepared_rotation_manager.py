@@ -178,6 +178,7 @@ class PreparedRotationManager:
             "scheduled_at": None,
             "video_count": 0,
             "folder": folder,
+            "is_fallback": False,
         }
         self._write_meta(folder, meta)
         logger.info(f"Created prepared rotation '{title}' at {folder}")
@@ -450,6 +451,37 @@ class PreparedRotationManager:
         return self.get(self._executing_folder)
 
     # ──────────────────────────────────────────────────────────────
+    # Fallback
+    # ──────────────────────────────────────────────────────────────
+
+    def set_fallback(self, folder: str, value: bool) -> bool:
+        """Mark or unmark a prepared rotation as fallback content."""
+        meta = self._read_meta(folder)
+        if not meta:
+            return False
+        meta["is_fallback"] = value
+        self._write_meta(folder, meta)
+        logger.info(f"Prepared rotation '{meta.get('title')}' is_fallback set to {value}")
+        return True
+
+    def get_fallback_rotation(self) -> Optional[str]:
+        """Return the folder of a ready fallback rotation, or None.
+
+        Picks the first fallback-marked rotation in ``ready`` or
+        ``completed`` status (sorted by creation time).
+        """
+        for meta in self.list_all():
+            if (meta.get("is_fallback")
+                    and meta.get("status") in ("ready", "completed")
+                    and self._count_videos(meta["folder"]) > 0):
+                return meta["folder"]
+        return None
+
+    def has_fallback_content(self) -> bool:
+        """Return True if at least one fallback rotation is ready."""
+        return self.get_fallback_rotation() is not None
+
+    # ──────────────────────────────────────────────────────────────
     # State snapshot for dashboard
     # ──────────────────────────────────────────────────────────────
 
@@ -469,6 +501,7 @@ class PreparedRotationManager:
                 "video_count": meta.get("video_count", 0),
                 "created_at": meta.get("created_at"),
                 "scheduled_at": meta.get("scheduled_at"),
+                "is_fallback": meta.get("is_fallback", False),
             })
         return {
             "prepared_rotations": rotations,
