@@ -5,7 +5,7 @@
   "stream_title_template": "My Stream Title | {GAMES} | OpenStreamRotator",
   "yt_dlp_verbose": false,
   "notify_video_transitions": true,
-  "ignore_streamer": true,
+  "ignore_streamer": false,
   "yt_dlp_use_cookies": true,
   "yt_dlp_browser_for_cookies": "firefox"
 }
