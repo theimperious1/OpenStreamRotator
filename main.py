@@ -20,7 +20,7 @@ else:
     _app_root = os.path.dirname(os.path.abspath(__file__))
 
 log_dir = _app_root
-log_file = os.path.join(log_dir, 'automation.log')
+log_file = os.path.join(log_dir, 'osr.log')
 
 # Setup logging with explicit formatter on handlers
 formatter = logging.Formatter(
