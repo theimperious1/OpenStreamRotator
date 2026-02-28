@@ -15,6 +15,7 @@ from typing import Optional, List
 from dotenv import load_dotenv
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
+from config.constants import VIDEO_EXTENSIONS
 from core.video_registration_queue import VideoRegistrationQueue
 from managers.playlist_manager import PlaylistManager
 from managers.stream_manager import StreamManager
@@ -955,22 +956,27 @@ class AutomationController:
         last loaded — this is the safe moment to reload (video just ended, no
         mid-video disruption for viewers).
         
-        If new files exist  → refresh VLC, reinitialize monitor, continue playing.
-        If no new files     → delete the finished video, mark consumed, let the
-                              normal temp-playback-exit flow handle it.
+        If new files exist     → refresh VLC, reinitialize monitor, continue playing.
+        If no new files yet    → stay on rotation screen and leave needs_vlc_refresh
+                                 set so the next tick retries (downloads still running).
+        If downloads finished  → delete the finished video, mark consumed, let the
+                                 normal temp-playback-exit flow handle it.
         """
         if not self.playback_monitor:
             return
         
         settings = self.config_manager.get_settings()
         pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
+        live_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
         
-        # Stop VLC to release its grip on the file before deleting.
-        # A scene switch alone doesn't make VLC release the file handle.
+        # Stop VLC and switch to rotation screen to release file locks.
+        # Guard: only do this once — subsequent ticks are already there.
         if self.obs_controller:
-            self.obs_controller.switch_scene(SCENE_ROTATION_SCREEN)
-            self.obs_controller.stop_vlc_source(VLC_SOURCE_NAME)
-            await asyncio.sleep(0.5)
+            current_scene = self.obs_controller.get_current_scene()
+            if current_scene != SCENE_ROTATION_SCREEN:
+                self.obs_controller.switch_scene(SCENE_ROTATION_SCREEN)
+                self.obs_controller.stop_vlc_source(VLC_SOURCE_NAME)
+                await asyncio.sleep(0.5)
         
         # Delete the finished video now (monitor deferred deletion for us)
         finished_video = self.playback_monitor.current_video
@@ -987,6 +993,11 @@ class AutomationController:
                 except Exception as e:
                     logger.error(f"Failed to delete temp playback video {finished_video}: {e}")
                     undeletable_file = finished_video
+        
+        # Clean up any leftover files in the live folder.  VLC held file
+        # locks on the last video(s) when the monitor tried to delete
+        # them, but VLC is now stopped so the locks are released.
+        self._cleanup_live_folder(live_folder)
         
         # Check if new files are available (exclude the undeletable finished video)
         new_files = self.playlist_manager.get_complete_video_files(pending_folder)
@@ -1016,10 +1027,49 @@ class AutomationController:
             
             logger.info("Temp playback VLC refreshed — continuing playback")
         else:
-            # No new files — mark consumed so normal exit flow kicks in
-            logger.info("No new files in pending after last temp video — marking consumed")
-            self.playback_monitor.clear_vlc_refresh_flag()
-            self.playback_monitor._all_content_consumed = True
+            # No files yet — check whether downloads are still running.
+            downloads_active = self.download_manager.background_download_in_progress
+            if not downloads_active:
+                # Also check the DB in case the flag is stale
+                session = self.db.get_current_session()
+                if session:
+                    next_pl = DatabaseManager.parse_json_field(session.get('next_playlists'), [])
+                    next_status: dict = DatabaseManager.parse_json_field(session.get('next_playlists_status'), {})
+                    downloads_active = any(
+                        next_status.get(pl) != 'COMPLETED' for pl in next_pl
+                    )
+
+            if downloads_active:
+                # Downloads still running — leave needs_vlc_refresh set so the
+                # next tick re-enters this method and checks again.  The viewer
+                # sees the static rotation screen in the meantime.
+                logger.debug("No new files in pending yet — downloads still in progress, will retry next tick")
+            else:
+                # Downloads genuinely finished and nothing new appeared.
+                logger.info("No new files in pending after last temp video — marking consumed")
+                self.playback_monitor.clear_vlc_refresh_flag()
+                self.playback_monitor._all_content_consumed = True
+
+    def _cleanup_live_folder(self, live_folder: str) -> None:
+        """Remove any leftover video files from the live folder.
+
+        When the last video in a rotation can't be deleted (VLC file lock on
+        older VLC versions), it lingers in the live folder.  This is called
+        after VLC has been stopped so the lock is released.
+        """
+        if not live_folder or not os.path.isdir(live_folder):
+            return
+        for filename in os.listdir(live_folder):
+            filepath = os.path.join(live_folder, filename)
+            if not os.path.isfile(filepath):
+                continue
+            if not filename.lower().endswith(VIDEO_EXTENSIONS):
+                continue
+            try:
+                os.remove(filepath)
+                logger.info(f"Cleaned up lingering live file: {filename}")
+            except Exception as e:
+                logger.debug(f"Could not clean up live file {filename}: {e}")
 
     async def _try_recover_session(self) -> None:
         """Attempt to start a fresh session when none is active.

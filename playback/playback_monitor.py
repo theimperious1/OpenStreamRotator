@@ -284,7 +284,14 @@ class PlaybackMonitor:
                         f"file could not be deleted, will retry next cycle"
                     )
                     break
-                self._update_vlc_source()
+                # NOTE: We intentionally do NOT call _update_vlc_source()
+                # here.  VLC has already auto-advanced to the next track and
+                # is playing it.  Reloading the playlist via
+                # set_input_settings would force VLC to restart the current
+                # track from position 0, causing a visible 1-second jitter.
+                # The deleted file's ghost entry in VLC's internal playlist
+                # is harmless — VLC won't revisit it before the rotation
+                # triggers all_content_consumed on the last video.
 
             # Advance to next video
             files = self._get_video_files()
