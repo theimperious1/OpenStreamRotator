@@ -284,14 +284,25 @@ class PlaybackMonitor:
                         f"file could not be deleted, will retry next cycle"
                     )
                     break
-                # NOTE: We intentionally do NOT call _update_vlc_source()
-                # here.  VLC has already auto-advanced to the next track and
-                # is playing it.  Reloading the playlist via
-                # set_input_settings would force VLC to restart the current
-                # track from position 0, causing a visible 1-second jitter.
-                # The deleted file's ghost entry in VLC's internal playlist
-                # is harmless — VLC won't revisit it before the rotation
-                # triggers all_content_consumed on the last video.
+                # NOTE: In normal (non-temp-playback) mode we intentionally
+                # do NOT call _update_vlc_source() here.  VLC has already
+                # auto-advanced to the next track and is playing it.
+                # Reloading the playlist via set_input_settings would force
+                # VLC to restart the current track from position 0, causing
+                # a visible 1-second jitter.  The deleted file's ghost
+                # entry in VLC's internal playlist is harmless — VLC won't
+                # revisit it before the rotation triggers
+                # all_content_consumed on the last video.
+                #
+                # In TEMP PLAYBACK mode, however, VLC's static playlist
+                # doesn't include files downloaded after the source was
+                # last set.  We MUST refresh so VLC discovers them.
+                # Drain stale events too — VLC may have fired extra
+                # ended/started pairs while looping on its exhausted
+                # playlist before this tick ran.
+                if self._temp_playback_mode:
+                    self._update_vlc_source()
+                    self._drain_queue()
 
             # Advance to next video
             files = self._get_video_files()
@@ -318,6 +329,12 @@ class PlaybackMonitor:
                 result['transition'] = True
                 result['previous_video'] = previous_original
                 result['current_video'] = current_original
+                # After refreshing VLC in temp playback, stop processing
+                # further transitions in this tick — any remaining count
+                # from _count_transitions is from stale VLC loop events on
+                # the old (now-replaced) playlist.
+                if self._temp_playback_mode:
+                    return result
             else:
                 self._all_content_consumed = True
                 result['transition'] = True

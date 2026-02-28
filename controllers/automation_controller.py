@@ -1414,11 +1414,18 @@ class AutomationController:
             # Drain any events that accumulated during the pause and
             # suppress the 'started' event VLC will fire when the scene
             # switch makes VLC visible/active again.
-            if self.playback_monitor:
-                self.playback_monitor._drain_queue()
-                self.playback_monitor._suppress_started += 1
+            # Guard: only drain+suppress when actually switching away from
+            # a non-stream scene (real unpause).  At startup the scene is
+            # already OSR Stream from execute_content_switch(), so there's
+            # no spurious event to suppress — adding one would eat the
+            # next genuine skip/transition event.
             if self.obs_controller:
-                self.obs_controller.switch_scene(SCENE_STREAM)
+                current_scene = self.obs_controller.get_current_scene()
+                if current_scene != SCENE_STREAM:
+                    if self.playback_monitor:
+                        self.playback_monitor._drain_queue()
+                        self.playback_monitor._suppress_started += 1
+                    self.obs_controller.switch_scene(SCENE_STREAM)
             # Restore playback position — VLC may have lost its cursor while paused
             if self.current_session_id:
                 session = self.db.get_current_session()
