@@ -32,6 +32,7 @@ class DashboardHandler:
 
     def __init__(self, ctrl: 'AutomationController') -> None:
         self.ctrl = ctrl
+        self._skip_ready: bool = True
 
     # ── Convenience shortcuts ─────────────────────────────────────
 
@@ -189,7 +190,9 @@ class DashboardHandler:
         videos_remaining = len(queue) - (queue.index(ctrl.playback_monitor._current_video) + 1) if (
             ctrl.playback_monitor and ctrl.playback_monitor._current_video in queue
         ) else 0
-        can_skip = videos_remaining > 0 or (not download_active and ctrl.next_prepared_playlists is not None) or ctrl._fallback_active
+        can_skip = self._skip_ready and (
+            videos_remaining > 0 or (not download_active and ctrl.next_prepared_playlists is not None) or ctrl._fallback_active
+        )
         # Disallow trigger-rotation during a prepared rotation overlay
         can_trigger_rotation = not download_active and not ctrl.is_rotating and not ctrl._prepared_rotation_active
 
@@ -213,6 +216,7 @@ class DashboardHandler:
             "connections": connections,
             "download_active": download_active,
             "can_skip": can_skip,
+            "skip_ready": self._skip_ready,
             "can_trigger_rotation": can_trigger_rotation,
             "env_config": env_config,
             "fallback_active": ctrl._fallback_active,
@@ -229,6 +233,11 @@ class DashboardHandler:
         payload = command.get("payload", {})
 
         if action == "skip_video":
+            # Cooldown: reject if a previous skip hasn't been processed yet
+            if not self._skip_ready:
+                logger.warning("Dashboard command: skip video REJECTED — previous skip still processing")
+                return
+
             # Guard: only allow skip if there are more videos in the queue
             if ctrl.playback_monitor:
                 queue = ctrl.playback_monitor._get_video_files()
@@ -246,14 +255,20 @@ class DashboardHandler:
                     await self._push_state_after_command()
                     return
             logger.info("Dashboard command: skip video")
+            self._skip_ready = False
             if ctrl.obs_controller:
                 try:
+                    # Disarm any active suppression window so the skip
+                    # event is counted as a real transition.
+                    if ctrl.playback_monitor:
+                        ctrl.playback_monitor.disarm_suppress()
                     ctrl.obs_controller.obs_client.trigger_media_input_action(
                         name=self._vlc_source_name,
                         action="OBS_WEBSOCKET_MEDIA_INPUT_ACTION_NEXT",
                     )
                 except Exception as e:
                     logger.warning(f"Failed to skip video via dashboard: {e}")
+                    self._skip_ready = True  # Re-enable on failure
             await self._push_state_after_command()
 
         elif action == "trigger_rotation":

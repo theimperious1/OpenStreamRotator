@@ -17,6 +17,7 @@ The monitor still owns:
 
 import logging
 import os
+import time
 from queue import Queue, Empty
 from typing import Optional, TYPE_CHECKING
 
@@ -62,11 +63,20 @@ class PlaybackMonitor:
         # Suspend flag — check() becomes a no-op while True.
         self._suspended: bool = False
 
-        # Suppression counter — absorbs spurious "started" events fired by
-        # VLC when the source is initialised or reconfigured (update_vlc_source).
-        # Each VLC reconfiguration fires exactly one "started" event that does
-        # NOT correspond to a real track change.
-        self._suppress_started: int = 0
+        # Time-based suppression — after any VLC reconfigure (source
+        # update, scene switch, resume) spurious "started" events fire
+        # within milliseconds.  We suppress ALL "started" events that
+        # arrive before this monotonic-clock deadline.  Real user skips
+        # or natural transitions happen seconds later, well outside the
+        # window.
+        self._suppress_until: float = 0.0
+
+        # Flag-based suppression for _update_vlc_source().  The time-
+        # based window above can expire before the main loop gets back
+        # to check() (title/category updates take seconds).  This flag
+        # guarantees the next "started" event from a VLC source
+        # reconfigure is suppressed regardless of processing delay.
+        self._vlc_update_suppress: bool = False
 
     # ------------------------------------------------------------------
     # Initialization
@@ -87,10 +97,11 @@ class PlaybackMonitor:
         self._delete_on_transition = True
 
         # Drain stale events from previous rotation / OBS reconnect
+        # and arm the cooldown window so any late-arriving VLC init
+        # events are suppressed rather than mistaken for transitions.
         self._drain_queue()
-        # VLC fires a "started" event when it loads the new playlist —
-        # suppress it so it isn't mistaken for a video transition.
-        self._suppress_started = 1
+        self._vlc_update_suppress = True
+        self._arm_suppress()
 
         files = self._get_video_files()
         if not files:
@@ -130,8 +141,8 @@ class PlaybackMonitor:
         """Resume monitoring after a suspension."""
         self._suspended = False
         self._drain_queue()
-        # OBS reconnect / freeze recovery may fire a spurious started event
-        self._suppress_started = 1
+        self._vlc_update_suppress = True
+        self._arm_suppress()
         logger.info("Playback monitor resumed")
 
     # ------------------------------------------------------------------
@@ -353,13 +364,39 @@ class PlaybackMonitor:
     # Event queue helpers
     # ------------------------------------------------------------------
 
-    def _drain_queue(self) -> None:
-        """Discard all pending events."""
+    # Suppress window — VLC's spurious events arrive within
+    # milliseconds of a reconfigure; real skips/transitions take
+    # seconds.  2 s is generous enough to absorb any VLC jitter.
+    _SUPPRESS_WINDOW_SECS: float = 2.0
+
+    def _arm_suppress(self) -> None:
+        """Begin a time-based suppression window.
+
+        All ``started`` events arriving before the deadline are treated
+        as spurious VLC init/reconfigure noise.
+        """
+        self._suppress_until = time.monotonic() + self._SUPPRESS_WINDOW_SECS
+
+    def disarm_suppress(self) -> None:
+        """Cancel the suppression window.
+
+        Called before intentional actions (e.g. dashboard skip) so the
+        resulting VLC event is counted as a real transition instead of
+        being swallowed by the init-event suppression.
+        """
+        self._suppress_until = 0.0
+        self._vlc_update_suppress = False
+
+    def _drain_queue(self) -> int:
+        """Discard all pending events and return how many were drained."""
+        count = 0
         while True:
             try:
                 self._event_queue.get_nowait()
+                count += 1
             except Empty:
                 break
+        return count
 
     def _count_transitions(self) -> int:
         """Read events from the queue and return how many transitions occurred.
@@ -402,17 +439,26 @@ class PlaybackMonitor:
                 transitions += 1
                 local_suppress += 1
             elif evt == "started":
-                # 1. Spurious event from VLC init / source update
-                if self._suppress_started > 0:
-                    self._suppress_started -= 1
+                now = time.monotonic()
+                # 1. Spurious event from VLC source update (flag-based,
+                #    survives arbitrarily long processing delays)
+                if self._vlc_update_suppress:
+                    self._vlc_update_suppress = False
                     logger.debug(
                         "Suppressed spurious 'started' event "
-                        f"(VLC init/update, remaining: {self._suppress_started})"
+                        "(VLC source update — flag)"
                     )
-                # 2. Paired with a preceding "ended" (same transition)
+                # 2. Spurious event from VLC init / resume (time-based)
+                elif now < self._suppress_until:
+                    remaining = self._suppress_until - now
+                    logger.debug(
+                        "Suppressed spurious 'started' event "
+                        f"(VLC init/update, {remaining:.1f}s remaining)"
+                    )
+                # 3. Paired with a preceding "ended" (same transition)
                 elif local_suppress > 0:
                     local_suppress -= 1
-                # 3. Genuine per-track advance (no preceding "ended")
+                # 4. Genuine per-track advance (no preceding "ended")
                 else:
                     transitions += 1
 
@@ -466,7 +512,7 @@ class PlaybackMonitor:
         """Push current folder contents to the OBS VLC source.
 
         After reconfiguration VLC fires a spurious ``started`` event for
-        the new first track.  We increment ``_suppress_started`` so that
+        the new first track.  We arm the suppression window so that
         ``_count_transitions`` ignores it.
         """
         if not self.obs_controller:
@@ -476,9 +522,12 @@ class PlaybackMonitor:
                 self.vlc_source_name, self.video_folder
             )
             if success:
-                # VLC will fire a "started" event from the reconfiguration —
-                # mark it for suppression.
-                self._suppress_started += 1
+                # VLC will fire a "started" event from the reconfiguration.
+                # Use BOTH mechanisms: the flag survives long processing
+                # delays (title/category updates take seconds); the time
+                # window catches events processed within 2 s.
+                self._vlc_update_suppress = True
+                self._arm_suppress()
                 files = self._get_video_files()
                 logger.debug(f"Updated VLC source: {len(files)} videos remaining")
         except Exception as e:

@@ -228,6 +228,11 @@ class AutomationController:
         self.next_prepared_playlists = playlists
         if playlists:
             self._title_refresh_needed = True
+        else:
+            # Playlists consumed or cleared — cancel any pending title
+            # refresh so the main loop doesn't generate a preview from
+            # stale data (e.g. after temp playback exit).
+            self._title_refresh_needed = False
 
     # ── Fallback system ──────────────────────────────────────────
 
@@ -934,6 +939,14 @@ class AutomationController:
             if not preview_names:
                 return  # nothing new to add
 
+            # Safety net: drop preview names that already appear in the
+            # current rotation to avoid duplicating playlist names in the
+            # title (can happen if next_prepared_playlists was stale).
+            current_upper = {n.upper() for n in playlist_names}
+            preview_names = [n for n in preview_names if n.upper() not in current_upper]
+            if not preview_names:
+                return
+
             new_title = self.playlist_manager.generate_stream_title(
                 playlist_names, preview_playlists=preview_names
             )
@@ -1185,6 +1198,15 @@ class AutomationController:
                             self.notification_service.notify_video_transition(current_video, cat_label)
                     except Exception as e:
                         logger.warning(f"Failed to update category on video transition: {e}")
+
+                # Re-enable dashboard skip and send acknowledgment so the
+                # dashboard can unlock the skip button for the next action.
+                if self.dashboard_handler:
+                    self.dashboard_handler._skip_ready = True
+                if self.web_dashboard:
+                    await self.web_dashboard.send_event("skip_ready", {
+                        "current_video": current_video,
+                    })
             
             # Handle VLC refresh during temp playback: last video finished but
             # new files may have been downloaded.  Refresh VLC at this natural
@@ -1424,7 +1446,8 @@ class AutomationController:
                 if current_scene != SCENE_STREAM:
                     if self.playback_monitor:
                         self.playback_monitor._drain_queue()
-                        self.playback_monitor._suppress_started += 1
+                        self.playback_monitor._vlc_update_suppress = True
+                        self.playback_monitor._arm_suppress()
                     self.obs_controller.switch_scene(SCENE_STREAM)
             # Restore playback position — VLC may have lost its cursor while paused
             if self.current_session_id:
