@@ -1448,8 +1448,58 @@ class AutomationController:
                         self.playback_monitor._drain_queue()
                         self.playback_monitor._vlc_update_suppress = True
                         self.playback_monitor._arm_suppress()
+
+                    # Reconfigure VLC with the actual live folder contents.
+                    # During the pause VLC kept looping its (possibly stale)
+                    # playlist — files deleted before/during pause are still
+                    # in its settings.  Refreshing here ensures the playlist
+                    # matches what is actually on disk.
+                    live_folder = self.config_manager.video_folder
+                    saved_video = None
+                    saved_cursor = 0
+                    if self.current_session_id:
+                        session = self.db.get_current_session()
+                        if session:
+                            saved_video = session.get('playback_current_video')
+                            saved_cursor = session.get('playback_cursor_ms', 0)
+
+                    resume_playlist = None
+                    if saved_video:
+                        try:
+                            all_files = sorted(
+                                f for f in os.listdir(live_folder)
+                                if f.lower().endswith(VIDEO_EXTENSIONS)
+                            )
+                            # Find the file that matches the saved original name
+                            # (files may have an ordering prefix like 01_)
+                            import re
+                            _pfx = re.compile(r'^\d{2}_')
+                            resume_file = None
+                            for f in all_files:
+                                original = _pfx.sub('', f)
+                                if original == saved_video:
+                                    resume_file = f
+                                    break
+                            if resume_file:
+                                resume_playlist = [resume_file] + [
+                                    f for f in all_files if f != resume_file
+                                ]
+                        except Exception as e:
+                            logger.debug(f"Could not build resume playlist for unpause: {e}")
+
+                    success, _ = self.obs_controller.update_vlc_source(
+                        VLC_SOURCE_NAME, live_folder, playlist=resume_playlist
+                    )
+                    if success:
+                        logger.info("Refreshed VLC playlist for unpause")
+                        # Re-initialize playback monitor with updated file list
+                        resume_file_for_monitor = resume_playlist[0] if resume_playlist else None
+                        self._initialize_playback_monitor(live_folder, resume_file_for_monitor)
+
                     self.obs_controller.switch_scene(SCENE_STREAM)
-            # Restore playback position — VLC may have lost its cursor while paused
+
+            # Restore playback position — VLC reloaded its playlist so cursor
+            # is at 0.  The deferred seek will jump back once VLC reports playing.
             if self.current_session_id:
                 session = self.db.get_current_session()
                 if session:
