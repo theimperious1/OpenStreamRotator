@@ -78,6 +78,14 @@ class PlaybackMonitor:
         # reconfigure is suppressed regardless of processing delay.
         self._vlc_update_suppress: bool = False
 
+        # Cross-batch ended→started pairing.  When an "ended" event
+        # arrives in one check() batch but the paired "started" arrives
+        # in the *next* batch, we need to remember that the following
+        # "started" should be absorbed rather than counted as a second
+        # transition.  This counter is zeroed whenever the queue is
+        # drained (rotation switch, resume, etc.).
+        self._ended_suppress: int = 0
+
     # ------------------------------------------------------------------
     # Initialization
     # ------------------------------------------------------------------
@@ -390,6 +398,7 @@ class PlaybackMonitor:
     def _drain_queue(self) -> int:
         """Discard all pending events and return how many were drained."""
         count = 0
+        self._ended_suppress = 0
         while True:
             try:
                 self._event_queue.get_nowait()
@@ -406,18 +415,18 @@ class PlaybackMonitor:
         * ``MediaInputPlaybackStarted`` fires each time a new **track**
           begins — both on natural track advances and when the source is
           reconfigured (``update_vlc_source`` / ``initialize``).
-        * ``MediaInputPlaybackEnded`` fires when the **entire playlist**
-          finishes (last track only), *not* per-track.
+        * ``MediaInputPlaybackEnded`` fires per-track when a track
+          finishes, including mid-playlist tracks (despite OBS docs
+          suggesting it fires only for the final track).
 
-        Because ``started`` is the per-track signal we rely on it for
-        mid-playlist transitions.  However, VLC also fires ``started``
-        when the source is initialised or reconfigured, so we maintain a
-        ``_suppress_started`` counter that absorbs those spurious events.
+        A natural track-end therefore produces an ``ended→started``
+        pair, while a dashboard skip only produces ``started``.
 
-        An ``ended`` event always counts as a transition (it means the
-        last track finished).  Each ``ended`` also locally suppresses one
-        following ``started`` so that an ``ended→started`` pair counts as
-        one transition, not two.
+        Each ``ended`` event counts as a transition **and** increments
+        ``self._ended_suppress`` so that the paired ``started`` (same
+        transition) is absorbed.  Because the two events can arrive in
+        separate ``check()`` batches (race timing), the suppress counter
+        is an *instance* variable that persists across calls.
         """
         events: list[str] = []
         while True:
@@ -430,14 +439,11 @@ class PlaybackMonitor:
             return 0
 
         transitions = 0
-        # Each "ended" absorbs the immediately following "started" so an
-        # ended→started pair produced by OBS counts as 1 transition.
-        local_suppress = 0
 
         for evt in events:
             if evt == "ended":
                 transitions += 1
-                local_suppress += 1
+                self._ended_suppress += 1
             elif evt == "started":
                 now = time.monotonic()
                 # 1. Spurious event from VLC source update (flag-based,
@@ -455,9 +461,10 @@ class PlaybackMonitor:
                         "Suppressed spurious 'started' event "
                         f"(VLC init/update, {remaining:.1f}s remaining)"
                     )
-                # 3. Paired with a preceding "ended" (same transition)
-                elif local_suppress > 0:
-                    local_suppress -= 1
+                # 3. Paired with a preceding "ended" (same transition,
+                #    may span separate check() batches)
+                elif self._ended_suppress > 0:
+                    self._ended_suppress -= 1
                 # 4. Genuine per-track advance (no preceding "ended")
                 else:
                     transitions += 1
