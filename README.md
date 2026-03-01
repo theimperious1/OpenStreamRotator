@@ -8,7 +8,7 @@ Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays the
 
 ## How It Works
 
-1. **Playlist selection** — Each rotation, the system picks a configurable number of enabled playlists (prioritizing least-recently-played) and downloads their videos via yt-dlp into a pending folder.
+1. **Playlist selection** — Each rotation, the system picks a configurable number of enabled playlists and downloads their videos via yt-dlp into a pending folder. Selection is weighted by play history and priority — higher-priority playlists are selected more frequently (see [Priority](#playlist-priority) below).
 2. **Content switch** — Once downloads finish, OBS briefly shows a transition scene while the live folder is swapped with the new content. VLC reloads and playback begins.
 3. **Playback monitoring** — The system detects video transitions via OBS WebSocket media events (`MediaInputPlaybackStarted` / `MediaInputPlaybackEnded`). When a video finishes, it's deleted and the next one is tracked automatically.
 4. **Rotation trigger** — When all videos have been played and deleted (folder is empty), the system triggers the next rotation automatically.
@@ -126,7 +126,7 @@ python main.py
 | `url` | YouTube playlist URL |
 | `category` | Platform category set when videos from this playlist are playing (e.g. `"Just Chatting"`, `"Final Fantasy XIV"`). Falls back to the playlist name if not set. |
 | `enabled` | Whether this playlist is available for rotation selection |
-| `priority` | Selection priority (lower = higher priority among equally-old playlists) |
+| `priority` | Selection frequency multiplier (default `1`). A priority of `2` means the playlist is selected ~2x as often, `3` = ~3x as often, etc. See [Priority](#playlist-priority) below. |
 
 ### Settings (`config/settings.json`)
 
@@ -284,7 +284,7 @@ The system will:
 
 ### What Happens Each Rotation
 
-1. Playlists are selected (least-recently-played first, excluding currently playing and currently downloading playlists)
+1. Playlists are selected using weighted priority scoring (see [Priority](#playlist-priority)), excluding currently playing and currently downloading playlists
 2. Videos are downloaded via yt-dlp into the pending folder
 3. When downloads complete, OBS switches to the Rotation screen scene
 4. The live folder is cleared and pending content is moved in
@@ -293,6 +293,21 @@ The system will:
 7. Stream title and category are updated on all enabled platforms
 8. The playback monitor begins tracking playback; as each video finishes, it's deleted
 9. When all content is consumed, the cycle repeats
+
+### Playlist Priority
+
+The `priority` field in `playlists.json` controls how often a playlist is selected relative to others. It works as a **frequency multiplier**:
+
+| Priority | Effect |
+|----------|--------|
+| `1` | Normal — selected in its regular turn (default) |
+| `2` | Selected ~2x as often as a priority-1 playlist |
+| `3` | Selected ~3x as often as a priority-1 playlist |
+| `5` | Selected ~5x as often as a priority-1 playlist |
+
+**How it works:** The system scores each playlist by multiplying its time-since-last-played by its priority. A priority-3 playlist that was played 2 hours ago gets an effective age of 6 hours, making it compete with playlists that haven't been played for much longer. Playlists that have never been played always come first regardless of priority.
+
+**Example:** With 20 playlists and 4 per rotation, a priority-1 playlist appears roughly every 5th rotation. A priority-3 playlist would appear roughly every other rotation instead.
 
 ### Temp Playback
 
