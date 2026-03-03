@@ -138,7 +138,7 @@ All settings in this file are **hot-swappable** — you can edit and save while 
   "min_playlists_per_rotation": 2,
   "max_playlists_per_rotation": 2,
   "download_retry_attempts": 5,
-  "stream_title_template": "24/7 Reruns | {GAMES} | ",
+  "stream_title_template": "24/7 Reruns | {PLAYLISTS} | ",
   "yt_dlp_verbose": false,
   "notify_video_transitions": false,
   "ignore_streamer": false,
@@ -152,7 +152,7 @@ All settings in this file are **hot-swappable** — you can edit and save while 
 | `min_playlists_per_rotation` | Minimum playlists selected per rotation |
 | `max_playlists_per_rotation` | Maximum playlists selected per rotation |
 | `download_retry_attempts` | Number of retry attempts for failed downloads |
-| `stream_title_template` | Title template. `{GAMES}` is replaced with playlist names joined by ` \| ` |
+| `stream_title_template` | Title template. `{PLAYLISTS}` is replaced with playlist names joined by ` \| ` (legacy `{GAMES}` also accepted) |
 | `yt_dlp_verbose` | Enable verbose yt-dlp output in logs |
 | `notify_video_transitions` | Send a Discord notification on every video transition (default: `false`, can be noisy with short videos) |
 | `ignore_streamer` | Prevents the target streamer going live from pausing the 24/7 stream (default: `false`) |

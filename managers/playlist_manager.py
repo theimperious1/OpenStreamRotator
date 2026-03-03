@@ -108,8 +108,11 @@ class PlaylistManager:
         settings = self.config.get_settings()
         template = settings.get(
             'stream_title_template',
-            '24/7 @example1 / @example2 | {GAMES} | !playlist !streamtime !new'
+            'My Stream Title | {PLAYLISTS} | OpenStreamRotator'
         )
+
+        # Backward compat: accept legacy {GAMES} token
+        template = template.replace('{GAMES}', '{PLAYLISTS}')
 
         SEPARATOR = ' | '
 
@@ -119,19 +122,19 @@ class PlaylistManager:
             all_names.extend(p.upper() for p in preview_playlists)
 
         if not all_names:
-            return template.replace('{GAMES}', 'VARIETY')[:max_length]
+            return template.replace('{PLAYLISTS}', 'VARIETY')[:max_length]
 
         # Fit as many names as possible, dropping from the tail (previews first)
         while all_names:
-            games_str = SEPARATOR.join(all_names)
-            title = template.replace('{GAMES}', games_str)
+            playlists_str = SEPARATOR.join(all_names)
+            title = template.replace('{PLAYLISTS}', playlists_str)
             if len(title) <= max_length:
                 return title
             # Drop the last name
             all_names.pop()
 
         # Even zero playlists may still exceed — hard-truncate as last resort
-        return template.replace('{GAMES}', 'VARIETY')[:max_length]
+        return template.replace('{PLAYLISTS}', 'VARIETY')[:max_length]
 
     def switch_content_folders(self, current_folder: str, next_folder: str) -> bool:
         """
