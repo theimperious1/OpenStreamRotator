@@ -15,6 +15,7 @@ from typing import Optional, List
 from dotenv import load_dotenv
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
+from config.constants import VIDEO_EXTENSIONS
 from core.video_registration_queue import VideoRegistrationQueue
 from managers.playlist_manager import PlaylistManager
 from managers.stream_manager import StreamManager
@@ -27,6 +28,7 @@ from services.notification_service import NotificationService
 from playback.playback_monitor import PlaybackMonitor
 from services.twitch_live_checker import TwitchLiveChecker
 from services.kick_live_checker import KickLiveChecker
+from services.twitch_eventsub_listener import TwitchEventSubListener
 from handlers.content_switch_handler import ContentSwitchHandler
 from handlers.dashboard_handler import DashboardHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
@@ -72,6 +74,9 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 # Web Dashboard Configuration
 WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "")      # e.g. ws://localhost:8000
 WEB_DASHBOARD_API_KEY = os.getenv("WEB_DASHBOARD_API_KEY", "")  # from team page
+
+# Unpause mode: "offline" (default) or "raid" (unpause on Twitch raid OR offline)
+UNPAUSE_MODE = os.getenv("UNPAUSE_MODE", "offline").strip().lower()
 
 
 class AutomationController:
@@ -158,6 +163,11 @@ class AutomationController:
         self._manual_pause = False  # True when paused via dashboard (prevents auto-resume)
         self._rotation_postpone_logged = False
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
+        self._eventsub_listener: Optional[TwitchEventSubListener] = None
+        self._eventsub_is_live: Optional[bool] = None  # None = no EventSub data yet
+        self._raid_detected = False  # Set by EventSub channel.raid callback
+        self._raid_unpaused = False  # True after raid-triggered unpause; suppresses re-pause
+        self._force_live_check = False  # Set by reload_env on target streamer change
         self._shutdown_requested = False
         self._title_refresh_needed = False  # Set by download callback to append preview names to title
         self._start_time = time.time()  # For uptime tracking
@@ -227,6 +237,11 @@ class AutomationController:
         self.next_prepared_playlists = playlists
         if playlists:
             self._title_refresh_needed = True
+        else:
+            # Playlists consumed or cleared — cancel any pending title
+            # refresh so the main loop doesn't generate a preview from
+            # stale data (e.g. after temp playback exit).
+            self._title_refresh_needed = False
 
     # ── Fallback system ──────────────────────────────────────────
 
@@ -377,6 +392,7 @@ class AutomationController:
         global KICK_CLIENT_ID, KICK_CLIENT_SECRET
         global DISCORD_WEBHOOK_URL
         global WEB_DASHBOARD_URL, WEB_DASHBOARD_API_KEY
+        global UNPAUSE_MODE
 
         # Snapshot old values for diff
         old = {
@@ -388,9 +404,12 @@ class AutomationController:
             "TWITCH_CLIENT_SECRET": TWITCH_CLIENT_SECRET,
             "KICK_CLIENT_ID": KICK_CLIENT_ID,
             "KICK_CLIENT_SECRET": KICK_CLIENT_SECRET,
+            "TARGET_TWITCH_STREAMER": os.getenv("TARGET_TWITCH_STREAMER", ""),
+            "TARGET_KICK_STREAMER": os.getenv("TARGET_KICK_STREAMER", ""),
             "DISCORD_WEBHOOK_URL": DISCORD_WEBHOOK_URL,
             "WEB_DASHBOARD_URL": WEB_DASHBOARD_URL,
             "WEB_DASHBOARD_API_KEY": WEB_DASHBOARD_API_KEY,
+            "UNPAUSE_MODE": UNPAUSE_MODE,
         }
 
         # Re-read .env into os.environ (override=True so changed values win)
@@ -411,6 +430,7 @@ class AutomationController:
         DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
         WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "")
         WEB_DASHBOARD_API_KEY = os.getenv("WEB_DASHBOARD_API_KEY", "")
+        UNPAUSE_MODE = os.getenv("UNPAUSE_MODE", "offline").strip().lower()
 
         # Build diff
         new = {
@@ -422,9 +442,12 @@ class AutomationController:
             "TWITCH_CLIENT_SECRET": TWITCH_CLIENT_SECRET,
             "KICK_CLIENT_ID": KICK_CLIENT_ID,
             "KICK_CLIENT_SECRET": KICK_CLIENT_SECRET,
+            "TARGET_TWITCH_STREAMER": os.getenv("TARGET_TWITCH_STREAMER", ""),
+            "TARGET_KICK_STREAMER": os.getenv("TARGET_KICK_STREAMER", ""),
             "DISCORD_WEBHOOK_URL": DISCORD_WEBHOOK_URL,
             "WEB_DASHBOARD_URL": WEB_DASHBOARD_URL,
             "WEB_DASHBOARD_API_KEY": WEB_DASHBOARD_API_KEY,
+            "UNPAUSE_MODE": UNPAUSE_MODE,
         }
         changed = {k: new[k] for k in new if old[k] != new[k]}
 
@@ -477,6 +500,32 @@ class AutomationController:
             else:
                 self.kick_live_checker = None
                 logger.info("reload_env: Kick credentials cleared — live checker disabled")
+
+        # Target streamer changed — force an immediate live re-check on
+        # the next loop tick and clear stale state from the old streamer.
+        streamer_keys = {"TARGET_TWITCH_STREAMER", "TARGET_KICK_STREAMER"}
+        if streamer_keys & set(changed):
+            self._force_live_check = True
+            self.last_stream_status = None
+            self._raid_detected = False
+            self._raid_unpaused = False
+            logger.info("reload_env: target streamer changed — forcing immediate live recheck")
+
+        # EventSub listener — restart if target streamer, creds, or UNPAUSE_MODE changed
+        eventsub_keys = {"TARGET_TWITCH_STREAMER", "UNPAUSE_MODE", "TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET"}
+        if eventsub_keys & set(changed):
+            if self._eventsub_listener:
+                asyncio.ensure_future(self._eventsub_listener.stop())
+                self._eventsub_listener = None
+                self._eventsub_is_live = None
+                logger.info("reload_env: stopped EventSub listener")
+            # Always (re)start if Twitch target is configured
+            asyncio.ensure_future(self._start_eventsub_listener())
+            logger.info("reload_env: (re)starting EventSub listener")
+            # Clear raid state when mode changes away from raid
+            if UNPAUSE_MODE != "raid":
+                self._raid_detected = False
+                self._raid_unpaused = False
 
         # OBS connection — reconnect if host/port/password changed
         if any(k in changed for k in ("OBS_HOST", "OBS_PORT", "OBS_PASSWORD")):
@@ -721,6 +770,86 @@ class AutomationController:
         """Initialize enabled streaming platforms."""
         self.platform_manager.setup(self.twitch_live_checker)
 
+    async def _start_eventsub_listener(self) -> None:
+        """Start the Twitch EventSub WebSocket listener.
+
+        Always starts when ``TARGET_TWITCH_STREAMER`` is set and Twitch
+        credentials are available — provides near-instant ``stream.online``
+        and ``stream.offline`` detection.  The HTTP poll still runs as a
+        safety-net fallback at a reduced frequency.
+
+        When ``UNPAUSE_MODE=raid``, also subscribes to ``channel.raid``
+        for the fast‐unpause-on-raid feature.
+        """
+        target_twitch = os.getenv("TARGET_TWITCH_STREAMER", "").split("#")[0].strip()
+        if not target_twitch:
+            return  # No Twitch target — nothing to listen for
+
+        if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+            logger.debug("EventSub listener: Twitch credentials missing — skipping")
+            return
+
+        if not self.twitch_live_checker:
+            logger.debug("EventSub listener: Twitch live checker unavailable — skipping")
+            return
+
+        # Resolve streamer username → user ID
+        await asyncio.to_thread(self.twitch_live_checker.refresh_token_if_needed)
+        streamer_id = await asyncio.to_thread(
+            self.twitch_live_checker.get_broadcaster_id, target_twitch,
+        )
+        if not streamer_id:
+            logger.error(f"EventSub listener: could not resolve Twitch user ID for '{target_twitch}'")
+            return
+
+        # Resolve 24/7 channel broadcaster ID (needed for stored user token)
+        broadcaster_id = os.getenv("TWITCH_BROADCASTER_ID", "").strip()
+        if not broadcaster_id:
+            twitch_login = os.getenv("TWITCH_USER_LOGIN", "").strip()
+            if twitch_login:
+                broadcaster_id = await asyncio.to_thread(
+                    self.twitch_live_checker.get_broadcaster_id, twitch_login,
+                )
+        if not broadcaster_id:
+            logger.error(
+                "EventSub listener: cannot determine 24/7 channel broadcaster ID "
+                "(set TWITCH_BROADCASTER_ID or TWITCH_USER_LOGIN in .env) — skipping"
+            )
+            return
+
+        # Callbacks
+        def on_stream_online(event: dict) -> None:
+            self._eventsub_is_live = True
+            logger.debug("EventSub callback: _eventsub_is_live = True")
+
+        def on_stream_offline(event: dict) -> None:
+            self._eventsub_is_live = False
+            logger.debug("EventSub callback: _eventsub_is_live = False")
+
+        def _raid_callback(event: dict) -> None:
+            self._raid_detected = True
+            logger.debug("EventSub callback: _raid_detected = True")
+
+        on_raid = _raid_callback if UNPAUSE_MODE == "raid" else None
+
+        self._eventsub_listener = TwitchEventSubListener(
+            client_id=TWITCH_CLIENT_ID,
+            client_secret=TWITCH_CLIENT_SECRET,
+            broadcaster_id=broadcaster_id,
+            streamer_user_id=streamer_id,
+            on_stream_online=on_stream_online,
+            on_stream_offline=on_stream_offline,
+            on_raid=on_raid,
+        )
+        self._eventsub_listener.start()
+        subs = "stream.online, stream.offline"
+        if on_raid:
+            subs += ", channel.raid"
+        logger.info(
+            f"Twitch EventSub listener started (streamer={target_twitch}, "
+            f"streamer_id={streamer_id}, subscriptions=[{subs}])"
+        )
+
     def _initialize_playback_monitor(self, video_folder: Optional[str] = None,
                                      override_current_video: Optional[str] = None):
         """Initialize playback monitor for current rotation.
@@ -933,6 +1062,14 @@ class AutomationController:
             if not preview_names:
                 return  # nothing new to add
 
+            # Safety net: drop preview names that already appear in the
+            # current rotation to avoid duplicating playlist names in the
+            # title (can happen if next_prepared_playlists was stale).
+            current_upper = {n.upper() for n in playlist_names}
+            preview_names = [n for n in preview_names if n.upper() not in current_upper]
+            if not preview_names:
+                return
+
             new_title = self.playlist_manager.generate_stream_title(
                 playlist_names, preview_playlists=preview_names
             )
@@ -955,22 +1092,27 @@ class AutomationController:
         last loaded — this is the safe moment to reload (video just ended, no
         mid-video disruption for viewers).
         
-        If new files exist  → refresh VLC, reinitialize monitor, continue playing.
-        If no new files     → delete the finished video, mark consumed, let the
-                              normal temp-playback-exit flow handle it.
+        If new files exist     → refresh VLC, reinitialize monitor, continue playing.
+        If no new files yet    → stay on rotation screen and leave needs_vlc_refresh
+                                 set so the next tick retries (downloads still running).
+        If downloads finished  → delete the finished video, mark consumed, let the
+                                 normal temp-playback-exit flow handle it.
         """
         if not self.playback_monitor:
             return
         
         settings = self.config_manager.get_settings()
         pending_folder = settings.get('next_rotation_folder', DEFAULT_NEXT_ROTATION_FOLDER)
+        live_folder = settings.get('video_folder', DEFAULT_VIDEO_FOLDER)
         
-        # Stop VLC to release its grip on the file before deleting.
-        # A scene switch alone doesn't make VLC release the file handle.
+        # Stop VLC and switch to rotation screen to release file locks.
+        # Guard: only do this once — subsequent ticks are already there.
         if self.obs_controller:
-            self.obs_controller.switch_scene(SCENE_ROTATION_SCREEN)
-            self.obs_controller.stop_vlc_source(VLC_SOURCE_NAME)
-            await asyncio.sleep(0.5)
+            current_scene = self.obs_controller.get_current_scene()
+            if current_scene != SCENE_ROTATION_SCREEN:
+                self.obs_controller.switch_scene(SCENE_ROTATION_SCREEN)
+                self.obs_controller.stop_vlc_source(VLC_SOURCE_NAME)
+                await asyncio.sleep(0.5)
         
         # Delete the finished video now (monitor deferred deletion for us)
         finished_video = self.playback_monitor.current_video
@@ -987,6 +1129,11 @@ class AutomationController:
                 except Exception as e:
                     logger.error(f"Failed to delete temp playback video {finished_video}: {e}")
                     undeletable_file = finished_video
+        
+        # Clean up any leftover files in the live folder.  VLC held file
+        # locks on the last video(s) when the monitor tried to delete
+        # them, but VLC is now stopped so the locks are released.
+        self._cleanup_live_folder(live_folder)
         
         # Check if new files are available (exclude the undeletable finished video)
         new_files = self.playlist_manager.get_complete_video_files(pending_folder)
@@ -1016,10 +1163,49 @@ class AutomationController:
             
             logger.info("Temp playback VLC refreshed — continuing playback")
         else:
-            # No new files — mark consumed so normal exit flow kicks in
-            logger.info("No new files in pending after last temp video — marking consumed")
-            self.playback_monitor.clear_vlc_refresh_flag()
-            self.playback_monitor._all_content_consumed = True
+            # No files yet — check whether downloads are still running.
+            downloads_active = self.download_manager.background_download_in_progress
+            if not downloads_active:
+                # Also check the DB in case the flag is stale
+                session = self.db.get_current_session()
+                if session:
+                    next_pl = DatabaseManager.parse_json_field(session.get('next_playlists'), [])
+                    next_status: dict = DatabaseManager.parse_json_field(session.get('next_playlists_status'), {})
+                    downloads_active = any(
+                        next_status.get(pl) != 'COMPLETED' for pl in next_pl
+                    )
+
+            if downloads_active:
+                # Downloads still running — leave needs_vlc_refresh set so the
+                # next tick re-enters this method and checks again.  The viewer
+                # sees the static rotation screen in the meantime.
+                logger.debug("No new files in pending yet — downloads still in progress, will retry next tick")
+            else:
+                # Downloads genuinely finished and nothing new appeared.
+                logger.info("No new files in pending after last temp video — marking consumed")
+                self.playback_monitor.clear_vlc_refresh_flag()
+                self.playback_monitor._all_content_consumed = True
+
+    def _cleanup_live_folder(self, live_folder: str) -> None:
+        """Remove any leftover video files from the live folder.
+
+        When the last video in a rotation can't be deleted (VLC file lock on
+        older VLC versions), it lingers in the live folder.  This is called
+        after VLC has been stopped so the lock is released.
+        """
+        if not live_folder or not os.path.isdir(live_folder):
+            return
+        for filename in os.listdir(live_folder):
+            filepath = os.path.join(live_folder, filename)
+            if not os.path.isfile(filepath):
+                continue
+            if not filename.lower().endswith(VIDEO_EXTENSIONS):
+                continue
+            try:
+                os.remove(filepath)
+                logger.info(f"Cleaned up lingering live file: {filename}")
+            except Exception as e:
+                logger.debug(f"Could not clean up live file {filename}: {e}")
 
     async def _try_recover_session(self) -> None:
         """Attempt to start a fresh session when none is active.
@@ -1135,6 +1321,15 @@ class AutomationController:
                             self.notification_service.notify_video_transition(current_video, cat_label)
                     except Exception as e:
                         logger.warning(f"Failed to update category on video transition: {e}")
+
+                # Re-enable dashboard skip and send acknowledgment so the
+                # dashboard can unlock the skip button for the next action.
+                if self.dashboard_handler:
+                    self.dashboard_handler._skip_ready = True
+                if self.web_dashboard:
+                    await self.web_dashboard.send_event("skip_ready", {
+                        "current_video": current_video,
+                    })
             
             # Handle VLC refresh during temp playback: last video finished but
             # new files may have been downloaded.  Refresh VLC at this natural
@@ -1283,12 +1478,16 @@ class AutomationController:
             await self._activate_fallback()
             return
 
-    async def _check_live_status(self, ignore_streamer: bool) -> None:
+    async def _check_live_status(self, ignore_streamer: bool, *, skip_twitch_poll: bool = False) -> None:
         """Check if the streamer is live and toggle pause/stream scenes accordingly.
 
         Checks both Twitch and Kick if configured. Either platform being live
         triggers a pause. Skipped entirely when neither TARGET_TWITCH_STREAMER
         nor TARGET_KICK_STREAMER is set.
+
+        When *skip_twitch_poll* is True the Twitch HTTP fallback is skipped
+        (EventSub cached state is still used).  This lets Kick poll at 30s
+        while the Twitch HTTP safety-net only fires every 180s.
 
         HTTP calls to Twitch/Kick APIs run in background threads via
         ``asyncio.to_thread`` so they never block the event loop.
@@ -1313,7 +1512,7 @@ class AutomationController:
             return
 
         # Refresh tokens in background threads (each can block up to 10s)
-        if target_twitch and self.twitch_live_checker:
+        if target_twitch and self.twitch_live_checker and not skip_twitch_poll:
             try:
                 await asyncio.to_thread(self.twitch_live_checker.refresh_token_if_needed)
             except Exception as e:
@@ -1325,15 +1524,53 @@ class AutomationController:
             except Exception as e:
                 logger.warning(f"Failed to refresh Kick app token: {e}")
 
-        # Check live status in background threads (each can block up to 10s)
+        # ── Determine live status ──
+        # EventSub is the primary source for Twitch (near-instant);
+        # HTTP poll is the fallback when EventSub isn't connected.
+        # Kick always uses HTTP poll (no EventSub equivalent).
         is_live = False
-        if target_twitch and self.twitch_live_checker:
-            is_live = await asyncio.to_thread(self.twitch_live_checker.is_stream_live, target_twitch)
+
+        if target_twitch:
+            eventsub_connected = (
+                self._eventsub_listener is not None
+                and self._eventsub_listener.is_connected
+            )
+            if eventsub_connected and self._eventsub_is_live is not None:
+                # Primary: EventSub real-time state (always available, no HTTP)
+                is_live = self._eventsub_is_live
+            elif self.twitch_live_checker and not skip_twitch_poll:
+                # Fallback: HTTP poll (EventSub not connected yet, or no data)
+                is_live = await asyncio.to_thread(
+                    self.twitch_live_checker.is_stream_live, target_twitch,
+                )
+
         if not is_live and target_kick and self.kick_live_checker:
             is_live = await asyncio.to_thread(self.kick_live_checker.is_stream_live, target_kick)
 
         if ignore_streamer:
             is_live = False
+
+        raw_is_live = is_live  # preserve original poll/EventSub result
+
+        # ── Raid-triggered unpause ──
+        # If a raid was detected while we're paused, override is_live to False
+        # so the normal unpause path runs.  _raid_unpaused prevents re-pause
+        # on subsequent ticks where the poll still reports live.
+        if self._raid_detected and self.last_stream_status == "live":
+            logger.info("Raid detected from streamer — treating as offline for unpause")
+            self._raid_detected = False
+            self._raid_unpaused = True
+            is_live = False
+
+        # Suppress re-pause while raid_unpaused is active (poll still shows live
+        # because streamer forgot to end stream)
+        if is_live and self._raid_unpaused:
+            return
+
+        # Clear raid state once the stream is actually offline
+        if not raw_is_live and self._raid_unpaused:
+            logger.info("Streamer is now offline — clearing raid unpause state")
+            self._raid_unpaused = False
 
         if is_live and self.last_stream_status != "live":
             logger.info("Streamer is LIVE — pausing 24/7 stream")
@@ -1364,12 +1601,70 @@ class AutomationController:
             # Drain any events that accumulated during the pause and
             # suppress the 'started' event VLC will fire when the scene
             # switch makes VLC visible/active again.
-            if self.playback_monitor:
-                self.playback_monitor._drain_queue()
-                self.playback_monitor._suppress_started += 1
+            # Guard: only drain+suppress when actually switching away from
+            # a non-stream scene (real unpause).  At startup the scene is
+            # already OSR Stream from execute_content_switch(), so there's
+            # no spurious event to suppress — adding one would eat the
+            # next genuine skip/transition event.
             if self.obs_controller:
-                self.obs_controller.switch_scene(SCENE_STREAM)
-            # Restore playback position — VLC may have lost its cursor while paused
+                current_scene = self.obs_controller.get_current_scene()
+                if current_scene != SCENE_STREAM:
+                    if self.playback_monitor:
+                        self.playback_monitor._drain_queue()
+                        self.playback_monitor._vlc_update_suppress = True
+                        self.playback_monitor._arm_suppress()
+
+                    # Reconfigure VLC with the actual live folder contents.
+                    # During the pause VLC kept looping its (possibly stale)
+                    # playlist — files deleted before/during pause are still
+                    # in its settings.  Refreshing here ensures the playlist
+                    # matches what is actually on disk.
+                    live_folder = self.config_manager.video_folder
+                    saved_video = None
+                    saved_cursor = 0
+                    if self.current_session_id:
+                        session = self.db.get_current_session()
+                        if session:
+                            saved_video = session.get('playback_current_video')
+                            saved_cursor = session.get('playback_cursor_ms', 0)
+
+                    resume_playlist = None
+                    if saved_video:
+                        try:
+                            all_files = sorted(
+                                f for f in os.listdir(live_folder)
+                                if f.lower().endswith(VIDEO_EXTENSIONS)
+                            )
+                            # Find the file that matches the saved original name
+                            # (files may have an ordering prefix like 01_)
+                            import re
+                            _pfx = re.compile(r'^\d{2}_')
+                            resume_file = None
+                            for f in all_files:
+                                original = _pfx.sub('', f)
+                                if original == saved_video:
+                                    resume_file = f
+                                    break
+                            if resume_file:
+                                resume_playlist = [resume_file] + [
+                                    f for f in all_files if f != resume_file
+                                ]
+                        except Exception as e:
+                            logger.debug(f"Could not build resume playlist for unpause: {e}")
+
+                    success, _ = self.obs_controller.update_vlc_source(
+                        VLC_SOURCE_NAME, live_folder, playlist=resume_playlist
+                    )
+                    if success:
+                        logger.info("Refreshed VLC playlist for unpause")
+                        # Re-initialize playback monitor with updated file list
+                        resume_file_for_monitor = resume_playlist[0] if resume_playlist else None
+                        self._initialize_playback_monitor(live_folder, resume_file_for_monitor)
+
+                    self.obs_controller.switch_scene(SCENE_STREAM)
+
+            # Restore playback position — VLC reloaded its playlist so cursor
+            # is at 0.  The deferred seek will jump back once VLC reports playing.
             if self.current_session_id:
                 session = self.db.get_current_session()
                 if session:
@@ -1423,6 +1718,10 @@ class AutomationController:
         logger.info("Shutdown event detected, cleaning up...")
         self.notification_service.notify_automation_shutdown()
         self.save_playback_on_exit()
+
+        # Stop EventSub listener
+        if self._eventsub_listener:
+            await self._eventsub_listener.stop()
 
         # Disconnect web dashboard client
         if self.web_dashboard:
@@ -1478,6 +1777,9 @@ class AutomationController:
         self.setup_platforms()
         self._initialize_handlers()
         self.notification_service.notify_automation_started()
+
+        # Start Twitch EventSub listener for real-time stream events
+        await self._start_eventsub_listener()
 
         # Start web dashboard client if configured
         if self.web_dashboard:
@@ -1557,8 +1859,28 @@ class AutomationController:
                     logger.info(f"ignore_streamer changed to {ignore_streamer}, forcing live status recheck")
                 last_ignore_streamer = ignore_streamer
 
-                if loop_count % max(int(settings.get('live_check_interval_seconds', 30)), 5) == 0 or ignore_streamer_changed:
-                    await self._check_live_status(ignore_streamer)
+                # Kick always polls every 30s (no EventSub equivalent).
+                # Twitch HTTP poll runs every 180s as a safety-net when
+                # EventSub is connected (real-time); 30s when it isn't.
+                eventsub_active = (
+                    self._eventsub_listener is not None
+                    and self._eventsub_listener.is_connected
+                )
+                kick_interval = 30
+                twitch_http_interval = 180 if eventsub_active else 30
+
+                force_check = self._force_live_check
+                if force_check:
+                    self._force_live_check = False
+
+                kick_due = (loop_count % kick_interval == 0) or force_check or ignore_streamer_changed
+                twitch_http_due = (loop_count % twitch_http_interval == 0) or force_check or ignore_streamer_changed
+
+                if kick_due or twitch_http_due:
+                    await self._check_live_status(
+                        ignore_streamer,
+                        skip_twitch_poll=not twitch_http_due,
+                    )
 
                 self.download_manager.process_video_registration_queue()
                 self.download_manager.process_pending_database_operations()

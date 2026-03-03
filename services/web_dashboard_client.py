@@ -198,6 +198,18 @@ class WebDashboardClient:
         await asyncio.sleep(delay)
         await self.push_state_now()
 
+    async def send_event(self, event_type: str, data: Optional[dict] = None) -> None:
+        """Send a named event to the dashboard (e.g. skip_ready)."""
+        if not self._connected or not self._ws:
+            return
+        try:
+            payload: dict = {"type": "event", "event": event_type}
+            if data:
+                payload["data"] = data
+            await self._ws.send(json.dumps(payload))
+        except Exception as e:
+            logger.debug(f"Failed to send event '{event_type}': {e}")
+
     async def _send_loop(self, ws: ClientConnection) -> None:
         """Periodically push state snapshots and forward queued log entries."""
         last_state_push = 0.0

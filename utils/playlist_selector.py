@@ -5,6 +5,7 @@ play history, and exclusion rules to avoid repetition.
 """
 import logging
 import json
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
@@ -153,8 +154,33 @@ class PlaylistSelector:
             )
             return []
 
-        # Sort by last_played (oldest first) and priority
-        # Playlists never played come first (NULLS FIRST is handled in SQL)
+        # Weighted priority sort: priority acts as a multiplier on how
+        # quickly a playlist becomes eligible again.  Priority 2 = 2x as
+        # likely to be selected, priority 3 = 3x, etc.  We multiply the
+        # time-since-last-played by the priority so higher-priority
+        # playlists appear to have been unplayed for longer and bubble
+        # to the top of the selection sooner.
+        now = datetime.now(timezone.utc)
+
+        def _weighted_score(playlist):
+            priority = playlist.get('priority', 1) or 1
+            last_played = playlist.get('last_played')
+            if not last_played:
+                # Never played — always comes first; higher priority
+                # wins ties among never-played playlists.
+                return (1, priority)
+            if isinstance(last_played, str):
+                lp = datetime.fromisoformat(last_played)
+            else:
+                lp = last_played
+            # Make timezone-aware if naive
+            if lp.tzinfo is None:
+                lp = lp.replace(tzinfo=timezone.utc)
+            age_seconds = (now - lp).total_seconds()
+            # effective_age = age * priority — higher is "hungrier"
+            return (0, age_seconds * priority)
+
+        all_playlists.sort(key=_weighted_score, reverse=True)
 
         # Select between min and max playlists
         num_to_select = min(len(all_playlists), max_playlists)

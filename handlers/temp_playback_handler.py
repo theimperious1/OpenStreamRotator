@@ -511,6 +511,32 @@ class TempPlaybackHandler:
             except Exception as e:
                 logger.warning(f"Failed to rename videos with prefix during temp playback exit: {e}")
             
+            # Filter to only playlists that still have files in the live folder.
+            # Temp playback deletes videos after playing, so consumed playlists
+            # (like MEWGENICS when all its videos were played) won't have files.
+            if next_playlist_names:
+                try:
+                    prefix_to_playlist = {f"{i+1:02d}": name for i, name in enumerate(next_playlist_names)}
+                    found_prefixes = set()
+                    for filename in os.listdir(live_folder):
+                        if (filename.lower().endswith(VIDEO_EXTENSIONS)
+                                and len(filename) > 3
+                                and filename[2] == '_'
+                                and filename[:2].isdigit()):
+                            found_prefixes.add(filename[:2])
+                    
+                    active_names = [name for name in next_playlist_names
+                                    if f"{next_playlist_names.index(name)+1:02d}" in found_prefixes]
+                    if active_names and active_names != next_playlist_names:
+                        removed = set(next_playlist_names) - set(active_names)
+                        logger.info(
+                            f"Filtered consumed playlists from title: "
+                            f"removed {sorted(removed)}, keeping {active_names}"
+                        )
+                        next_playlist_names = active_names
+                except OSError as e:
+                    logger.debug(f"Could not scan live folder for playlist filtering: {e}")
+            
             # Update stream title to reflect the new content (CATS|MW2 instead of MUSIC|NARWHALS)
             if next_playlist_names:
                 new_title = self.playlist_manager.generate_stream_title(next_playlist_names)

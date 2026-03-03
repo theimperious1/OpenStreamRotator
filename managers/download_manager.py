@@ -84,6 +84,13 @@ class DownloadManager:
         rotation instead of waiting for the current one to finish playing.
         """
         try:
+            # Temp playback exit consumes the prepared playlists as the new
+            # current rotation without going through start_session(), so the
+            # stale reference must be cleared here.  This also resets
+            # _title_refresh_needed so the main loop doesn't generate a
+            # preview title from the now-consumed playlists.
+            self._set_next_prepared_playlists(None)
+
             next_playlists = self.playlist_manager.select_playlists_for_rotation()
 
             if next_playlists:

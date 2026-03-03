@@ -8,7 +8,7 @@ Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays the
 
 ## How It Works
 
-1. **Playlist selection** — Each rotation, the system picks a configurable number of enabled playlists (prioritizing least-recently-played) and downloads their videos via yt-dlp into a pending folder.
+1. **Playlist selection** — Each rotation, the system picks a configurable number of enabled playlists and downloads their videos via yt-dlp into a pending folder. Selection is weighted by play history and priority — higher-priority playlists are selected more frequently (see [Priority](#playlist-priority) below).
 2. **Content switch** — Once downloads finish, OBS briefly shows a transition scene while the live folder is swapped with the new content. VLC reloads and playback begins.
 3. **Playback monitoring** — The system detects video transitions via OBS WebSocket media events (`MediaInputPlaybackStarted` / `MediaInputPlaybackEnded`). When a video finishes, it's deleted and the next one is tracked automatically.
 4. **Rotation trigger** — When all videos have been played and deleted (folder is empty), the system triggers the next rotation automatically.
@@ -16,7 +16,7 @@ Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays the
 6. **Temp playback** — If the current content runs out before the next rotation's downloads finish, the system temporarily plays already-downloaded files from the pending folder to avoid dead air.
 7. **Prepared rotations** — Pre-download future rotations to a staging folder for on-demand or scheduled execution via the web dashboard. Supports custom titles, categories, and optional cursor restore.
 8. **Fallback mode** — If yt-dlp downloads fail repeatedly (3 consecutive failures by default), the system arms fallback mode. Once all live content and temp playback are exhausted, it activates: cycling through fallback-marked prepared rotations (with full title/category support), or the pause screen if none are available. Retries downloads every 5 minutes with escalation (retry pending, then try fresh playlists).
-9. **Twitch live detection** — If a configured target streamer goes live on Twitch, OBS switches to a pause screen. When they go offline, playback resumes automatically.
+9. **Twitch EventSub live detection** — Real-time stream lifecycle events via Twitch EventSub WebSocket (`stream.online` / `stream.offline`) provide near-instant pause and unpause — no polling delay. HTTP polling remains as an automatic fallback. Optionally supports **raid-based unpause** (`UNPAUSE_MODE=raid`) — if the streamer raids out but forgets to end their stream, the 24/7 stream resumes immediately.
 10. **OBS freeze detection** — The system monitors OBS render output via WebSocket. If OBS stops rendering frames for ~60 seconds (process alive but frozen), it automatically kills OBS, clears crash sentinels, relaunches it, reconnects, and resumes streaming — all unattended.
 
 ## Prerequisites
@@ -83,6 +83,7 @@ python main.py
 | `TWITCH_USER_LOGIN` | If Twitch enabled | — | Your 24/7 Twitch channel username |
 | `TWITCH_REDIRECT_URI` | No | `http://localhost:8080/callback` | OAuth redirect URI for Twitch |
 | `TARGET_TWITCH_STREAMER` | No | *(empty)* | Streamer whose live status pauses the rerun. If empty, live detection is disabled — ideal for pure 24/7 streams. |
+| `UNPAUSE_MODE` | No | `offline` | `offline` = unpause on `stream.offline` EventSub event (or offline poll as fallback). `raid` = also unpause immediately when the streamer raids out via `channel.raid` (whichever fires first). Twitch only — Kick has no raid feature. |
 | `ENABLE_KICK` | No | `false` | Enable Kick integration (optional — not required if only using Twitch) |
 | `KICK_CLIENT_ID` | If Kick enabled | — | Kick application client ID |
 | `KICK_CLIENT_SECRET` | If Kick enabled | — | Kick application client secret |
@@ -126,7 +127,7 @@ python main.py
 | `url` | YouTube playlist URL |
 | `category` | Platform category set when videos from this playlist are playing (e.g. `"Just Chatting"`, `"Final Fantasy XIV"`). Falls back to the playlist name if not set. |
 | `enabled` | Whether this playlist is available for rotation selection |
-| `priority` | Selection priority (lower = higher priority among equally-old playlists) |
+| `priority` | Selection frequency multiplier (default `1`). A priority of `2` means the playlist is selected ~2x as often, `3` = ~3x as often, etc. See [Priority](#playlist-priority) below. |
 
 ### Settings (`config/settings.json`)
 
@@ -157,7 +158,6 @@ All settings in this file are **hot-swappable** — you can edit and save while 
 | `ignore_streamer` | Prevents the target streamer going live from pausing the 24/7 stream (default: `false`) |
 | `yt_dlp_use_cookies` | Use browser cookies for age-restricted videos (default: `false`). Toggle mid-download-retry to recover from 403s. |
 | `yt_dlp_browser_for_cookies` | Browser to extract cookies from: `chrome`, `firefox`, `brave`, `edge`, etc. (default: `firefox`) |
-| `live_check_interval_seconds` | How often (in seconds) to poll for target streamer live status (default: `30`, minimum: `5`) |
 
 ### Hot-Swappable Configuration
 
@@ -284,7 +284,7 @@ The system will:
 
 ### What Happens Each Rotation
 
-1. Playlists are selected (least-recently-played first, excluding currently playing and currently downloading playlists)
+1. Playlists are selected using weighted priority scoring (see [Priority](#playlist-priority)), excluding currently playing and currently downloading playlists
 2. Videos are downloaded via yt-dlp into the pending folder
 3. When downloads complete, OBS switches to the Rotation screen scene
 4. The live folder is cleared and pending content is moved in
@@ -293,6 +293,21 @@ The system will:
 7. Stream title and category are updated on all enabled platforms
 8. The playback monitor begins tracking playback; as each video finishes, it's deleted
 9. When all content is consumed, the cycle repeats
+
+### Playlist Priority
+
+The `priority` field in `playlists.json` controls how often a playlist is selected relative to others. It works as a **frequency multiplier**:
+
+| Priority | Effect |
+|----------|--------|
+| `1` | Normal — selected in its regular turn (default) |
+| `2` | Selected ~2x as often as a priority-1 playlist |
+| `3` | Selected ~3x as often as a priority-1 playlist |
+| `5` | Selected ~5x as often as a priority-1 playlist |
+
+**How it works:** The system scores each playlist by multiplying its time-since-last-played by its priority. A priority-3 playlist that was played 2 hours ago gets an effective age of 6 hours, making it compete with playlists that haven't been played for much longer. Playlists that have never been played always come first regardless of priority.
+
+**Example:** With 20 playlists and 4 per rotation, a priority-1 playlist appears roughly every 5th rotation. A priority-3 playlist would appear roughly every other rotation instead.
 
 ### Temp Playback
 
@@ -384,10 +399,10 @@ If `DISCORD_WEBHOOK_URL` is set, the system sends notifications for:
 
 ## Live Detection
 
-The system polls configured platforms every 30 seconds (configurable via `live_check_interval_seconds` in `settings.json`) to check if the target streamer is live:
+The system monitors configured platforms to detect when the target streamer goes live or offline:
 
-- **Twitch** — set `TARGET_TWITCH_STREAMER` to a Twitch username (requires `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET`)
-- **Kick** — set `TARGET_KICK_STREAMER` to a Kick channel slug (requires `KICK_CLIENT_ID` / `KICK_CLIENT_SECRET`)
+- **Twitch** — set `TARGET_TWITCH_STREAMER` to a Twitch username (requires `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET`). Uses **Twitch EventSub WebSocket** for near-instant detection (`stream.online` / `stream.offline` events). HTTP polling runs as an automatic safety-net fallback every 90 seconds.
+- **Kick** — set `TARGET_KICK_STREAMER` to a Kick channel slug (requires `KICK_CLIENT_ID` / `KICK_CLIENT_SECRET`). Uses HTTP polling every 30 seconds. Kick has no EventSub equivalent.
 
 If both are configured, either platform being live triggers the pause. If neither is set, live detection is skipped entirely — ideal for pure 24/7 streams (e.g., music or ambient content) that should never pause.
 
@@ -395,6 +410,28 @@ If both are configured, either platform being live triggers the pause. If neithe
 - **Streamer goes offline** → OBS switches back to the playback scene, normal operation resumes
 
 This is designed for 24/7 rerun channels that should yield to the main streamer.
+
+### EventSub WebSocket (Twitch)
+
+When `TARGET_TWITCH_STREAMER` is set with valid Twitch credentials, the system automatically connects a lightweight EventSub WebSocket to Twitch on startup. This provides:
+
+- **`stream.online`** — instant pause when the streamer starts broadcasting
+- **`stream.offline`** — instant unpause when the stream ends
+
+No additional configuration is needed — it activates automatically. If the WebSocket connection drops, the system falls back to HTTP polling transparently and reconnects with exponential backoff.
+
+**Requirements:**
+- `TARGET_TWITCH_STREAMER` must be set
+- `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET` must be configured
+- A Twitch user token must be stored (created automatically during the first Twitch platform auth flow via `TWITCH_BROADCASTER_ID` / `TWITCH_USER_LOGIN`)
+
+### Raid-Based Unpause (Twitch only)
+
+Setting `UNPAUSE_MODE=raid` adds a `channel.raid` subscription to the same EventSub WebSocket. This handles the edge case where a streamer raids out but forgets to end their stream — the `stream.offline` event may be delayed by up to ~20 minutes.
+
+When a raid is detected, the 24/7 stream resumes immediately. All three triggers remain active (`stream.offline`, `channel.raid`, and the HTTP poll fallback); whichever fires first wins.
+
+> **Note:** Kick has no raid feature, so `UNPAUSE_MODE=raid` applies to Twitch only. Kick always uses HTTP polling.
 
 ## Reset State
 
