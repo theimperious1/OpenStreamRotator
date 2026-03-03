@@ -28,6 +28,7 @@ from services.notification_service import NotificationService
 from playback.playback_monitor import PlaybackMonitor
 from services.twitch_live_checker import TwitchLiveChecker
 from services.kick_live_checker import KickLiveChecker
+from services.twitch_raid_listener import TwitchRaidListener
 from handlers.content_switch_handler import ContentSwitchHandler
 from handlers.dashboard_handler import DashboardHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
@@ -73,6 +74,9 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 # Web Dashboard Configuration
 WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "")      # e.g. ws://localhost:8000
 WEB_DASHBOARD_API_KEY = os.getenv("WEB_DASHBOARD_API_KEY", "")  # from team page
+
+# Unpause mode: "offline" (default) or "raid" (unpause on Twitch raid OR offline)
+UNPAUSE_MODE = os.getenv("UNPAUSE_MODE", "offline").strip().lower()
 
 
 class AutomationController:
@@ -159,6 +163,9 @@ class AutomationController:
         self._manual_pause = False  # True when paused via dashboard (prevents auto-resume)
         self._rotation_postpone_logged = False
         self._just_resumed_session = False  # Track if we just resumed to skip initial download trigger
+        self._raid_detected = False  # Set by TwitchRaidListener callback
+        self._raid_unpaused = False  # True after raid-triggered unpause; suppresses re-pause
+        self._raid_listener: Optional[TwitchRaidListener] = None
         self._shutdown_requested = False
         self._title_refresh_needed = False  # Set by download callback to append preview names to title
         self._start_time = time.time()  # For uptime tracking
@@ -383,6 +390,7 @@ class AutomationController:
         global KICK_CLIENT_ID, KICK_CLIENT_SECRET
         global DISCORD_WEBHOOK_URL
         global WEB_DASHBOARD_URL, WEB_DASHBOARD_API_KEY
+        global UNPAUSE_MODE
 
         # Snapshot old values for diff
         old = {
@@ -397,6 +405,7 @@ class AutomationController:
             "DISCORD_WEBHOOK_URL": DISCORD_WEBHOOK_URL,
             "WEB_DASHBOARD_URL": WEB_DASHBOARD_URL,
             "WEB_DASHBOARD_API_KEY": WEB_DASHBOARD_API_KEY,
+            "UNPAUSE_MODE": UNPAUSE_MODE,
         }
 
         # Re-read .env into os.environ (override=True so changed values win)
@@ -417,6 +426,7 @@ class AutomationController:
         DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
         WEB_DASHBOARD_URL = os.getenv("WEB_DASHBOARD_URL", "")
         WEB_DASHBOARD_API_KEY = os.getenv("WEB_DASHBOARD_API_KEY", "")
+        UNPAUSE_MODE = os.getenv("UNPAUSE_MODE", "offline").strip().lower()
 
         # Build diff
         new = {
@@ -431,6 +441,7 @@ class AutomationController:
             "DISCORD_WEBHOOK_URL": DISCORD_WEBHOOK_URL,
             "WEB_DASHBOARD_URL": WEB_DASHBOARD_URL,
             "WEB_DASHBOARD_API_KEY": WEB_DASHBOARD_API_KEY,
+            "UNPAUSE_MODE": UNPAUSE_MODE,
         }
         changed = {k: new[k] for k in new if old[k] != new[k]}
 
@@ -483,6 +494,21 @@ class AutomationController:
             else:
                 self.kick_live_checker = None
                 logger.info("reload_env: Kick credentials cleared — live checker disabled")
+
+        # Raid listener — restart/stop if UNPAUSE_MODE or Twitch creds changed
+        raid_keys = {"UNPAUSE_MODE", "TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET"}
+        if raid_keys & set(changed):
+            if self._raid_listener:
+                asyncio.ensure_future(self._raid_listener.stop())
+                self._raid_listener = None
+                logger.info("reload_env: stopped raid listener")
+            if UNPAUSE_MODE == "raid":
+                asyncio.ensure_future(self._start_raid_listener_if_needed())
+                logger.info("reload_env: (re)starting raid listener")
+            # Clear raid state when mode changes away from raid
+            if UNPAUSE_MODE != "raid":
+                self._raid_detected = False
+                self._raid_unpaused = False
 
         # OBS connection — reconnect if host/port/password changed
         if any(k in changed for k in ("OBS_HOST", "OBS_PORT", "OBS_PASSWORD")):
@@ -726,6 +752,73 @@ class AutomationController:
     def setup_platforms(self):
         """Initialize enabled streaming platforms."""
         self.platform_manager.setup(self.twitch_live_checker)
+
+    async def _start_raid_listener_if_needed(self) -> None:
+        """Start the Twitch raid listener if ``UNPAUSE_MODE=raid``.
+
+        Requires:
+        - ``UNPAUSE_MODE=raid`` in .env
+        - ``TARGET_TWITCH_STREAMER`` set (username of the streamer to watch)
+        - Valid Twitch credentials (``TWITCH_CLIENT_ID`` / ``TWITCH_CLIENT_SECRET``)
+        - Twitch platform integration already authorized (user token in DB)
+        """
+        if UNPAUSE_MODE != "raid":
+            return
+
+        target_twitch = os.getenv("TARGET_TWITCH_STREAMER", "").split("#")[0].strip()
+        if not target_twitch:
+            logger.warning("UNPAUSE_MODE=raid but TARGET_TWITCH_STREAMER is not set — raid detection disabled")
+            return
+
+        if not TWITCH_CLIENT_ID or not TWITCH_CLIENT_SECRET:
+            logger.warning("UNPAUSE_MODE=raid but Twitch credentials are missing — raid detection disabled")
+            return
+
+        # Resolve streamer username → user ID
+        if not self.twitch_live_checker:
+            logger.warning("UNPAUSE_MODE=raid but Twitch live checker unavailable — raid detection disabled")
+            return
+
+        await asyncio.to_thread(self.twitch_live_checker.refresh_token_if_needed)
+        streamer_id = await asyncio.to_thread(
+            self.twitch_live_checker.get_broadcaster_id, target_twitch,
+        )
+        if not streamer_id:
+            logger.error(f"UNPAUSE_MODE=raid: could not resolve Twitch user ID for '{target_twitch}'")
+            return
+
+        # We need the 24/7 channel's broadcaster ID to look up its stored
+        # user token.  It's available from TWITCH_BROADCASTER_ID env var or
+        # from TWITCH_USER_LOGIN auto-resolution.
+        broadcaster_id = os.getenv("TWITCH_BROADCASTER_ID", "").strip()
+        if not broadcaster_id:
+            twitch_login = os.getenv("TWITCH_USER_LOGIN", "").strip()
+            if twitch_login:
+                broadcaster_id = await asyncio.to_thread(
+                    self.twitch_live_checker.get_broadcaster_id, twitch_login,
+                )
+        if not broadcaster_id:
+            logger.error(
+                "UNPAUSE_MODE=raid: cannot determine 24/7 channel broadcaster ID "
+                "(set TWITCH_BROADCASTER_ID or TWITCH_USER_LOGIN in .env) — raid detection disabled"
+            )
+            return
+
+        def on_raid(event: dict) -> None:
+            self._raid_detected = True
+
+        self._raid_listener = TwitchRaidListener(
+            client_id=TWITCH_CLIENT_ID,
+            client_secret=TWITCH_CLIENT_SECRET,
+            broadcaster_id=broadcaster_id,
+            streamer_user_id=streamer_id,
+            on_raid=on_raid,
+        )
+        self._raid_listener.start()
+        logger.info(
+            f"Twitch raid listener started (streamer={target_twitch}, "
+            f"streamer_id={streamer_id}, unpause_mode=raid)"
+        )
 
     def _initialize_playback_monitor(self, video_folder: Optional[str] = None,
                                      override_current_video: Optional[str] = None):
@@ -1407,6 +1500,28 @@ class AutomationController:
         if ignore_streamer:
             is_live = False
 
+        raw_is_live = is_live  # preserve original poll result
+
+        # ── Raid-triggered unpause ──
+        # If a raid was detected while we're paused, override is_live to False
+        # so the normal unpause path runs.  _raid_unpaused prevents re-pause
+        # on subsequent ticks where the poll still reports live.
+        if self._raid_detected and self.last_stream_status == "live":
+            logger.info("Raid detected from streamer — treating as offline for unpause")
+            self._raid_detected = False
+            self._raid_unpaused = True
+            is_live = False
+
+        # Suppress re-pause while raid_unpaused is active (poll still shows live
+        # because streamer forgot to end stream)
+        if is_live and self._raid_unpaused:
+            return
+
+        # Clear raid state once the stream is actually offline
+        if not raw_is_live and self._raid_unpaused:
+            logger.info("Streamer is now offline — clearing raid unpause state")
+            self._raid_unpaused = False
+
         if is_live and self.last_stream_status != "live":
             logger.info("Streamer is LIVE — pausing 24/7 stream")
             # Save playback position before pausing so we can resume later
@@ -1554,6 +1669,10 @@ class AutomationController:
         self.notification_service.notify_automation_shutdown()
         self.save_playback_on_exit()
 
+        # Stop raid listener
+        if self._raid_listener:
+            await self._raid_listener.stop()
+
         # Disconnect web dashboard client
         if self.web_dashboard:
             await self.web_dashboard.close()
@@ -1608,6 +1727,9 @@ class AutomationController:
         self.setup_platforms()
         self._initialize_handlers()
         self.notification_service.notify_automation_started()
+
+        # Start raid listener if UNPAUSE_MODE=raid and Twitch is configured
+        await self._start_raid_listener_if_needed()
 
         # Start web dashboard client if configured
         if self.web_dashboard:

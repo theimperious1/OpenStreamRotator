@@ -16,7 +16,7 @@ Fully automated 24/7 stream rerun system. Downloads YouTube playlists, plays the
 6. **Temp playback** — If the current content runs out before the next rotation's downloads finish, the system temporarily plays already-downloaded files from the pending folder to avoid dead air.
 7. **Prepared rotations** — Pre-download future rotations to a staging folder for on-demand or scheduled execution via the web dashboard. Supports custom titles, categories, and optional cursor restore.
 8. **Fallback mode** — If yt-dlp downloads fail repeatedly (3 consecutive failures by default), the system arms fallback mode. Once all live content and temp playback are exhausted, it activates: cycling through fallback-marked prepared rotations (with full title/category support), or the pause screen if none are available. Retries downloads every 5 minutes with escalation (retry pending, then try fresh playlists).
-9. **Twitch live detection** — If a configured target streamer goes live on Twitch, OBS switches to a pause screen. When they go offline, playback resumes automatically.
+9. **Twitch live detection** — If a configured target streamer goes live on Twitch, OBS switches to a pause screen. When they go offline, playback resumes automatically. Optionally supports **raid-based unpause** — if the streamer raids out, the 24/7 stream resumes immediately instead of waiting for the offline poll.
 10. **OBS freeze detection** — The system monitors OBS render output via WebSocket. If OBS stops rendering frames for ~60 seconds (process alive but frozen), it automatically kills OBS, clears crash sentinels, relaunches it, reconnects, and resumes streaming — all unattended.
 
 ## Prerequisites
@@ -83,6 +83,7 @@ python main.py
 | `TWITCH_USER_LOGIN` | If Twitch enabled | — | Your 24/7 Twitch channel username |
 | `TWITCH_REDIRECT_URI` | No | `http://localhost:8080/callback` | OAuth redirect URI for Twitch |
 | `TARGET_TWITCH_STREAMER` | No | *(empty)* | Streamer whose live status pauses the rerun. If empty, live detection is disabled — ideal for pure 24/7 streams. |
+| `UNPAUSE_MODE` | No | `offline` | `offline` = unpause on offline only. `raid` = also unpause immediately when the Twitch streamer raids out (whichever fires first). Requires a stored Twitch user token. Twitch only — Kick has no raid feature. |
 | `ENABLE_KICK` | No | `false` | Enable Kick integration (optional — not required if only using Twitch) |
 | `KICK_CLIENT_ID` | If Kick enabled | — | Kick application client ID |
 | `KICK_CLIENT_SECRET` | If Kick enabled | — | Kick application client secret |
@@ -410,6 +411,25 @@ If both are configured, either platform being live triggers the pause. If neithe
 - **Streamer goes offline** → OBS switches back to the playback scene, normal operation resumes
 
 This is designed for 24/7 rerun channels that should yield to the main streamer.
+
+### Raid-Based Unpause (Twitch only)
+
+By default (`UNPAUSE_MODE=offline`), the 24/7 stream resumes only when the offline poll detects the streamer's stream has ended. If the streamer frequently raids out but forgets to end their stream afterwards, the offline detection can be delayed by up to ~20 minutes.
+
+Setting `UNPAUSE_MODE=raid` adds a faster trigger: the system listens for Twitch `channel.raid` events via EventSub WebSocket. When the streamer raids, the 24/7 stream resumes immediately — no need to wait for the offline poll. Both triggers remain active; whichever fires first wins.
+
+**Requirements:**
+- `TARGET_TWITCH_STREAMER` must be set
+- `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET` must be configured
+- A Twitch user token must be stored (created automatically during the first Twitch platform auth flow via `TWITCH_BROADCASTER_ID` / `TWITCH_USER_LOGIN`)
+
+**How it works:**
+1. On startup, a lightweight EventSub WebSocket connects to Twitch and subscribes to `channel.raid` for the target streamer.
+2. When a raid event fires, the system immediately treats the streamer as offline and unpauses.
+3. The offline poll continues running — when it finally detects the stream ended, it clears the internal raid state.
+4. If the raid listener cannot start (missing token, network issues), the system falls back to offline-only detection silently.
+
+> **Note:** Kick does not have a raid feature, so `UNPAUSE_MODE=raid` applies to Twitch only. Kick detection always uses offline polling.
 
 ## Reset State
 
