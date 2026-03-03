@@ -11,7 +11,7 @@ import signal
 import asyncio
 import json
 from threading import Event
-from typing import Callable, Optional, List
+from typing import Optional, List
 from dotenv import load_dotenv
 from core.database import DatabaseManager
 from config.config_manager import ConfigManager
@@ -167,6 +167,7 @@ class AutomationController:
         self._eventsub_is_live: Optional[bool] = None  # None = no EventSub data yet
         self._raid_detected = False  # Set by EventSub channel.raid callback
         self._raid_unpaused = False  # True after raid-triggered unpause; suppresses re-pause
+        self._force_live_check = False  # Set by reload_env on target streamer change
         self._shutdown_requested = False
         self._title_refresh_needed = False  # Set by download callback to append preview names to title
         self._start_time = time.time()  # For uptime tracking
@@ -499,6 +500,16 @@ class AutomationController:
             else:
                 self.kick_live_checker = None
                 logger.info("reload_env: Kick credentials cleared — live checker disabled")
+
+        # Target streamer changed — force an immediate live re-check on
+        # the next loop tick and clear stale state from the old streamer.
+        streamer_keys = {"TARGET_TWITCH_STREAMER", "TARGET_KICK_STREAMER"}
+        if streamer_keys & set(changed):
+            self._force_live_check = True
+            self.last_stream_status = None
+            self._raid_detected = False
+            self._raid_unpaused = False
+            logger.info("reload_env: target streamer changed — forcing immediate live recheck")
 
         # EventSub listener — restart if target streamer, creds, or UNPAUSE_MODE changed
         eventsub_keys = {"TARGET_TWITCH_STREAMER", "UNPAUSE_MODE", "TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET"}
@@ -1467,12 +1478,16 @@ class AutomationController:
             await self._activate_fallback()
             return
 
-    async def _check_live_status(self, ignore_streamer: bool) -> None:
+    async def _check_live_status(self, ignore_streamer: bool, *, skip_twitch_poll: bool = False) -> None:
         """Check if the streamer is live and toggle pause/stream scenes accordingly.
 
         Checks both Twitch and Kick if configured. Either platform being live
         triggers a pause. Skipped entirely when neither TARGET_TWITCH_STREAMER
         nor TARGET_KICK_STREAMER is set.
+
+        When *skip_twitch_poll* is True the Twitch HTTP fallback is skipped
+        (EventSub cached state is still used).  This lets Kick poll at 30s
+        while the Twitch HTTP safety-net only fires every 180s.
 
         HTTP calls to Twitch/Kick APIs run in background threads via
         ``asyncio.to_thread`` so they never block the event loop.
@@ -1497,7 +1512,7 @@ class AutomationController:
             return
 
         # Refresh tokens in background threads (each can block up to 10s)
-        if target_twitch and self.twitch_live_checker:
+        if target_twitch and self.twitch_live_checker and not skip_twitch_poll:
             try:
                 await asyncio.to_thread(self.twitch_live_checker.refresh_token_if_needed)
             except Exception as e:
@@ -1521,9 +1536,9 @@ class AutomationController:
                 and self._eventsub_listener.is_connected
             )
             if eventsub_connected and self._eventsub_is_live is not None:
-                # Primary: EventSub real-time state
+                # Primary: EventSub real-time state (always available, no HTTP)
                 is_live = self._eventsub_is_live
-            elif self.twitch_live_checker:
+            elif self.twitch_live_checker and not skip_twitch_poll:
                 # Fallback: HTTP poll (EventSub not connected yet, or no data)
                 is_live = await asyncio.to_thread(
                     self.twitch_live_checker.is_stream_live, target_twitch,
@@ -1844,18 +1859,28 @@ class AutomationController:
                     logger.info(f"ignore_streamer changed to {ignore_streamer}, forcing live status recheck")
                 last_ignore_streamer = ignore_streamer
 
-                # When EventSub is connected it handles Twitch live/offline in
-                # real-time, so the HTTP poll only needs to run as a safety-net
-                # fallback — use a longer interval (3 min).  Without EventSub,
-                # poll every 30s (the main loop ticks once per second).
+                # Kick always polls every 30s (no EventSub equivalent).
+                # Twitch HTTP poll runs every 180s as a safety-net when
+                # EventSub is connected (real-time); 30s when it isn't.
                 eventsub_active = (
                     self._eventsub_listener is not None
                     and self._eventsub_listener.is_connected
                 )
-                live_check_interval = 180 if eventsub_active else 30
+                kick_interval = 30
+                twitch_http_interval = 180 if eventsub_active else 30
 
-                if loop_count % live_check_interval == 0 or ignore_streamer_changed:
-                    await self._check_live_status(ignore_streamer)
+                force_check = self._force_live_check
+                if force_check:
+                    self._force_live_check = False
+
+                kick_due = (loop_count % kick_interval == 0) or force_check or ignore_streamer_changed
+                twitch_http_due = (loop_count % twitch_http_interval == 0) or force_check or ignore_streamer_changed
+
+                if kick_due or twitch_http_due:
+                    await self._check_live_status(
+                        ignore_streamer,
+                        skip_twitch_poll=not twitch_http_due,
+                    )
 
                 self.download_manager.process_video_registration_queue()
                 self.download_manager.process_pending_database_operations()
