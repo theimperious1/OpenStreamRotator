@@ -1,17 +1,26 @@
-"""Twitch EventSub WebSocket listener for channel raid events.
+"""Twitch EventSub WebSocket listener for stream and raid events.
 
-Connects to the Twitch EventSub WebSocket and subscribes to
-``channel.raid`` for a specified broadcaster.  When the streamer
-raids *any* channel, a callback fires so the automation controller
-can unpause immediately — without waiting for the offline poll.
+Connects to the Twitch EventSub WebSocket and subscribes to:
+- ``stream.online``  — streamer went live  (instant pause trigger)
+- ``stream.offline`` — streamer went offline (instant unpause trigger)
+- ``channel.raid``   — streamer raided out  (opt-in fast unpause)
+
+The first two replace polling as the **primary** live-detection
+mechanism for Twitch; the automation controller's HTTP poll remains
+as a safety-net fallback at a reduced frequency.
+
+``channel.raid`` is only subscribed when ``UNPAUSE_MODE=raid``.  It
+handles the edge case where a streamer raids out but forgets to end
+their stream, which delays the ``stream.offline`` event.
 
 The listener runs as an ``asyncio.Task`` inside the main event loop.
 It handles keepalive timeouts, ``session_reconnect`` messages, and
 automatic token refresh via the existing TwitchTokenManager.
 
-**Auth note:** ``channel.raid`` requires no special scopes, but the
-EventSub *WebSocket transport* requires a user access token.  We
-reuse the token already stored by TwitchUpdater (``channel:manage:broadcast``).
+**Auth note:** None of these subscription types require special
+scopes, but the EventSub *WebSocket transport* requires a user
+access token.  We reuse the token already stored by TwitchUpdater
+(``channel:manage:broadcast``).
 """
 
 import asyncio
@@ -37,8 +46,8 @@ _MIN_RECONNECT_DELAY = 1.0
 _MAX_RECONNECT_DELAY = 60.0
 
 
-class TwitchRaidListener:
-    """Async EventSub WebSocket client that listens for ``channel.raid``.
+class TwitchEventSubListener:
+    """Async EventSub WebSocket client for stream lifecycle events.
 
     Parameters
     ----------
@@ -50,11 +59,14 @@ class TwitchRaidListener:
         The Twitch user ID of the *24/7 channel* (whose user token we
         hold).  Used to look up stored OAuth tokens.
     streamer_user_id:
-        The Twitch user ID of the *streamer* being monitored.  Raids
-        originating from this user trigger the callback.
+        The Twitch user ID of the *streamer* being monitored.
+    on_stream_online:
+        Callback invoked when the streamer goes live.
+    on_stream_offline:
+        Callback invoked when the streamer goes offline.
     on_raid:
-        Awaitable or plain callback invoked when a raid is detected.
-        Receives the raw event dict for logging purposes.
+        Optional callback invoked when the streamer raids out.
+        Pass ``None`` to skip the ``channel.raid`` subscription.
     """
 
     def __init__(
@@ -63,12 +75,16 @@ class TwitchRaidListener:
         client_secret: str,
         broadcaster_id: str,
         streamer_user_id: str,
-        on_raid: Callable,
+        on_stream_online: Callable,
+        on_stream_offline: Callable,
+        on_raid: Optional[Callable] = None,
     ):
         self.client_id = client_id
         self.client_secret = client_secret
         self.broadcaster_id = broadcaster_id
         self.streamer_user_id = streamer_user_id
+        self._on_stream_online = on_stream_online
+        self._on_stream_offline = on_stream_offline
         self._on_raid = on_raid
 
         self._token_manager = TwitchTokenManager()
@@ -81,6 +97,14 @@ class TwitchRaidListener:
         self._last_message_time: float = 0.0
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._connected = False  # True once subscriptions are active
+
+    # ── Public state ─────────────────────────────────────────────
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether the WebSocket is connected and subscriptions are active."""
+        return self._connected
 
     # ── Token helpers ────────────────────────────────────────────
 
@@ -105,7 +129,7 @@ class TwitchRaidListener:
                 "refresh_token": quote(self._refresh_token, safe=""),
             }, timeout=10)
             if resp.status_code in (400, 401):
-                logger.error("Raid listener: refresh token invalid — re-auth needed")
+                logger.error("EventSub listener: refresh token invalid — re-auth needed")
                 return False
             resp.raise_for_status()
             data = resp.json()
@@ -115,16 +139,20 @@ class TwitchRaidListener:
                 self._token_manager.save_tokens(
                     self.broadcaster_id, self._access_token, self._refresh_token,
                 )
-            logger.info("Raid listener: user token refreshed")
+            logger.info("EventSub listener: user token refreshed")
             return True
         except Exception as e:
-            logger.error(f"Raid listener: token refresh failed: {e}")
+            logger.error(f"EventSub listener: token refresh failed: {e}")
             return False
 
     # ── Subscription creation ────────────────────────────────────
 
-    def _create_subscription(self) -> bool:
-        """Create the ``channel.raid`` EventSub subscription via Helix API."""
+    def _create_subscriptions(self) -> bool:
+        """Create EventSub subscriptions via the Helix API.
+
+        Subscribes to ``stream.online``, ``stream.offline``, and
+        optionally ``channel.raid`` — all on the same WebSocket session.
+        """
         if not self._access_token or not self._session_id:
             return False
 
@@ -133,45 +161,62 @@ class TwitchRaidListener:
             "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
         }
-        body = {
-            "type": "channel.raid",
-            "version": "1",
-            "condition": {
-                "from_broadcaster_user_id": self.streamer_user_id,
+
+        # Build subscription list
+        subscriptions: list[dict] = [
+            {
+                "type": "stream.online",
+                "version": "1",
+                "condition": {"broadcaster_user_id": self.streamer_user_id},
             },
-            "transport": {
-                "method": "websocket",
-                "session_id": self._session_id,
+            {
+                "type": "stream.offline",
+                "version": "1",
+                "condition": {"broadcaster_user_id": self.streamer_user_id},
             },
+        ]
+        if self._on_raid is not None:
+            subscriptions.append({
+                "type": "channel.raid",
+                "version": "1",
+                "condition": {"from_broadcaster_user_id": self.streamer_user_id},
+            })
+
+        transport = {
+            "method": "websocket",
+            "session_id": self._session_id,
         }
-        try:
-            resp = requests.post(
-                HELIX_EVENTSUB_URL, headers=headers,
-                json=body, timeout=10,
-            )
-            if resp.status_code == 401:
-                # Token expired — refresh and retry once
-                if self._refresh_access_token():
-                    headers["Authorization"] = f"Bearer {self._access_token}"
-                    resp = requests.post(
-                        HELIX_EVENTSUB_URL, headers=headers,
-                        json=body, timeout=10,
-                    )
-                else:
-                    return False
-            if resp.status_code == 409:
-                # Already subscribed (conflict) — that's fine
-                logger.debug("Raid listener: subscription already exists (409)")
-                return True
-            resp.raise_for_status()
-            logger.info(
-                f"Raid listener: subscribed to channel.raid "
-                f"(from_broadcaster={self.streamer_user_id})"
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Raid listener: failed to create subscription: {e}")
-            return False
+
+        all_ok = True
+        for sub in subscriptions:
+            body = {**sub, "transport": transport}
+            try:
+                resp = requests.post(
+                    HELIX_EVENTSUB_URL, headers=headers,
+                    json=body, timeout=10,
+                )
+                if resp.status_code == 401:
+                    # Token expired — refresh and retry once
+                    if self._refresh_access_token():
+                        headers["Authorization"] = f"Bearer {self._access_token}"
+                        resp = requests.post(
+                            HELIX_EVENTSUB_URL, headers=headers,
+                            json=body, timeout=10,
+                        )
+                    else:
+                        all_ok = False
+                        continue
+                if resp.status_code == 409:
+                    # Already subscribed — that's fine
+                    logger.debug(f"EventSub listener: {sub['type']} already exists (409)")
+                    continue
+                resp.raise_for_status()
+                logger.info(f"EventSub listener: subscribed to {sub['type']}")
+            except Exception as e:
+                logger.error(f"EventSub listener: failed to subscribe {sub['type']}: {e}")
+                all_ok = False
+
+        return all_ok
 
     # ── WebSocket lifecycle ──────────────────────────────────────
 
@@ -194,28 +239,28 @@ class TwitchRaidListener:
                         ka = payload.get("keepalive_timeout_seconds", 30)
                         self._keepalive_timeout = float(ka) if ka else 30.0
                         logger.info(
-                            f"Raid listener: connected (session={self._session_id}, "
+                            f"EventSub listener: connected (session={self._session_id}, "
                             f"keepalive={self._keepalive_timeout}s)"
                         )
-                        # Create subscription now that we have a session
-                        ok = await asyncio.to_thread(self._create_subscription)
+                        # Create subscriptions now that we have a session
+                        ok = await asyncio.to_thread(self._create_subscriptions)
                         if not ok:
-                            logger.error("Raid listener: subscription creation failed")
-                            return  # will trigger reconnect
+                            logger.error("EventSub listener: one or more subscriptions failed")
+                            # Still continue — partial subscriptions are usable
+                        self._connected = True
 
                     elif msg_type == "session_keepalive":
                         pass  # just updates _last_message_time
 
                     elif msg_type == "session_reconnect":
+                        self._connected = False
                         new_url = (
                             msg.get("payload", {})
                             .get("session", {})
                             .get("reconnect_url")
                         )
                         if new_url:
-                            logger.info(f"Raid listener: reconnecting to {new_url}")
-                            # Recursively connect to the new URL; the old
-                            # connection closes when this context exits.
+                            logger.info(f"EventSub listener: reconnecting to {new_url}")
                             await self._connect_and_listen(new_url)
                             return
 
@@ -225,35 +270,64 @@ class TwitchRaidListener:
                             .get("subscription", {})
                             .get("type")
                         )
-                        if sub_type == "channel.raid":
-                            event = msg.get("payload", {}).get("event", {})
-                            from_name = event.get("from_broadcaster_user_name", "?")
-                            to_name = event.get("to_broadcaster_user_name", "?")
-                            viewers = event.get("viewers", 0)
-                            logger.info(
-                                f"RAID DETECTED: {from_name} → {to_name} "
-                                f"({viewers} viewers)"
-                            )
-                            try:
-                                result = self._on_raid(event)
-                                if asyncio.iscoroutine(result):
-                                    await result
-                            except Exception as e:
-                                logger.error(f"Raid callback error: {e}")
+                        event = msg.get("payload", {}).get("event", {})
+                        await self._dispatch_event(sub_type, event)
 
                     elif msg_type == "revocation":
+                        sub_type = (
+                            msg.get("payload", {})
+                            .get("subscription", {})
+                            .get("type", "?")
+                        )
                         reason = (
                             msg.get("payload", {})
                             .get("subscription", {})
                             .get("status", "unknown")
                         )
-                        logger.warning(f"Raid listener: subscription revoked ({reason})")
-                        return  # reconnect will re-subscribe
+                        logger.warning(
+                            f"EventSub listener: {sub_type} subscription revoked ({reason})"
+                        )
+                        # Don't return — other subscriptions may still be alive.
+                        # On full disconnect the keepalive watchdog handles reconnect.
 
         except websockets.ConnectionClosedError as e:
-            logger.warning(f"Raid listener: connection closed: {e}")
+            logger.warning(f"EventSub listener: connection closed: {e}")
         except Exception as e:
-            logger.error(f"Raid listener: WebSocket error: {e}")
+            logger.error(f"EventSub listener: WebSocket error: {e}")
+        finally:
+            self._connected = False
+
+    async def _dispatch_event(self, sub_type: Optional[str], event: dict) -> None:
+        """Route an EventSub notification to the appropriate callback."""
+        try:
+            if sub_type == "stream.online":
+                broadcaster = event.get("broadcaster_user_name", "?")
+                logger.info(f"EventSub: stream.online — {broadcaster} is LIVE")
+                result = self._on_stream_online(event)
+                if asyncio.iscoroutine(result):
+                    await result
+
+            elif sub_type == "stream.offline":
+                broadcaster = event.get("broadcaster_user_name", "?")
+                logger.info(f"EventSub: stream.offline — {broadcaster} went OFFLINE")
+                result = self._on_stream_offline(event)
+                if asyncio.iscoroutine(result):
+                    await result
+
+            elif sub_type == "channel.raid" and self._on_raid is not None:
+                from_name = event.get("from_broadcaster_user_name", "?")
+                to_name = event.get("to_broadcaster_user_name", "?")
+                viewers = event.get("viewers", 0)
+                logger.info(
+                    f"EventSub: RAID — {from_name} → {to_name} ({viewers} viewers)"
+                )
+                result = self._on_raid(event)
+                if asyncio.iscoroutine(result):
+                    await result
+            else:
+                logger.debug(f"EventSub: unhandled event type '{sub_type}'")
+        except Exception as e:
+            logger.error(f"EventSub callback error ({sub_type}): {e}")
 
     async def _keepalive_watchdog(self) -> None:
         """Kill the connection if no message arrives within the keepalive window."""
@@ -265,7 +339,7 @@ class TwitchRaidListener:
             # Twitch recommends assuming dead after keepalive_timeout + ~10s grace
             if elapsed > self._keepalive_timeout + 10:
                 logger.warning(
-                    f"Raid listener: no message for {elapsed:.0f}s "
+                    f"EventSub listener: no message for {elapsed:.0f}s "
                     f"(limit {self._keepalive_timeout}s) — forcing reconnect"
                 )
                 if self._ws:
@@ -280,7 +354,7 @@ class TwitchRaidListener:
             if not self._access_token:
                 if not self._load_tokens():
                     logger.error(
-                        "Raid listener: no user tokens available "
+                        "EventSub listener: no user tokens available "
                         "(Twitch platform integration must be set up first)"
                     )
                     # Wait and retry — tokens might appear after TwitchUpdater auth
@@ -302,14 +376,14 @@ class TwitchRaidListener:
                 break
 
             # Reconnect with exponential back-off
-            logger.info(f"Raid listener: reconnecting in {delay:.0f}s...")
+            logger.info(f"EventSub listener: reconnecting in {delay:.0f}s...")
             await asyncio.sleep(delay)
             delay = min(delay * 2, _MAX_RECONNECT_DELAY)
 
             # Refresh token before reconnecting
             await asyncio.to_thread(self._refresh_access_token)
 
-        logger.info("Raid listener: stopped")
+        logger.debug("EventSub listener: run loop exited")
 
     # ── Public API ───────────────────────────────────────────────
 
@@ -322,13 +396,14 @@ class TwitchRaidListener:
             return
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
-        logger.info("Raid listener: task started")
+        logger.info("EventSub listener: task started")
 
     async def stop(self) -> None:
         """Gracefully stop the listener."""
         if not self._running:
             return
         self._running = False
+        self._connected = False
         if self._ws:
             try:
                 await self._ws.close()
@@ -341,4 +416,4 @@ class TwitchRaidListener:
             except asyncio.CancelledError:
                 pass
             self._task = None
-        logger.info("Raid listener: stopped")
+        logger.info("EventSub listener: stopped")
