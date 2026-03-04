@@ -163,13 +163,13 @@ All settings in this file are **hot-swappable** — you can edit and save while 
 
 Both `config/settings.json` and `config/playlists.json` can be changed **while the program is running** — no restart required. The system re-reads both files every loop iteration (once per second), so your changes take effect almost immediately.
 
-`.env` values are **not** hot-swappable. Environment variables are loaded once at process startup. Changing `.env` requires a full restart.
+`.env` values are also hot-swappable **when using the web dashboard**. The dashboard writes changes to `.env` and triggers a live reload — credentials, target streamers, OBS connection settings, scene names, and more are all updated without restarting. If editing `.env` by hand (without the dashboard), a restart is required.
 
 | File | Hot-swappable | What lives here |
 |---|---|---|
 | `config/settings.json` | Yes | All runtime behavior settings |
 | `config/playlists.json` | Yes | Playlist definitions (enable/disable, priorities, URLs) |
-| `.env` | No (restart required) | Credentials, folder paths, platform toggles |
+| `.env` | Yes (via dashboard) / No (manual edit) | Credentials, target streamers, OBS config, scene names |
 
 **Example — Recovering from YouTube 403 errors mid-download:**
 
