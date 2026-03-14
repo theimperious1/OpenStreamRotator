@@ -303,25 +303,20 @@ class PlaybackMonitor:
                         f"file could not be deleted, will retry next cycle"
                     )
                     break
-                # NOTE: In normal (non-temp-playback) mode we intentionally
-                # do NOT call _update_vlc_source() here.  VLC has already
-                # auto-advanced to the next track and is playing it.
-                # Reloading the playlist via set_input_settings would force
-                # VLC to restart the current track from position 0, causing
-                # a visible 1-second jitter.  The deleted file's ghost
-                # entry in VLC's internal playlist is harmless — VLC won't
-                # revisit it before the rotation triggers
-                # all_content_consumed on the last video.
+                # Reload VLC source to keep its internal playlist in
+                # sync with the filesystem.  Without this, VLC may play
+                # ghost entries from its stale in-memory playlist —
+                # especially after dashboard skips or when the VLC plugin
+                # caches aggressively.  The reload causes a brief stutter
+                # (~0.5s) but prevents desync.
                 #
-                # In TEMP PLAYBACK mode, however, VLC's static playlist
-                # doesn't include files downloaded after the source was
-                # last set.  We MUST refresh so VLC discovers them.
-                # Drain stale events too — VLC may have fired extra
-                # ended/started pairs while looping on its exhausted
+                # In TEMP PLAYBACK mode we additionally drain stale events —
+                # VLC's static playlist doesn't include files downloaded
+                # after the source was last set, and VLC may have fired
+                # extra ended/started pairs while looping on its exhausted
                 # playlist before this tick ran.
-                if self._temp_playback_mode:
-                    self._update_vlc_source()
-                    self._drain_queue()
+                self._update_vlc_source()
+                self._drain_queue()
 
             # Advance to next video
             files = self._get_video_files()
