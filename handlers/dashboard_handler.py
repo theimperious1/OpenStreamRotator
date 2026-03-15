@@ -128,7 +128,7 @@ class DashboardHandler:
             for p in ctrl.config_manager.get_playlists():
                 name = p.get("name", "")
                 stats = db_stats.get(name, {})
-                playlists.append({
+                entry: dict = {
                     "name": name,
                     "url": p.get("url", ""),
                     "twitch_category": p.get("twitch_category", "") or p.get("category", ""),
@@ -137,7 +137,10 @@ class DashboardHandler:
                     "priority": p.get("priority", 1),
                     "last_played": stats.get("last_played"),
                     "play_count": stats.get("play_count", 0),
-                })
+                }
+                if p.get("display_name"):
+                    entry["display_name"] = p["display_name"]
+                playlists.append(entry)
         except Exception:
             pass
 
@@ -815,6 +818,7 @@ class DashboardHandler:
             "kick_category": payload.get("kick_category", ""),
             "enabled": payload.get("enabled", True),
             "priority": payload.get("priority", 1),
+            **(({"display_name": payload["display_name"]}) if payload.get("display_name") else {}),
         })
         self._save_playlists_raw(data)
 
@@ -837,6 +841,11 @@ class DashboardHandler:
                     p["enabled"] = payload["enabled"]
                 if "priority" in payload:
                     p["priority"] = payload["priority"]
+                if "display_name" in payload:
+                    if payload["display_name"]:
+                        p["display_name"] = payload["display_name"]
+                    else:
+                        p.pop("display_name", None)
                 self._save_playlists_raw(data)
                 return
         logger.warning(f"Playlist '{name}' not found for update")

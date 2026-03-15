@@ -116,10 +116,28 @@ class PlaylistManager:
 
         SEPARATOR = ' | '
 
-        # Build the full list: current playlists, then preview playlists
-        all_names = [p.upper() for p in playlists] if playlists else []
+        # Build display-name lookup from config so playlists with different
+        # internal names can share the same title representation.
+        config_playlists = self.config.get_playlists()
+        display_map: dict[str, str] = {}
+        for p in config_playlists:
+            name = p.get('name', '')
+            display_map[name] = p.get('display_name') or name
+
+        # Resolve to display names and deduplicate (preserving order)
+        seen: set[str] = set()
+        all_names: list[str] = []
+        for name in (playlists or []):
+            dn = display_map.get(name, name).upper()
+            if dn not in seen:
+                seen.add(dn)
+                all_names.append(dn)
         if preview_playlists:
-            all_names.extend(p.upper() for p in preview_playlists)
+            for name in preview_playlists:
+                dn = display_map.get(name, name).upper()
+                if dn not in seen:
+                    seen.add(dn)
+                    all_names.append(dn)
 
         if not all_names:
             return template.replace('{PLAYLISTS}', 'VARIETY')[:max_length]

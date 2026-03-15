@@ -871,7 +871,8 @@ class AutomationController:
             self.playback_monitor = PlaybackMonitor(
                 self.db, self.obs_controller, VLC_SOURCE_NAME,
                 event_queue=self.obs_connection.media_event_queue,
-                config=self.config_manager, scene_stream=SCENE_STREAM
+                config=self.config_manager, scene_stream=SCENE_STREAM,
+                scene_rotation_screen=SCENE_ROTATION_SCREEN,
             )
         else:
             # Update reference after OBS reconnect (new OBSController instance)
