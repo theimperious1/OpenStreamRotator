@@ -304,6 +304,7 @@ class PlaybackMonitor:
 
                     # Mask VLC reload stutter with rotation screen
                     if not _scene_masked and self._scene_rotation_screen and self.obs_controller:
+                        logger.info(f"Scene mask: switching to '{self._scene_rotation_screen}' for VLC reload")
                         self.obs_controller.switch_scene(self._scene_rotation_screen)
                         _scene_masked = True
 
@@ -380,7 +381,13 @@ class PlaybackMonitor:
             # the automation controller owns the next scene switch in those
             # cases (rotation screen for content switch / temp playback reload).
             if _scene_masked and self.obs_controller and not self._all_content_consumed and not self._needs_vlc_refresh:
-                self._wait_for_vlc_playing()
+                vlc_ready = self._wait_for_vlc_playing()
+                if vlc_ready:
+                    # Extra buffer — VLC reports PLAYING before its decode
+                    # buffer has filled. Give it a moment so the switch
+                    # back to stream scene shows a clean frame.
+                    time.sleep(0.5)
+                logger.info(f"Scene mask: restoring '{self.scene_stream}' (VLC ready={vlc_ready})")
                 self.obs_controller.switch_scene(self.scene_stream)
 
         return result
