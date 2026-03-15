@@ -384,11 +384,21 @@ class PlaybackMonitor:
                 vlc_ready = self._wait_for_vlc_playing()
                 if vlc_ready:
                     # Extra buffer — VLC reports PLAYING before its decode
-                    # buffer has filled. Give it a moment so the switch
+                    # buffer has filled.  Give it a moment so the switch
                     # back to stream scene shows a clean frame.
                     time.sleep(0.5)
                 logger.info(f"Scene mask: restoring '{self.scene_stream}' (VLC ready={vlc_ready})")
                 self.obs_controller.switch_scene(self.scene_stream)
+
+                # The scene switches (rotation → stream) and VLC reload
+                # generate spurious started/ended events that accumulated
+                # during the wait.  Drain them and re-arm suppression so
+                # the next check() doesn't miscount them as transitions.
+                drained = self._drain_queue()
+                self._vlc_update_suppress = True
+                self._arm_suppress()
+                if drained:
+                    logger.debug(f"Scene mask: drained {drained} spurious events after restore")
 
         return result
 
