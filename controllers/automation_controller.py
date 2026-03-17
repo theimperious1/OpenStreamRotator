@@ -33,6 +33,7 @@ from handlers.content_switch_handler import ContentSwitchHandler
 from handlers.dashboard_handler import DashboardHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
+from utils.video_utils import strip_ordering_prefix
 from services.web_dashboard_client import WebDashboardClient
 from monitors.obs_freeze_monitor import OBSFreezeMonitor
 from config.constants import (
@@ -695,8 +696,32 @@ class AutomationController:
                 pause_image=DEFAULT_PAUSE_IMAGE,
                 rotation_image=DEFAULT_ROTATION_IMAGE,
             )
-            # Repopulate VLC source playlist from the live folder
-            self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, self.config_manager.video_folder)
+            # Repopulate VLC source playlist from the live folder.
+            # If we have a pending seek target, rotate the playlist so VLC
+            # starts on that video (OBS VLC source always begins at index 0).
+            rotated_playlist = None
+            resume_file = None
+            if self._pending_seek_video:
+                folder = str(self.config_manager.video_folder)
+                all_files = sorted(
+                    f for f in os.listdir(folder)
+                    if f.lower().endswith(VIDEO_EXTENSIONS)
+                )
+                for i, f in enumerate(all_files):
+                    if strip_ordering_prefix(f) == self._pending_seek_video:
+                        rotated_playlist = all_files[i:] + all_files[:i]
+                        resume_file = all_files[i]
+                        break
+
+            self.obs_controller.update_vlc_source(
+                VLC_SOURCE_NAME,
+                self.config_manager.video_folder,
+                playlist=rotated_playlist,
+            )
+            # Override playback monitor so it tracks the correct video
+            if resume_file and self.playback_monitor:
+                self.playback_monitor._current_video = resume_file
+                logger.info(f"OBS freeze recovery: rotated playlist to start at {resume_file}")
             logger.info("OBS freeze recovery: scenes and VLC source restored")
 
         # 7. Switch to the stream scene so OBS shows the right content
