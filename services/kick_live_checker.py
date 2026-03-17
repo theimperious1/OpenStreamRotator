@@ -74,7 +74,7 @@ class KickLiveChecker:
             logger.error(f"Failed to refresh Kick token: {e}")
             return False
 
-    def is_stream_live(self, channel_slug: str) -> bool:
+    def is_stream_live(self, channel_slug: str) -> Optional[bool]:
         """
         Check if a Kick channel is live via the public channels API.
 
@@ -82,11 +82,11 @@ class KickLiveChecker:
             channel_slug: Kick channel slug (e.g. 'xqc')
 
         Returns:
-            True if channel is live, False otherwise
+            True if channel is live, False if offline, None on API error
         """
         if not self.token:
             logger.debug("No Kick token available for live check")
-            return False
+            return None
 
         headers = {"Authorization": f"Bearer {self.token}"}
         params = {"slug": [channel_slug]}
@@ -104,7 +104,7 @@ class KickLiveChecker:
                 logger.debug(f"Checked Kick {channel_slug} live status: {is_live}")
                 return is_live
             logger.debug(f"Kick channel '{channel_slug}' not found in API response")
-            return False
+            return None
         except requests.RequestException as e:
             logger.error(f"Failed to check Kick stream status for {channel_slug}: {e}")
-            return False
+            return None

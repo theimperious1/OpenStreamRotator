@@ -6,7 +6,7 @@ checks whether specified channels are currently streaming.
 import requests
 import time
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ class TwitchLiveChecker:
             logger.error(f"Failed to get broadcaster ID: {e}")
             return ""
 
-    def is_stream_live(self, username: str) -> bool:
+    def is_stream_live(self, username: str) -> Optional[bool]:
         """
         Check if a Twitch user is live.
         
@@ -112,11 +112,11 @@ class TwitchLiveChecker:
             username: Twitch username to check
         
         Returns:
-            True if user is live, False otherwise
+            True if user is live, False if offline, None on API error
         """
         if not self.token:
             logger.debug("No Twitch token available for live check")
-            return False
+            return None
         
         headers = {
             "Client-ID": self.client_id,
@@ -133,4 +133,4 @@ class TwitchLiveChecker:
             return is_live
         except requests.RequestException as e:
             logger.error(f"Failed to check stream status for {username}: {e}")
-            return False
+            return None

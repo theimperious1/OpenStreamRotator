@@ -583,6 +583,16 @@ class DashboardHandler:
 
         # Switch to stream scene
         if ctrl.obs_controller:
+            # Drain stale events and arm suppression BEFORE the scene switch.
+            # Switching to OSR Stream makes VLC visible, which fires a
+            # MediaInputPlaybackStarted event.  Without suppression the
+            # playback monitor would treat it as a real transition —
+            # deleting the current video and advancing to the next one.
+            if ctrl.playback_monitor:
+                ctrl.playback_monitor._drain_queue()
+                ctrl.playback_monitor._vlc_update_suppress = True
+                ctrl.playback_monitor._arm_suppress()
+
             ctrl.obs_controller.switch_scene(self._scene_stream)
 
         # Restore playback position
