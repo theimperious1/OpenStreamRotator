@@ -14,6 +14,7 @@ from typing import Optional, TYPE_CHECKING
 from dotenv import set_key
 from config.constants import (
     DEFAULT_VIDEO_FOLDER,
+    VIDEO_EXTENSIONS,
 )
 
 if TYPE_CHECKING:
@@ -188,6 +189,18 @@ class DashboardHandler:
         # Download status
         download_active = ctrl.download_manager.background_download_in_progress if ctrl.download_manager else False
 
+        # Pending (next rotation) video files
+        pending_videos: list[str] = []
+        try:
+            pending_folder = ctrl.config_manager.next_rotation_folder
+            if pending_folder and os.path.isdir(pending_folder):
+                pending_videos = sorted(
+                    f for f in os.listdir(pending_folder)
+                    if f.lower().endswith(VIDEO_EXTENSIONS)
+                )
+        except Exception:
+            pass
+
         # Guard flags — determine whether skip/rotation are safe right now
         videos_remaining = len(queue) - (queue.index(ctrl.playback_monitor._current_video) + 1) if (
             ctrl.playback_monitor and ctrl.playback_monitor._current_video in queue
@@ -217,6 +230,7 @@ class DashboardHandler:
             "queue": queue,
             "connections": connections,
             "download_active": download_active,
+            "pending_videos": pending_videos,
             "can_skip": can_skip,
             "skip_ready": self._skip_ready,
             "can_trigger_rotation": can_trigger_rotation,
