@@ -1558,15 +1558,18 @@ class AutomationController:
                 logger.warning(f"Failed to refresh Kick app token: {e}")
 
         # ── Determine live status ──
-        # EventSub is the primary source for Twitch (near-instant);
+        # EventSub is the PRIMARY source for Twitch (near-instant push).
+        # When EventSub gives a definitive answer, trust it immediately —
+        # don't let a slower Kick poll override it.
         # HTTP poll is the fallback when EventSub isn't connected.
-        # Kick always uses HTTP poll (no EventSub equivalent).
+        # Kick is only checked when EventSub is unavailable.
         #
         # Checkers return True/False/None.  None means the API call
         # failed — treat as "unknown" and keep the current state so
         # transient errors don't bounce between pause and stream.
         is_live = False
         any_definitive = False  # At least one platform gave a real answer
+        eventsub_authoritative = False  # EventSub provided the answer
 
         if target_twitch:
             eventsub_connected = (
@@ -1577,6 +1580,7 @@ class AutomationController:
                 # Primary: EventSub real-time state (always available, no HTTP)
                 is_live = self._eventsub_is_live
                 any_definitive = True
+                eventsub_authoritative = True
             elif self.twitch_live_checker and (not skip_twitch_poll or (eventsub_connected and self._eventsub_is_live is None)):
                 # Fallback: HTTP poll.  Also force a poll when EventSub is
                 # connected but _eventsub_is_live is still None — this seeds
@@ -1595,7 +1599,11 @@ class AutomationController:
                         self._eventsub_is_live = twitch_result
                         logger.info(f"Seeded _eventsub_is_live = {twitch_result} from HTTP poll (stream was already {'live' if twitch_result else 'offline'})")
 
-        if not is_live and target_kick and self.kick_live_checker:
+        # Only check Kick when EventSub didn't provide an authoritative answer.
+        # EventSub is near-instant; Kick polls lag behind and would override
+        # the real-time signal (e.g. staying paused after EventSub says offline
+        # because Kick still reports live for another ~90s).
+        if not eventsub_authoritative and not is_live and target_kick and self.kick_live_checker:
             kick_result = await asyncio.to_thread(self.kick_live_checker.is_stream_live, target_kick)
             if kick_result is None:
                 logger.debug("Kick live check returned None (API error) — skipping Kick this tick")
