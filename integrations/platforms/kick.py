@@ -150,13 +150,19 @@ class KickUpdater(StreamPlatform):
 
                     logger.info(f"[{self.platform_name}] SUCCESS! Tokens exchanged and saved.")
 
-                    # Auto-resolve channel_id if it wasn't set
-                    if not self.channel_id and "channel_id" in token_data:
-                        self.channel_id = str(token_data["channel_id"])
+                    # Always adopt the channel_id from the freshly authorized account.
+                    # This ensures that if the user re-auths as a different account,
+                    # we use the new account's tokens (not stale ones from a prior auth).
+                    if "channel_id" in token_data:
+                        new_channel_id = str(token_data["channel_id"])
+                        if self.channel_id and self.channel_id != new_channel_id:
+                            logger.warning(
+                                f"[{self.platform_name}] Channel ID changed: "
+                                f"{self.channel_id} → {new_channel_id} "
+                                "(authorized as a different account)"
+                            )
+                        self.channel_id = new_channel_id
                         self._persist_channel_id(self.channel_id)
-                        logger.info(
-                            f"[{self.platform_name}] Channel ID auto-resolved: {self.channel_id}"
-                        )
 
                     await self.api.start_token_refresh()
                     logger.info(f"[{self.platform_name}] Token refresh started. Authorization complete!")

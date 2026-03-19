@@ -33,6 +33,7 @@ from handlers.content_switch_handler import ContentSwitchHandler
 from handlers.dashboard_handler import DashboardHandler
 from handlers.temp_playback_handler import TempPlaybackHandler
 from utils.video_processor import kill_all_running_processes as kill_processor_processes
+from utils.video_utils import strip_ordering_prefix
 from services.web_dashboard_client import WebDashboardClient
 from monitors.obs_freeze_monitor import OBSFreezeMonitor
 from config.constants import (
@@ -695,8 +696,32 @@ class AutomationController:
                 pause_image=DEFAULT_PAUSE_IMAGE,
                 rotation_image=DEFAULT_ROTATION_IMAGE,
             )
-            # Repopulate VLC source playlist from the live folder
-            self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, self.config_manager.video_folder)
+            # Repopulate VLC source playlist from the live folder.
+            # If we have a pending seek target, rotate the playlist so VLC
+            # starts on that video (OBS VLC source always begins at index 0).
+            rotated_playlist = None
+            resume_file = None
+            if self._pending_seek_video:
+                folder = str(self.config_manager.video_folder)
+                all_files = sorted(
+                    f for f in os.listdir(folder)
+                    if f.lower().endswith(VIDEO_EXTENSIONS)
+                )
+                for i, f in enumerate(all_files):
+                    if strip_ordering_prefix(f) == self._pending_seek_video:
+                        rotated_playlist = all_files[i:] + all_files[:i]
+                        resume_file = all_files[i]
+                        break
+
+            self.obs_controller.update_vlc_source(
+                VLC_SOURCE_NAME,
+                self.config_manager.video_folder,
+                playlist=rotated_playlist,
+            )
+            # Override playback monitor so it tracks the correct video
+            if resume_file and self.playback_monitor:
+                self.playback_monitor._current_video = resume_file
+                logger.info(f"OBS freeze recovery: rotated playlist to start at {resume_file}")
             logger.info("OBS freeze recovery: scenes and VLC source restored")
 
         # 7. Switch to the stream scene so OBS shows the right content
@@ -871,7 +896,8 @@ class AutomationController:
             self.playback_monitor = PlaybackMonitor(
                 self.db, self.obs_controller, VLC_SOURCE_NAME,
                 event_queue=self.obs_connection.media_event_queue,
-                config=self.config_manager, scene_stream=SCENE_STREAM
+                config=self.config_manager, scene_stream=SCENE_STREAM,
+                scene_rotation_screen=SCENE_ROTATION_SCREEN,
             )
         else:
             # Update reference after OBS reconnect (new OBSController instance)
@@ -1512,7 +1538,14 @@ class AutomationController:
             return
 
         # Refresh tokens in background threads (each can block up to 10s)
-        if target_twitch and self.twitch_live_checker and not skip_twitch_poll:
+        # Also refresh Twitch token when EventSub seeding is needed, even
+        # if the regular Twitch poll is skipped this tick.
+        need_twitch_token = not skip_twitch_poll or (
+            self._eventsub_listener is not None
+            and self._eventsub_listener.is_connected
+            and self._eventsub_is_live is None
+        )
+        if target_twitch and self.twitch_live_checker and need_twitch_token:
             try:
                 await asyncio.to_thread(self.twitch_live_checker.refresh_token_if_needed)
             except Exception as e:
@@ -1525,10 +1558,25 @@ class AutomationController:
                 logger.warning(f"Failed to refresh Kick app token: {e}")
 
         # ── Determine live status ──
-        # EventSub is the primary source for Twitch (near-instant);
+        # EventSub is the PRIMARY source for Twitch (near-instant push).
+        # When EventSub gives a definitive answer, trust it immediately —
+        # don't let a slower Kick poll override it.
         # HTTP poll is the fallback when EventSub isn't connected.
-        # Kick always uses HTTP poll (no EventSub equivalent).
+        # Kick is only checked when EventSub is unavailable.
+        #
+        # Checkers return True/False/None.  None means the API call
+        # failed — treat as "unknown" and keep the current state so
+        # transient errors don't bounce between pause and stream.
         is_live = False
+        any_definitive = False  # At least one platform gave a real answer
+        eventsub_authoritative = False  # EventSub provided the answer
+
+        # When enabled, EventSub is the sole authority — Kick polls are
+        # skipped entirely.  Useful when the Twitch target and Kick target
+        # are the same streamer (Kick's stale "live" window lags behind).
+        eventsub_authoritative_setting = self.config_manager.get_settings().get(
+            "eventsub_authoritative", False
+        )
 
         if target_twitch:
             eventsub_connected = (
@@ -1538,14 +1586,43 @@ class AutomationController:
             if eventsub_connected and self._eventsub_is_live is not None:
                 # Primary: EventSub real-time state (always available, no HTTP)
                 is_live = self._eventsub_is_live
-            elif self.twitch_live_checker and not skip_twitch_poll:
-                # Fallback: HTTP poll (EventSub not connected yet, or no data)
-                is_live = await asyncio.to_thread(
+                any_definitive = True
+                if eventsub_authoritative_setting:
+                    eventsub_authoritative = True
+            elif self.twitch_live_checker and (not skip_twitch_poll or (eventsub_connected and self._eventsub_is_live is None)):
+                # Fallback: HTTP poll.  Also force a poll when EventSub is
+                # connected but _eventsub_is_live is still None — this seeds
+                # the live state for streams that were already live before OSR
+                # started (no stream.online event will ever fire for them).
+                twitch_result = await asyncio.to_thread(
                     self.twitch_live_checker.is_stream_live, target_twitch,
                 )
+                if twitch_result is None:
+                    logger.debug("Twitch live check returned None (API error) — skipping Twitch this tick")
+                else:
+                    is_live = twitch_result
+                    any_definitive = True
+                    # Seed EventSub state so future ticks use the real-time path
+                    if eventsub_connected and self._eventsub_is_live is None:
+                        self._eventsub_is_live = twitch_result
+                        logger.info(f"Seeded _eventsub_is_live = {twitch_result} from HTTP poll (stream was already {'live' if twitch_result else 'offline'})")
 
-        if not is_live and target_kick and self.kick_live_checker:
-            is_live = await asyncio.to_thread(self.kick_live_checker.is_stream_live, target_kick)
+        # Only check Kick when EventSub didn't provide an authoritative answer.
+        # EventSub is near-instant; Kick polls lag behind and would override
+        # the real-time signal (e.g. staying paused after EventSub says offline
+        # because Kick still reports live for another ~90s).
+        if not eventsub_authoritative and not is_live and target_kick and self.kick_live_checker:
+            kick_result = await asyncio.to_thread(self.kick_live_checker.is_stream_live, target_kick)
+            if kick_result is None:
+                logger.debug("Kick live check returned None (API error) — skipping Kick this tick")
+            else:
+                is_live = kick_result
+                any_definitive = True
+
+        # If ALL platforms errored, bail out — keep current state
+        if not any_definitive and (target_twitch or target_kick):
+            logger.debug("All live checks returned None (API errors) — keeping current state")
+            return
 
         if ignore_streamer:
             is_live = False
@@ -1677,6 +1754,10 @@ class AutomationController:
             self.last_stream_status = "offline"
             self._rotation_postpone_logged = False
             self.notification_service.notify_streamer_offline()
+            # Update category for current video after unpause — during the
+            # pause period the category may have drifted (e.g., the pause
+            # happened right after a transition without a category update).
+            await self._update_category_for_current_video()
 
     def _tick_save_playback(self) -> None:
         """Save playback position every tick and apply deferred seek if pending."""
@@ -1876,7 +1957,11 @@ class AutomationController:
                 kick_due = (loop_count % kick_interval == 0) or force_check or ignore_streamer_changed
                 twitch_http_due = (loop_count % twitch_http_interval == 0) or force_check or ignore_streamer_changed
 
-                if kick_due or twitch_http_due:
+                # When EventSub is active with a definitive state, check
+                # every tick (just reads a boolean — no HTTP).  This makes
+                # pause/unpause near-instant instead of waiting up to 30s.
+                eventsub_has_state = eventsub_active and self._eventsub_is_live is not None
+                if kick_due or twitch_http_due or eventsub_has_state or self._raid_detected:
                     await self._check_live_status(
                         ignore_streamer,
                         skip_twitch_poll=not twitch_http_due,

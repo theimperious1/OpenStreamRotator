@@ -43,12 +43,14 @@ class PlaybackMonitor:
         event_queue: Queue,
         config: Optional['ConfigManager'] = None,
         scene_stream: str = "OSR Stream",
+        scene_rotation_screen: str = "",
     ):
         self.db = db
         self.obs_controller = obs_controller
         self.vlc_source_name = vlc_source_name
         self.config = config
         self.scene_stream = scene_stream
+        self._scene_rotation_screen = scene_rotation_screen
 
         # Thread-safe queue fed by OBSConnectionManager EventClient
         self._event_queue: Queue = event_queue
@@ -251,115 +253,152 @@ class PlaybackMonitor:
         if transition_count == 0:
             return result
 
+        # Scene masking: switch to rotation screen while VLC reloads to
+        # hide the brief playback stutter.  The finally block restores the
+        # stream scene so early returns inside the loop are safe.
+        _scene_masked = False
+
         # Process each transition sequentially (handles rapid skips)
-        for _ in range(transition_count):
-            if self._all_content_consumed:
-                break
+        try:
+            for _ in range(transition_count):
+                if self._all_content_consumed:
+                    break
 
-            previous_video = self._current_video
-            previous_original = strip_ordering_prefix(previous_video)
-            files = self._get_video_files()
-            is_last = len(files) <= 1
+                previous_video = self._current_video
+                previous_original = strip_ordering_prefix(previous_video)
+                files = self._get_video_files()
+                is_last = len(files) <= 1
 
-            if is_last:
-                # Last video finished — check temp playback refresh
-                if self._temp_playback_mode:
-                    logger.info(
-                        "Last video done in temp playback — signaling VLC refresh"
-                    )
-                    self._needs_vlc_refresh = True
+                if is_last:
+                    # Last video finished — check temp playback refresh
+                    if self._temp_playback_mode:
+                        logger.info(
+                            "Last video done in temp playback — signaling VLC refresh"
+                        )
+                        self._needs_vlc_refresh = True
+                        result['transition'] = True
+                        result['previous_video'] = previous_original
+                        result['current_video'] = None
+                        return result
+
+                    # Normal mode: delete last video, mark consumed
+                    if self._delete_on_transition:
+                        filepath = os.path.join(self.video_folder, previous_video)
+                        self._delete_video(filepath)
+
+                    self._all_content_consumed = True
+                    self._current_video = None
                     result['transition'] = True
                     result['previous_video'] = previous_original
                     result['current_video'] = None
+                    result['all_consumed'] = True
+                    logger.info(
+                        f"Final video finished: {previous_original} — "
+                        f"all content consumed"
+                    )
                     return result
 
-                # Normal mode: delete last video, mark consumed
+                # Normal mid-playlist transition
                 if self._delete_on_transition:
                     filepath = os.path.join(self.video_folder, previous_video)
-                    self._delete_video(filepath)
 
-                self._all_content_consumed = True
-                self._current_video = None
-                result['transition'] = True
-                result['previous_video'] = previous_original
-                result['current_video'] = None
-                result['all_consumed'] = True
-                logger.info(
-                    f"Final video finished: {previous_original} — "
-                    f"all content consumed"
-                )
-                return result
+                    # Mask VLC reload stutter with rotation screen
+                    if not _scene_masked and self._scene_rotation_screen and self.obs_controller:
+                        logger.info(f"Scene mask: switching to '{self._scene_rotation_screen}' for VLC reload")
+                        self.obs_controller.switch_scene(self._scene_rotation_screen)
+                        _scene_masked = True
 
-            # Normal mid-playlist transition
-            if self._delete_on_transition:
-                filepath = os.path.join(self.video_folder, previous_video)
-                deleted = self._delete_video(filepath)
-                if not deleted:
-                    # File still locked — skip this transition and retry
-                    # on the next tick.  Don't update VLC or advance the
-                    # pointer; VLC is still playing this file anyway.
-                    logger.warning(
-                        f"Skipping transition for {previous_video} — "
-                        f"file could not be deleted, will retry next cycle"
-                    )
-                    break
-                # Reload VLC source to keep its internal playlist in
-                # sync with the filesystem.  Without this, VLC may play
-                # ghost entries from its stale in-memory playlist —
-                # especially after dashboard skips or when the VLC plugin
-                # caches aggressively.  The reload causes a brief stutter
-                # (~0.5s) but prevents desync.
-                #
-                # In TEMP PLAYBACK mode we additionally drain stale events —
-                # VLC's static playlist doesn't include files downloaded
-                # after the source was last set, and VLC may have fired
-                # extra ended/started pairs while looping on its exhausted
-                # playlist before this tick ran.
-                self._update_vlc_source()
-                self._drain_queue()
+                    deleted = self._delete_video(filepath)
+                    if not deleted:
+                        # File still locked — skip this transition and retry
+                        # on the next tick.  Don't update VLC or advance the
+                        # pointer; VLC is still playing this file anyway.
+                        logger.warning(
+                            f"Skipping transition for {previous_video} — "
+                            f"file could not be deleted, will retry next cycle"
+                        )
+                        break
+                    # Reload VLC source to keep its internal playlist in
+                    # sync with the filesystem.  Without this, VLC may play
+                    # ghost entries from its stale in-memory playlist —
+                    # especially after dashboard skips or when the VLC plugin
+                    # caches aggressively.  The reload causes a brief stutter
+                    # (~0.5s) but prevents desync.
+                    #
+                    # In TEMP PLAYBACK mode we additionally drain stale events —
+                    # VLC's static playlist doesn't include files downloaded
+                    # after the source was last set, and VLC may have fired
+                    # extra ended/started pairs while looping on its exhausted
+                    # playlist before this tick ran.
+                    self._update_vlc_source()
+                    self._drain_queue()
 
-            # Advance to next video
-            files = self._get_video_files()
-            if self._delete_on_transition:
-                # After deletion the next file is always first
-                self._current_video = files[0] if files else None
-            else:
-                # Prepared-rotation mode — advance by index
-                cur_idx = (
-                    files.index(previous_video)
-                    if previous_video in files else -1
-                )
-                if cur_idx >= 0 and cur_idx + 1 < len(files):
-                    self._current_video = files[cur_idx + 1]
+                # Advance to next video
+                files = self._get_video_files()
+                if self._delete_on_transition:
+                    # After deletion the next file is always first
+                    self._current_video = files[0] if files else None
                 else:
-                    self._current_video = None
+                    # Prepared-rotation mode — advance by index
+                    cur_idx = (
+                        files.index(previous_video)
+                        if previous_video in files else -1
+                    )
+                    if cur_idx >= 0 and cur_idx + 1 < len(files):
+                        self._current_video = files[cur_idx + 1]
+                    else:
+                        self._current_video = None
 
-            if self._current_video:
-                current_original = strip_ordering_prefix(self._current_video)
-                logger.info(
-                    f"Video transition: {previous_original} -> {current_original}"
-                )
-                # Only populate the *last* transition into the result
-                result['transition'] = True
-                result['previous_video'] = previous_original
-                result['current_video'] = current_original
-                # After refreshing VLC in temp playback, stop processing
-                # further transitions in this tick — any remaining count
-                # from _count_transitions is from stale VLC loop events on
-                # the old (now-replaced) playlist.
-                if self._temp_playback_mode:
+                if self._current_video:
+                    current_original = strip_ordering_prefix(self._current_video)
+                    logger.info(
+                        f"Video transition: {previous_original} -> {current_original}"
+                    )
+                    # Only populate the *last* transition into the result
+                    result['transition'] = True
+                    result['previous_video'] = previous_original
+                    result['current_video'] = current_original
+                    # After refreshing VLC in temp playback, stop processing
+                    # further transitions in this tick — any remaining count
+                    # from _count_transitions is from stale VLC loop events on
+                    # the old (now-replaced) playlist.
+                    if self._temp_playback_mode:
+                        return result
+                else:
+                    self._all_content_consumed = True
+                    result['transition'] = True
+                    result['previous_video'] = previous_original
+                    result['current_video'] = None
+                    result['all_consumed'] = True
+                    logger.info(
+                        f"Final video finished: {previous_original} — "
+                        f"all content consumed"
+                    )
                     return result
-            else:
-                self._all_content_consumed = True
-                result['transition'] = True
-                result['previous_video'] = previous_original
-                result['current_video'] = None
-                result['all_consumed'] = True
-                logger.info(
-                    f"Final video finished: {previous_original} — "
-                    f"all content consumed"
-                )
-                return result
+        finally:
+            # Restore stream scene after masking VLC reload stutter.
+            # Skip when all content is consumed or VLC refresh is pending —
+            # the automation controller owns the next scene switch in those
+            # cases (rotation screen for content switch / temp playback reload).
+            if _scene_masked and self.obs_controller and not self._all_content_consumed and not self._needs_vlc_refresh:
+                vlc_ready = self._wait_for_vlc_playing()
+                if vlc_ready:
+                    # Extra buffer — VLC reports PLAYING before its decode
+                    # buffer has filled.  Give it a moment so the switch
+                    # back to stream scene shows a clean frame.
+                    time.sleep(0.5)
+                logger.info(f"Scene mask: restoring '{self.scene_stream}' (VLC ready={vlc_ready})")
+                self.obs_controller.switch_scene(self.scene_stream)
+
+                # The scene switches (rotation → stream) and VLC reload
+                # generate spurious started/ended events that accumulated
+                # during the wait.  Drain them and re-arm suppression so
+                # the next check() doesn't miscount them as transitions.
+                drained = self._drain_queue()
+                self._vlc_update_suppress = True
+                self._arm_suppress()
+                if drained:
+                    logger.debug(f"Scene mask: drained {drained} spurious events after restore")
 
         return result
 
@@ -534,6 +573,24 @@ class PlaybackMonitor:
                 logger.debug(f"Updated VLC source: {len(files)} videos remaining")
         except Exception as e:
             logger.error(f"Failed to update VLC source after deletion: {e}")
+
+    def _wait_for_vlc_playing(self, timeout: float = 3.0) -> bool:
+        """Poll VLC source until it reports PLAYING, or timeout.
+
+        Used after a VLC source reload while the rotation screen is
+        displayed — once VLC is playing we can safely switch back to
+        the stream scene without the viewer seeing a stutter.
+        """
+        if not self.obs_controller:
+            return False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = self.obs_controller.get_media_input_status(self.vlc_source_name)
+            if status and status.get('media_state') == 'OBS_MEDIA_STATE_PLAYING':
+                return True
+            time.sleep(0.1)
+        logger.debug("Timed out waiting for VLC to start playing after reload")
+        return False
 
     # ------------------------------------------------------------------
     # Category resolution

@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 # Prefix pattern: "XX_" where XX is a 2-digit number
 PREFIX_PATTERN = re.compile(r'^\d{2}_')
 
+# Pattern to extract playlist name from video filename
+# e.g., "BALL x PIT_001_This Game Changed My Life.mp4" → "BALL x PIT"
+_PLAYLIST_FROM_FILENAME = re.compile(r'^(.+?)_\d{3}_')
+
+# Cache of filenames already logged as missing from DB to avoid spam
+_db_miss_logged: set[str] = set()
+
 
 def strip_ordering_prefix(filename: str) -> str:
     """Strip the ordering prefix (e.g., '01_') from a video filename.
@@ -122,22 +129,29 @@ def resolve_category_for_video(
 
         # Look up the video in database to find its source playlist
         video = db.get_video_by_filename(clean_filename)
-        if not video:
-            logger.debug(f"Video not found in database: {clean_filename}")
-            return None
+        playlist_name = video.get('playlist_name') if video else None
 
-        playlist_name = video.get('playlist_name')
+        # Fallback: extract playlist name from filename convention
+        # e.g., "IRL_001_Going to Taco Bell..." → "IRL"
         if not playlist_name:
-            logger.debug(f"No playlist_name for video: {video_filename}")
-            return None
+            m = _PLAYLIST_FROM_FILENAME.match(clean_filename)
+            if m:
+                playlist_name = m.group(1)
+            if not playlist_name:
+                if clean_filename not in _db_miss_logged:
+                    _db_miss_logged.add(clean_filename)
+                    logger.debug(f"Cannot determine playlist for video: {clean_filename}")
+                return None
 
         # Get the category for this playlist from playlists config
         playlists_config = config.get_playlists()
         for p in playlists_config:
-            if p.get('name') == playlist_name:
+            if p.get('name', '').upper() == playlist_name.upper():
                 return resolve_playlist_categories(p)
 
-        logger.debug(f"Playlist '{playlist_name}' no longer in config (may have been removed) — skipping category update for: {video_filename}")
+        if clean_filename not in _db_miss_logged:
+            _db_miss_logged.add(clean_filename)
+            logger.debug(f"Playlist '{playlist_name}' not in config — skipping category update for: {video_filename}")
         return None
     except Exception as e:
         logger.error(f"Error getting category for video {video_filename}: {e}")

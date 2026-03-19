@@ -116,10 +116,28 @@ class PlaylistManager:
 
         SEPARATOR = ' | '
 
-        # Build the full list: current playlists, then preview playlists
-        all_names = [p.upper() for p in playlists] if playlists else []
+        # Build display-name lookup from config so playlists with different
+        # internal names can share the same title representation.
+        config_playlists = self.config.get_playlists()
+        display_map: dict[str, str] = {}
+        for p in config_playlists:
+            name = p.get('name', '')
+            display_map[name] = p.get('display_name') or name
+
+        # Resolve to display names and deduplicate (preserving order)
+        seen: set[str] = set()
+        all_names: list[str] = []
+        for name in (playlists or []):
+            dn = display_map.get(name, name).upper()
+            if dn not in seen:
+                seen.add(dn)
+                all_names.append(dn)
         if preview_playlists:
-            all_names.extend(p.upper() for p in preview_playlists)
+            for name in preview_playlists:
+                dn = display_map.get(name, name).upper()
+                if dn not in seen:
+                    seen.add(dn)
+                    all_names.append(dn)
 
         if not all_names:
             return template.replace('{PLAYLISTS}', 'VARIETY')[:max_length]
@@ -312,12 +330,19 @@ class PlaylistManager:
             logger.error(f"Error copying files: {e}")
             return False
 
+    # Regex to extract playlist name from yt-dlp filenames: PLAYLIST_NNN_Title.ext
+    _PLAYLIST_FROM_FILENAME = re.compile(r'^(.+?)_\d{3}_')
+
     def rename_videos_with_playlist_prefix(self, folder: str, playlist_order: list[str]) -> bool:
         """Rename video files with ordering prefix based on their source playlist.
         
         Files are prefixed with 'XX_' where XX is the playlist's position in the
         rotation order (01, 02, etc.). This ensures alphabetical sorting groups
         videos by playlist and plays them in the correct order.
+        
+        Falls back to extracting the playlist name from the filename pattern
+        (e.g. ``REACTS_001_Title.mp4`` → ``REACTS``) when the video is not
+        found in the database.
         
         Args:
             folder: Path to the folder containing video files to rename
@@ -335,7 +360,11 @@ class PlaylistManager:
             for i, name in enumerate(playlist_order):
                 playlist_prefix[name] = f"{i + 1:02d}"
             
+            # Case-insensitive reverse lookup for filename-based fallback
+            playlist_prefix_lower = {name.lower(): prefix for name, prefix in playlist_prefix.items()}
+            
             renamed_count = 0
+            fallback_count = 0
             for filename in os.listdir(folder):
                 if not filename.lower().endswith(VIDEO_EXTENSIONS):
                     continue
@@ -349,12 +378,26 @@ class PlaylistManager:
                 # cross-playlist registrations don't cause wrong prefixes
                 rotation_names = list(playlist_prefix.keys())
                 video = self.db.get_video_by_filename(filename, playlist_names=rotation_names)
-                if not video:
-                    logger.debug(f"Video not in database, skipping prefix: {filename}")
-                    continue
                 
-                playlist_name = video.get('playlist_name', '')
-                prefix = playlist_prefix.get(playlist_name, '99')  # Default to end
+                prefix = None
+                if video:
+                    playlist_name = video.get('playlist_name', '')
+                    prefix = playlist_prefix.get(playlist_name, '99')
+                else:
+                    # Fallback: extract playlist name from filename pattern
+                    m = self._PLAYLIST_FROM_FILENAME.match(filename)
+                    if m:
+                        extracted = m.group(1)
+                        prefix = playlist_prefix_lower.get(extracted.lower())
+                        if prefix:
+                            fallback_count += 1
+                        else:
+                            logger.debug(f"Filename prefix '{extracted}' not in rotation playlists, skipping: {filename}")
+                    else:
+                        logger.debug(f"Cannot determine playlist for: {filename}")
+                
+                if prefix is None:
+                    continue
                 
                 new_filename = f"{prefix}_{filename}"
                 src = os.path.join(folder, filename)
@@ -364,7 +407,10 @@ class PlaylistManager:
                 renamed_count += 1
             
             if renamed_count > 0:
-                logger.info(f"Renamed {renamed_count} videos with playlist prefix in {folder}")
+                msg = f"Renamed {renamed_count} videos with playlist prefix in {folder}"
+                if fallback_count:
+                    msg += f" ({fallback_count} via filename fallback)"
+                logger.info(msg)
             return True
             
         except Exception as e:

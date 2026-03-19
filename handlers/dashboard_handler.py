@@ -14,6 +14,7 @@ from typing import Optional, TYPE_CHECKING
 from dotenv import set_key
 from config.constants import (
     DEFAULT_VIDEO_FOLDER,
+    VIDEO_EXTENSIONS,
 )
 
 if TYPE_CHECKING:
@@ -128,7 +129,7 @@ class DashboardHandler:
             for p in ctrl.config_manager.get_playlists():
                 name = p.get("name", "")
                 stats = db_stats.get(name, {})
-                playlists.append({
+                entry: dict = {
                     "name": name,
                     "url": p.get("url", ""),
                     "twitch_category": p.get("twitch_category", "") or p.get("category", ""),
@@ -137,7 +138,10 @@ class DashboardHandler:
                     "priority": p.get("priority", 1),
                     "last_played": stats.get("last_played"),
                     "play_count": stats.get("play_count", 0),
-                })
+                }
+                if p.get("display_name"):
+                    entry["display_name"] = p["display_name"]
+                playlists.append(entry)
         except Exception:
             pass
 
@@ -149,6 +153,7 @@ class DashboardHandler:
             for key in (
                 "stream_title_template",
                 "ignore_streamer",
+                "eventsub_authoritative",
                 "notify_video_transitions",
                 "min_playlists_per_rotation",
                 "max_playlists_per_rotation",
@@ -185,6 +190,18 @@ class DashboardHandler:
         # Download status
         download_active = ctrl.download_manager.background_download_in_progress if ctrl.download_manager else False
 
+        # Pending (next rotation) video files
+        pending_videos: list[str] = []
+        try:
+            pending_folder = ctrl.config_manager.next_rotation_folder
+            if pending_folder and os.path.isdir(pending_folder):
+                pending_videos = sorted(
+                    f for f in os.listdir(pending_folder)
+                    if f.lower().endswith(VIDEO_EXTENSIONS)
+                )
+        except Exception:
+            pass
+
         # Guard flags — determine whether skip/rotation are safe right now
         videos_remaining = len(queue) - (queue.index(ctrl.playback_monitor._current_video) + 1) if (
             ctrl.playback_monitor and ctrl.playback_monitor._current_video in queue
@@ -214,6 +231,7 @@ class DashboardHandler:
             "queue": queue,
             "connections": connections,
             "download_active": download_active,
+            "pending_videos": pending_videos,
             "can_skip": can_skip,
             "skip_ready": self._skip_ready,
             "can_trigger_rotation": can_trigger_rotation,
@@ -443,6 +461,7 @@ class DashboardHandler:
         allowed_keys = {
             "stream_title_template",
             "ignore_streamer",
+            "eventsub_authoritative",
             "notify_video_transitions",
             "min_playlists_per_rotation",
             "max_playlists_per_rotation",
@@ -580,6 +599,16 @@ class DashboardHandler:
 
         # Switch to stream scene
         if ctrl.obs_controller:
+            # Drain stale events and arm suppression BEFORE the scene switch.
+            # Switching to OSR Stream makes VLC visible, which fires a
+            # MediaInputPlaybackStarted event.  Without suppression the
+            # playback monitor would treat it as a real transition —
+            # deleting the current video and advancing to the next one.
+            if ctrl.playback_monitor:
+                ctrl.playback_monitor._drain_queue()
+                ctrl.playback_monitor._vlc_update_suppress = True
+                ctrl.playback_monitor._arm_suppress()
+
             ctrl.obs_controller.switch_scene(self._scene_stream)
 
         # Restore playback position
@@ -815,6 +844,7 @@ class DashboardHandler:
             "kick_category": payload.get("kick_category", ""),
             "enabled": payload.get("enabled", True),
             "priority": payload.get("priority", 1),
+            **(({"display_name": payload["display_name"]}) if payload.get("display_name") else {}),
         })
         self._save_playlists_raw(data)
 
@@ -837,6 +867,11 @@ class DashboardHandler:
                     p["enabled"] = payload["enabled"]
                 if "priority" in payload:
                     p["priority"] = payload["priority"]
+                if "display_name" in payload:
+                    if payload["display_name"]:
+                        p["display_name"] = payload["display_name"]
+                    else:
+                        p.pop("display_name", None)
                 self._save_playlists_raw(data)
                 return
         logger.warning(f"Playlist '{name}' not found for update")
