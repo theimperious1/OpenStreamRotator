@@ -1949,7 +1949,11 @@ class AutomationController:
                 kick_due = (loop_count % kick_interval == 0) or force_check or ignore_streamer_changed
                 twitch_http_due = (loop_count % twitch_http_interval == 0) or force_check or ignore_streamer_changed
 
-                if kick_due or twitch_http_due:
+                # When EventSub is active with a definitive state, check
+                # every tick (just reads a boolean — no HTTP).  This makes
+                # pause/unpause near-instant instead of waiting up to 30s.
+                eventsub_has_state = eventsub_active and self._eventsub_is_live is not None
+                if kick_due or twitch_http_due or eventsub_has_state or self._raid_detected:
                     await self._check_live_status(
                         ignore_streamer,
                         skip_twitch_poll=not twitch_http_due,
