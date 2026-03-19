@@ -153,6 +153,7 @@ class DashboardHandler:
             for key in (
                 "stream_title_template",
                 "ignore_streamer",
+                "eventsub_authoritative",
                 "notify_video_transitions",
                 "min_playlists_per_rotation",
                 "max_playlists_per_rotation",
@@ -460,6 +461,7 @@ class DashboardHandler:
         allowed_keys = {
             "stream_title_template",
             "ignore_streamer",
+            "eventsub_authoritative",
             "notify_video_transitions",
             "min_playlists_per_rotation",
             "max_playlists_per_rotation",

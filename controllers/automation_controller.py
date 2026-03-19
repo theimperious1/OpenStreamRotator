@@ -1571,6 +1571,13 @@ class AutomationController:
         any_definitive = False  # At least one platform gave a real answer
         eventsub_authoritative = False  # EventSub provided the answer
 
+        # When enabled, EventSub is the sole authority — Kick polls are
+        # skipped entirely.  Useful when the Twitch target and Kick target
+        # are the same streamer (Kick's stale "live" window lags behind).
+        eventsub_authoritative_setting = self.config_manager.get_settings().get(
+            "eventsub_authoritative", False
+        )
+
         if target_twitch:
             eventsub_connected = (
                 self._eventsub_listener is not None
@@ -1580,7 +1587,8 @@ class AutomationController:
                 # Primary: EventSub real-time state (always available, no HTTP)
                 is_live = self._eventsub_is_live
                 any_definitive = True
-                eventsub_authoritative = True
+                if eventsub_authoritative_setting:
+                    eventsub_authoritative = True
             elif self.twitch_live_checker and (not skip_twitch_poll or (eventsub_connected and self._eventsub_is_live is None)):
                 # Fallback: HTTP poll.  Also force a poll when EventSub is
                 # connected but _eventsub_is_live is still None — this seeds
