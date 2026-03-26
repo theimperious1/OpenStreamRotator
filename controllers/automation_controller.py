@@ -1645,9 +1645,13 @@ class AutomationController:
             return
 
         # Clear raid state once the stream is actually offline
-        if not raw_is_live and self._raid_unpaused:
-            logger.info("Streamer is now offline — clearing raid unpause state")
-            self._raid_unpaused = False
+        if not raw_is_live:
+            if self._raid_unpaused:
+                logger.info("Streamer is now offline — clearing raid unpause state")
+                self._raid_unpaused = False
+            if self._raid_detected:
+                logger.info("Streamer is offline — clearing stale raid flag")
+                self._raid_detected = False
 
         if is_live and self.last_stream_status != "live":
             logger.info("Streamer is LIVE — pausing 24/7 stream")
