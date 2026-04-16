@@ -49,6 +49,40 @@ class VideoDownloader:
             os.environ['PATH'] = ';'.join(path_parts)
             logger.debug("Removed Node.js from PATH to force yt-dlp to use Deno")
 
+    def _get_playlist_video_count(self, playlist_url: str) -> Optional[int]:
+        """Get expected video count from playlist metadata without downloading.
+
+        Uses extract_flat to quickly fetch the playlist page and count entries.
+        Returns None if the count cannot be determined (API error, rate limit, etc.).
+        """
+        try:
+            ydl_opts: Dict = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': 'in_playlist',
+                'ignoreerrors': True,
+            }
+            # Add cookie support if enabled
+            cookie_settings = self.config.get_settings()
+            use_cookies = cookie_settings.get('yt_dlp_use_cookies', False)
+            if use_cookies:
+                browser = str(cookie_settings.get('yt_dlp_browser_for_cookies', 'firefox')).lower()
+                ydl_opts['cookiesfrombrowser'] = (browser,)
+
+            with YoutubeDL(ydl_opts) as ydl:  # type: ignore
+                info = ydl.extract_info(playlist_url, download=False)
+                if info and 'entries' in info:
+                    entries = list(info['entries'])
+                    available = [e for e in entries if e is not None]
+                    count = len(available)
+                    logger.debug(f"Playlist expected video count: {count} ({playlist_url})")
+                    return count
+                elif info and info.get('id'):
+                    return 1  # Single video URL
+        except Exception as e:
+            logger.debug(f"Could not determine playlist video count for {playlist_url}: {e}")
+        return None
+
     def download_playlists(self, playlists: List[Dict], output_folder: str, verbose: bool = False) -> Dict:
         """
         Download selected playlists using yt-dlp.
@@ -73,6 +107,22 @@ class VideoDownloader:
 
         settings = self.config.get_settings()
         max_retries = settings.get('download_retry_attempts', 3)
+
+        # Pre-fetch expected video counts for partial download detection.
+        # extract_flat is fast (playlist page only, no per-video fetching).
+        expected_total = 0
+        expected_known = True
+        for playlist in playlists:
+            if self.shutdown_event.is_set():
+                return {'success': False, 'total_duration_seconds': 0}
+            count = self._get_playlist_video_count(playlist['youtube_url'])
+            if count is not None:
+                expected_total += count
+            else:
+                expected_known = False
+                logger.debug(f"Could not determine video count for {playlist['name']}")
+        if expected_known:
+            logger.info(f"Expected total videos across all playlists: {expected_total}")
 
         all_success = True
         total_duration = 0
@@ -112,8 +162,23 @@ class VideoDownloader:
             logger.warning("All playlists reported success but no video files were downloaded — treating as failure")
             all_success = False
 
+        # Detect partial downloads: expected count is known but actual files
+        # are fewer.  This catches silent failures where ignoreerrors skipped
+        # videos due to YouTube rate limiting without raising an exception.
+        actual_count = len(VideoProcessor.get_video_files_in_folder(output_folder))
+        partial = False
+        if expected_known and expected_total > 0 and actual_count < expected_total:
+            partial = True
+            logger.warning(
+                f"Partial download detected: {actual_count}/{expected_total} videos "
+                f"({expected_total - actual_count} missing)"
+            )
+
         return {
             'success': all_success,
+            'partial': partial,
+            'expected_count': expected_total if expected_known else None,
+            'actual_count': actual_count,
             'total_duration_seconds': total_duration
         }
 
@@ -179,7 +244,7 @@ class VideoDownloader:
                     'retries': 3,  # Retry download HTTP errors 3 times per video before skipping
                     'extract_flat': False,  # Extract video URLs
                     'fragment_retries': 3,
-                    'concurrent_fragment_downloads': 5,  # Download 4 fragments in parallel
+                    'concurrent_fragment_downloads': 3,  # Download 3 fragments in parallel (reduced to avoid YouTube rate limiting)
                     'http_chunk_size': 10485760,  # 10MB chunks - I tried raising this higher, doesn't work
                     'outtmpl': '%(playlist)s_%(playlist_index)03d_%(title)s.%(ext)s',
                     'post_hooks': [_on_video_complete],

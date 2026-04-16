@@ -46,6 +46,9 @@ class DownloadManager:
         self.background_download_in_progress = False
         self.downloads_triggered_this_rotation = False
 
+        # Last download result (read by dashboard for progress display)
+        self.last_download_result: Optional[dict] = None
+
         # Cross-thread DB queues (written by background thread, consumed by main)
         self._pending_db_playlists_to_initialize: Optional[List[str]] = None
         self._pending_db_playlists_to_complete: Optional[List[str]] = None
@@ -100,6 +103,7 @@ class DownloadManager:
                 )
                 self.downloads_triggered_this_rotation = True
                 self.background_download_in_progress = True
+                self.last_download_result = None
                 loop = asyncio.get_event_loop()
                 loop.run_in_executor(
                     self.executor,
@@ -130,6 +134,7 @@ class DownloadManager:
 
         self.downloads_triggered_this_rotation = True
         self.background_download_in_progress = True
+        self.last_download_result = None
         loop = asyncio.get_event_loop()
         loop.run_in_executor(self.executor, self._sync_background_download, playlists)
         logger.debug("Download triggered (pending folder empty)")
@@ -143,6 +148,10 @@ class DownloadManager:
 
         Must NOT call database methods directly — sets flags that the main
         thread processes via :meth:`process_pending_database_operations`.
+
+        Detects partial downloads (some videos skipped by YouTube rate
+        limiting) and retries with escalating backoff before accepting
+        the result.
         """
         try:
             logger.info(f"Downloading next rotation in thread: {[p['name'] for p in playlists]}")
@@ -156,6 +165,83 @@ class DownloadManager:
             download_result = self.playlist_manager.download_playlists(
                 playlists, next_folder, verbose=verbose_download
             )
+            self.last_download_result = download_result
+
+            # ── Retry loop for partial downloads ──
+            # When extract_flat determined an expected count and fewer files
+            # actually landed, retry with escalating delays.  archive.txt is
+            # preserved so yt-dlp skips already-downloaded videos and only
+            # reattempts the missing ones.
+            #
+            # The retry loop uses the ORIGINAL expected_count from the first
+            # download — not the re-derived value from each retry.  This
+            # avoids premature exit if _get_playlist_video_count fails on a
+            # retry due to transient rate limiting.
+            expected_count = download_result.get("expected_count")
+            last_actual = download_result.get("actual_count", 0)
+            is_partial = (
+                download_result.get("success")
+                and expected_count is not None
+                and expected_count > 0
+                and last_actual < expected_count
+            )
+
+            retry_delays = [300, 900, 3600]  # 5 min, 15 min, 60 min
+            retry_count = 0
+
+            while (is_partial
+                   and retry_count < len(retry_delays)
+                   and not self._shutdown_event.is_set()):
+
+                delay = retry_delays[retry_count]
+                retry_num = retry_count + 1
+                logger.warning(
+                    f"Partial download ({last_actual}/{expected_count} videos). "
+                    f"Retry {retry_num}/{len(retry_delays)} in {delay // 60}min"
+                )
+                self.notification_service.notify_download_warning(
+                    f"Partial download ({last_actual}/{expected_count} videos). "
+                    f"Retrying in {delay // 60} min ({retry_num}/{len(retry_delays)})"
+                )
+
+                if self._shutdown_event.wait(delay):
+                    logger.info("Shutdown requested during partial download retry wait")
+                    break
+
+                logger.info(f"Retrying partial download (attempt {retry_num}/{len(retry_delays)})")
+                download_result = self.playlist_manager.download_playlists(
+                    playlists, next_folder, verbose=verbose_download
+                )
+                self.last_download_result = download_result
+
+                if not download_result.get("success"):
+                    logger.warning("Retry returned failure — stopping retries")
+                    break
+
+                current_actual = download_result.get("actual_count", 0)
+                if current_actual <= last_actual:
+                    logger.warning(
+                        f"Retry made no progress ({current_actual} files unchanged) — stopping retries"
+                    )
+                    break
+
+                last_actual = current_actual
+                # Check if we've now got everything
+                if last_actual >= expected_count:
+                    is_partial = False
+                retry_count += 1
+
+            if retry_count > 0:
+                if is_partial:
+                    logger.warning(
+                        f"Accepting partial download after {retry_count} retries: "
+                        f"{last_actual}/{expected_count} videos"
+                    )
+                else:
+                    logger.info(
+                        f"Partial download resolved after {retry_count} retries: "
+                        f"{last_actual}/{expected_count} videos"
+                    )
 
             if download_result.get("success"):
                 self._set_next_prepared_playlists(playlists)
@@ -178,6 +264,59 @@ class DownloadManager:
                 self._on_download_failure()
         finally:
             self.background_download_in_progress = False
+
+    # ------------------------------------------------------------------
+    # Manual retry from dashboard
+    # ------------------------------------------------------------------
+
+    def retry_downloads(self) -> bool:
+        """Trigger a manual retry of the last download.
+
+        Called from the dashboard when the user clicks 'Retry Downloads'.
+        Only works when a download is not already in progress and there
+        are prepared playlists that can be retried.
+
+        Returns True if a retry was initiated.
+        """
+        if self.background_download_in_progress:
+            logger.warning("retry_downloads: download already in progress")
+            return False
+
+        # Find playlists to retry from the current session's next_playlists
+        session = self.db.get_current_session()
+        if not session:
+            logger.warning("retry_downloads: no active session")
+            return False
+
+        from core.database import DatabaseManager
+        next_names = DatabaseManager.parse_json_field(session.get('next_playlists'), [])
+        if not next_names:
+            logger.warning("retry_downloads: no next playlists to retry")
+            return False
+
+        playlist_objects = self.db.get_playlists_with_ids_by_names(next_names)
+        if not playlist_objects:
+            logger.warning("retry_downloads: could not resolve playlist objects")
+            return False
+
+        # Delete archive.txt so yt-dlp re-attempts all videos
+        settings = self.config_manager.get_settings()
+        next_folder = settings.get("next_rotation_folder", DEFAULT_NEXT_ROTATION_FOLDER)
+        archive_path = os.path.join(next_folder, 'archive.txt')
+        if os.path.exists(archive_path):
+            try:
+                os.unlink(archive_path)
+                logger.info("Deleted archive.txt for manual retry")
+            except Exception as e:
+                logger.warning(f"Could not delete archive.txt: {e}")
+
+        logger.info(f"Manual retry triggered for: {next_names}")
+        self.last_download_result = None
+        self.downloads_triggered_this_rotation = True
+        self.background_download_in_progress = True
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(self.executor, self._sync_background_download, playlist_objects)
+        return True
 
     # ------------------------------------------------------------------
     # Auto-resume interrupted downloads on startup

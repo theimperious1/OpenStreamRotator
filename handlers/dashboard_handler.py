@@ -190,6 +190,17 @@ class DashboardHandler:
         # Download status
         download_active = ctrl.download_manager.background_download_in_progress if ctrl.download_manager else False
 
+        # Download progress (expected vs actual from last download)
+        download_progress: Optional[dict] = None
+        if ctrl.download_manager and ctrl.download_manager.last_download_result:
+            result = ctrl.download_manager.last_download_result
+            if result.get('expected_count') is not None:
+                download_progress = {
+                    'expected': result['expected_count'],
+                    'actual': result.get('actual_count', 0),
+                    'partial': result.get('partial', False),
+                }
+
         # Pending (next rotation) video files
         pending_videos: list[str] = []
         try:
@@ -231,6 +242,7 @@ class DashboardHandler:
             "queue": queue,
             "connections": connections,
             "download_active": download_active,
+            "download_progress": download_progress,
             "pending_videos": pending_videos,
             "can_skip": can_skip,
             "skip_ready": self._skip_ready,
@@ -420,6 +432,16 @@ class DashboardHandler:
             value = bool(payload.get("is_fallback", False))
             logger.info(f"Dashboard command: toggle fallback for '{slug}' -> {value}")
             ctrl.prepared_rotation_manager.set_fallback(folder, value)
+
+        elif action == "retry_downloads":
+            logger.info("Dashboard command: retry downloads")
+            if ctrl.download_manager:
+                success = ctrl.download_manager.retry_downloads()
+                if success:
+                    logger.info("Download retry initiated from dashboard")
+                else:
+                    logger.warning("Download retry could not be initiated")
+            await self._push_state_after_command()
 
         elif action == "force_fallback":
             logger.warning("Dashboard command: FORCE ACTIVATE fallback mode (testing)")

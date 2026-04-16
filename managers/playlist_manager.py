@@ -278,27 +278,47 @@ class PlaylistManager:
 
     def cleanup_temp_downloads(self, folder: str) -> bool:
         """
-        Clean up temporary download files in the temp subfolder.
+        Clean up temporary download files in the temp subfolder and
+        leftover metadata (.info.json) in the parent folder.
         
         yt-dlp stores all temporary files (fragments, .part, .ytdl) in folder/temp/.
+        It also writes .info.json metadata files in the parent folder.
         This should be called after each successful rotation to clean up old metadata.
         """
+        success = True
+
+        # Clean the temp/ subfolder (fragments, .part, .ytdl files)
         temp_folder = os.path.join(folder, 'temp')
-        if not os.path.exists(temp_folder):
-            return True  # Nothing to clean
-        
-        try:
-            for filename in os.listdir(temp_folder):
-                filepath = os.path.join(temp_folder, filename)
-                if os.path.isfile(filepath):
-                    os.remove(filepath)
-                elif os.path.isdir(filepath):
-                    shutil.rmtree(filepath)
-            logger.info(f"Cleaned up temp downloads folder: {temp_folder}")
-            return True
-        except Exception as e:
-            logger.error(f"Error cleaning up temp downloads folder: {e}")
-            return False
+        if os.path.exists(temp_folder):
+            try:
+                for filename in os.listdir(temp_folder):
+                    filepath = os.path.join(temp_folder, filename)
+                    if os.path.isfile(filepath):
+                        os.remove(filepath)
+                    elif os.path.isdir(filepath):
+                        shutil.rmtree(filepath)
+                logger.info(f"Cleaned up temp downloads folder: {temp_folder}")
+            except Exception as e:
+                logger.error(f"Error cleaning up temp downloads folder: {e}")
+                success = False
+
+        # Clean .info.json metadata files from the parent folder
+        if os.path.exists(folder):
+            try:
+                removed = 0
+                for filename in os.listdir(folder):
+                    if filename.endswith('.info.json'):
+                        filepath = os.path.join(folder, filename)
+                        if os.path.isfile(filepath):
+                            os.remove(filepath)
+                            removed += 1
+                if removed > 0:
+                    logger.info(f"Cleaned up {removed} .info.json metadata file(s) from {folder}")
+            except Exception as e:
+                logger.error(f"Error cleaning up .info.json files: {e}")
+                success = False
+
+        return success
 
     def move_files_to_folder(self, source_folder: str, dest_folder: str, filenames: list) -> bool:
         """Move specific files from source to destination folder."""
