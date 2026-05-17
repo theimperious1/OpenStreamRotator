@@ -297,6 +297,21 @@ class DashboardHandler:
                 logger.warning("Dashboard command: trigger rotation REJECTED — rotation already in progress")
                 return
             logger.info("Dashboard command: trigger rotation")
+            
+            # Mark all current playlists as played before triggering rotation
+            # so they don't reappear in the next rotation when user skips mid-way
+            session = ctrl.db.get_current_session()
+            if session:
+                playlists_selected = session.get('playlists_selected')
+                if playlists_selected:
+                    try:
+                        playlist_ids = json.loads(playlists_selected) if isinstance(playlists_selected, str) else playlists_selected
+                        for playlist_id in playlist_ids:
+                            ctrl.db.update_playlist_played(playlist_id)
+                        logger.info(f"Marked {len(playlist_ids)} playlists as played due to manual rotation trigger")
+                    except Exception as e:
+                        logger.warning(f"Failed to mark playlists as played: {e}")
+            
             # Force all-content-consumed so rotation triggers on next tick
             if ctrl.playback_monitor:
                 ctrl.playback_monitor._all_content_consumed = True
