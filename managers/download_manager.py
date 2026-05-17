@@ -187,32 +187,34 @@ class DownloadManager:
             )
 
             retry_delays = [300, 900, 3600]  # 5 min, 15 min, 60 min
-            retry_count = 0
+            delay_index = 0  # Start with 5-minute delay
+            total_retries = 0
 
             while (is_partial
-                   and retry_count < len(retry_delays)
+                   and delay_index < len(retry_delays)
                    and not self._shutdown_event.is_set()):
 
-                delay = retry_delays[retry_count]
-                retry_num = retry_count + 1
+                delay = retry_delays[delay_index]
+                delay_level = delay_index + 1
                 logger.warning(
                     f"Partial download ({last_actual}/{expected_count} videos). "
-                    f"Retry {retry_num}/{len(retry_delays)} in {delay // 60}min"
+                    f"Retrying in {delay // 60}min (delay level {delay_level}/{len(retry_delays)})"
                 )
                 self.notification_service.notify_download_warning(
                     f"Partial download ({last_actual}/{expected_count} videos). "
-                    f"Retrying in {delay // 60} min ({retry_num}/{len(retry_delays)})"
+                    f"Retrying in {delay // 60} min (level {delay_level}/{len(retry_delays)})"
                 )
 
                 if self._shutdown_event.wait(delay):
                     logger.info("Shutdown requested during partial download retry wait")
                     break
 
-                logger.info(f"Retrying partial download (attempt {retry_num}/{len(retry_delays)})")
+                logger.info(f"Retrying partial download...")
                 download_result = self.playlist_manager.download_playlists(
                     playlists, next_folder, verbose=verbose_download
                 )
                 self.last_download_result = download_result
+                total_retries += 1
 
                 if not download_result.get("success"):
                     logger.warning("Retry returned failure — stopping retries")
@@ -221,25 +223,30 @@ class DownloadManager:
                 current_actual = download_result.get("actual_count", 0)
                 if current_actual <= last_actual:
                     logger.warning(
-                        f"Retry made no progress ({current_actual} files unchanged) — stopping retries"
+                        f"Retry made no progress ({current_actual} files unchanged) — escalating delay"
                     )
-                    break
+                    delay_index += 1  # Escalate to next delay level
+                else:
+                    # Progress made! Reset to 5-minute delay
+                    logger.info(
+                        f"Progress made: {last_actual} → {current_actual} videos. "
+                        f"Resetting to {retry_delays[0] // 60}min retry delay."
+                    )
+                    last_actual = current_actual
+                    delay_index = 0  # Reset to first delay
+                    # Check if we've now got everything
+                    if last_actual >= expected_count:
+                        is_partial = False
 
-                last_actual = current_actual
-                # Check if we've now got everything
-                if last_actual >= expected_count:
-                    is_partial = False
-                retry_count += 1
-
-            if retry_count > 0:
+            if total_retries > 0:
                 if is_partial:
                     logger.warning(
-                        f"Accepting partial download after {retry_count} retries: "
+                        f"Accepting partial download after {total_retries} retries: "
                         f"{last_actual}/{expected_count} videos"
                     )
                 else:
                     logger.info(
-                        f"Partial download resolved after {retry_count} retries: "
+                        f"Partial download resolved after {total_retries} retries: "
                         f"{last_actual}/{expected_count} videos"
                     )
 

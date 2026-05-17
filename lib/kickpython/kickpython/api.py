@@ -38,6 +38,7 @@ class KickAPI:
         self.refresh_task = None
         self._refresh_interval = token_refresh_interval  # Refresh tokens every hour
         self._should_refresh = False
+        self._refresh_locks: Dict[str, asyncio.Lock] = {}  # Per-channel locks to prevent concurrent refresh races
         
         # Initialize database if needed
         self._init_db()
@@ -109,6 +110,12 @@ class KickAPI:
             
         return headers
 
+    def _get_refresh_lock(self, channel_id: str) -> asyncio.Lock:
+        """Get or create a per-channel asyncio lock for token refresh."""
+        if channel_id not in self._refresh_locks:
+            self._refresh_locks[channel_id] = asyncio.Lock()
+        return self._refresh_locks[channel_id]
+
     async def _get_token_for_channel(self, channel_id):
         """Get valid access token for a specific channel"""
         conn = sqlite3.connect(self.db_path)
@@ -128,8 +135,8 @@ class KickAPI:
         # Check if token has expired or will expire soon (within 5 minutes)
         current_time = int(time.time())
         if expires_at - current_time < 300:  # Less than 5 minutes remaining
-            # Refresh the token
-            new_tokens = await self.refresh_token(channel_id, refresh_token)
+            # refresh_token handles its own locking to prevent concurrent races
+            new_tokens = await self.refresh_token(channel_id)
             if new_tokens:
                 access_token = new_tokens["access_token"]
         
@@ -290,7 +297,11 @@ class KickAPI:
     
     async def refresh_token(self, channel_id, refresh_token=None):
         """
-        Refresh an access token
+        Refresh an access token.
+        
+        Acquires a per-channel lock so concurrent callers don't race with
+        the same refresh token (OAuth2 providers invalidate a refresh token
+        after a single use).
         
         Args:
             channel_id (str): Channel ID whose token to refresh
@@ -305,51 +316,71 @@ class KickAPI:
         await self._init_session()
         assert self.session is not None
         
-        # Get refresh token from DB if not provided
-        if not refresh_token:
+        async with self._get_refresh_lock(channel_id):
+            # Always read the latest refresh token from DB inside the lock
+            # to avoid using a stale token that another caller already rotated
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            cursor.execute("SELECT refresh_token FROM tokens WHERE channel_id = ?", (channel_id,))
+            cursor.execute("SELECT refresh_token, expires_at FROM tokens WHERE channel_id = ?", (channel_id,))
             result = cursor.fetchone()
             conn.close()
             
             if not result:
                 logger.error(f"No refresh token found for channel {channel_id}")
                 return None
-                
-            refresh_token = result[0]
-        
-        data = {
-            "grant_type": "refresh_token",
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "refresh_token": refresh_token
-        }
-        
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        
-        async with self.session.post(
-            f"{self.oauth_base_url}/oauth/token",
-            headers=headers,
-            data=data
-        ) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.error(f"Failed to refresh token: {error_text}")
+            
+            db_refresh_token, expires_at = result
+            
+            # If another caller already refreshed while we waited for the lock,
+            # the token in DB is fresh — skip the network call
+            if expires_at - int(time.time()) >= 300:
+                logger.info(f"Token for channel {channel_id} already refreshed by another caller")
+                # Return the current token data from DB so callers get a valid access_token
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT access_token, expires_at FROM tokens WHERE channel_id = ?", (channel_id,))
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    return {"access_token": row[0], "refresh_token": db_refresh_token,
+                            "expires_in": row[1] - int(time.time()), "scope": ""}
                 return None
+            
+            # Use the caller-provided refresh token only if it matches what's in DB
+            # (otherwise it's stale from before another rotation)
+            token_to_use = db_refresh_token if not refresh_token or refresh_token != db_refresh_token else refresh_token
+        
+            data = {
+                "grant_type": "refresh_token",
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "refresh_token": token_to_use
+            }
+            
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            
+            async with self.session.post(
+                f"{self.oauth_base_url}/oauth/token",
+                headers=headers,
+                data=data
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"Failed to refresh token: {error_text}")
+                    return None
+                    
+                token_data = await response.json()
                 
-            token_data = await response.json()
-            
-            # Store updated tokens
-            self._store_token(
-                channel_id,
-                token_data["access_token"],
-                token_data["refresh_token"],
-                token_data["expires_in"],
-                token_data["scope"]
-            )
-            
-            return token_data
+                # Store updated tokens
+                self._store_token(
+                    channel_id,
+                    token_data["access_token"],
+                    token_data["refresh_token"],
+                    token_data["expires_in"],
+                    token_data["scope"]
+                )
+                
+                return token_data
     
     async def revoke_token(self, channel_id, token_type="access_token"):
         """
@@ -532,7 +563,7 @@ class KickAPI:
                 if proxies:
                     response_kwargs["proxies"] = proxies # type: ignore
                 
-                response = requests.get(url, **response_kwargs)
+                response = requests.get(url, **response_kwargs)  # type: ignore[arg-type]
                 
                 if response.status_code == 200:
                     try:
@@ -793,6 +824,7 @@ class KickAPI:
 
     async def get_broadcaster_id(self, access_token):
         await self._init_session()
+        assert self.session is not None
         
         headers = self._get_headers_with_token(access_token)
         
