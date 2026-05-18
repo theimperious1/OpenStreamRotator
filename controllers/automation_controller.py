@@ -36,6 +36,7 @@ from utils.video_processor import kill_all_running_processes as kill_processor_p
 from utils.video_utils import strip_ordering_prefix
 from services.web_dashboard_client import WebDashboardClient
 from monitors.obs_freeze_monitor import OBSFreezeMonitor
+from pathlib import Path
 from config.constants import (
     DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER,
     DEFAULT_PAUSE_IMAGE, DEFAULT_ROTATION_IMAGE,
@@ -66,6 +67,7 @@ TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET", "")
 
 # Kick Configuration (used for live checker)
+ENABLE_KICK = os.getenv("ENABLE_KICK", "false").lower() == "true"
 KICK_CLIENT_ID = os.getenv("KICK_CLIENT_ID", "")
 KICK_CLIENT_SECRET = os.getenv("KICK_CLIENT_SECRET", "")
 
@@ -85,6 +87,19 @@ class AutomationController:
     def __init__(self):
         # Core managers
         self.db = DatabaseManager()
+        if ENABLE_KICK and not Path('core/kick_tokens.db').exists():
+            self.platform_manager = PlatformManager()
+            if TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET:
+                self.twitch_live_checker = TwitchLiveChecker(TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET)
+            self.setup_platforms()
+            self.stream_manager = StreamManager(self.platform_manager)
+            logger.info("Kick tokens database not found. Starting initial setup...")
+            
+            # Blocking call - runs async code synchronously
+            self._run_async_init_blocking()
+            
+            logger.info("Kick tokens database initialized. Please restart the application to complete Kick setup.")
+            exit(0)
         self.config_manager = ConfigManager()
         
         # Thread-safe queue for video registration from background downloads
@@ -232,6 +247,21 @@ class AutomationController:
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
+
+    def _run_async_init_blocking(self):
+        try:
+            asyncio.run(self.platform_manager.ensure_initialized())
+        except RuntimeError as e:
+            if "no running event loop" in str(e) or "There is no current event loop" in str(e):
+                # Fallback: create new loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(self.platform_manager.ensure_initialized())
+                finally:
+                    loop.close()
+            else:
+                raise
 
     def _set_next_prepared_playlists(self, playlists) -> None:
         """Callback for download manager to set prepared playlists."""
