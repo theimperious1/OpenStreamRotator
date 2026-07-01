@@ -86,6 +86,11 @@ class PlatformManager:
         else:
             logger.warning("No streaming platforms enabled")
 
+    async def ensure_initialized(self):
+        """Public method to ensure the platform is initialized."""
+        kick = self.get_platform("kick")  # Trigger Kick initialization to set up tokens if needed
+        await kick.ensure_initialized() # type: ignore
+
     def add_twitch(self, client_id: str, client_secret: str, broadcaster_id: str,
                     redirect_uri: str = "http://localhost:8080/callback"):
         """Add Twitch platform integration."""
