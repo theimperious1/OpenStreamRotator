@@ -18,10 +18,15 @@ from utils.video_utils import strip_ordering_prefix, resolve_category_for_video,
 logger = logging.getLogger(__name__)
 
 
+# finalize_switch retries the OBS calls that switch back to the stream/pause
+# scene, so a transient OBS WebSocket failure doesn't strand the rotation screen.
+_FINALIZE_MAX_ATTEMPTS = 3
+_FINALIZE_RETRY_DELAY = 1.0  # seconds between attempts
+
+
 class ContentSwitchHandler:
 
     MAX_TITLE_LENGTH = 140  # Kick's title character limit
-
     def __init__(self, db: DatabaseManager, config: ConfigManager,
                  playlist_manager: PlaylistManager, obs_controller: OBSController,
                  notification_service: NotificationService):
@@ -235,18 +240,34 @@ class ContentSwitchHandler:
         Returns:
             Tuple of (success: bool, playlist: list[str])
         """
-        # Update VLC source and get the playlist
-        success, playlist = self.obs_controller.update_vlc_source(vlc_source_name, current_folder)
+        # Update VLC source and get the playlist.  Retry on transient OBS
+        # WebSocket failures — a single failed call here would otherwise leave
+        # the stream stranded on the rotation screen (this method is the only
+        # place that switches back to the stream/pause scene after a switch).
+        success, playlist = False, []
+        for attempt in range(1, _FINALIZE_MAX_ATTEMPTS + 1):
+            success, playlist = self.obs_controller.update_vlc_source(vlc_source_name, current_folder)
+            if success:
+                break
+            logger.warning(
+                f"Failed to update VLC source (attempt {attempt}/{_FINALIZE_MAX_ATTEMPTS}) — retrying"
+            )
+            time.sleep(_FINALIZE_RETRY_DELAY)
         if not success:
-            logger.error("Failed to update VLC source with new videos")
+            logger.error("Failed to update VLC source with new videos after retries")
             return False, []
-        
-        # Switch back to appropriate scene
-        if last_stream_status == "live":
-            self.obs_controller.switch_scene(scene_pause)
-        else:
-            self.obs_controller.switch_scene(scene_stream)
-        
+
+        # Switch back to appropriate scene, retrying on transient failures so
+        # a flaky OBS call doesn't leave the viewer stuck on the rotation screen.
+        target_scene = scene_pause if last_stream_status == "live" else scene_stream
+        for attempt in range(1, _FINALIZE_MAX_ATTEMPTS + 1):
+            if self.obs_controller.switch_scene(target_scene):
+                break
+            logger.warning(
+                f"Failed to switch to '{target_scene}' (attempt {attempt}/{_FINALIZE_MAX_ATTEMPTS}) — retrying"
+            )
+            time.sleep(_FINALIZE_RETRY_DELAY)
+
         return True, playlist
 
     async def update_stream_metadata(self, session_id: Optional[int], stream_manager) -> bool:
