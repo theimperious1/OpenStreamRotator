@@ -179,6 +179,10 @@ class KickUpdater(StreamPlatform):
             self.log_error("Initialization failed", e)
             raise
 
+    async def ensure_initialized(self):
+        """Public method to ensure the platform is initialized."""
+        await self._ensure_initialized()
+
     def _persist_channel_id(self, channel_id: str) -> None:
         """Write the resolved KICK_CHANNEL_ID back to .env and update the running process."""
         try:

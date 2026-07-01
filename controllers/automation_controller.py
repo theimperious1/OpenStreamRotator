@@ -36,6 +36,7 @@ from utils.video_processor import kill_all_running_processes as kill_processor_p
 from utils.video_utils import strip_ordering_prefix
 from services.web_dashboard_client import WebDashboardClient
 from monitors.obs_freeze_monitor import OBSFreezeMonitor
+from pathlib import Path
 from config.constants import (
     DEFAULT_VIDEO_FOLDER, DEFAULT_NEXT_ROTATION_FOLDER,
     DEFAULT_PAUSE_IMAGE, DEFAULT_ROTATION_IMAGE,
@@ -66,6 +67,7 @@ TWITCH_CLIENT_ID = os.getenv("TWITCH_CLIENT_ID", "")
 TWITCH_CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET", "")
 
 # Kick Configuration (used for live checker)
+ENABLE_KICK = os.getenv("ENABLE_KICK", "false").lower() == "true"
 KICK_CLIENT_ID = os.getenv("KICK_CLIENT_ID", "")
 KICK_CLIENT_SECRET = os.getenv("KICK_CLIENT_SECRET", "")
 
@@ -85,6 +87,19 @@ class AutomationController:
     def __init__(self):
         # Core managers
         self.db = DatabaseManager()
+        if ENABLE_KICK and not Path('core/kick_tokens.db').exists():
+            self.platform_manager = PlatformManager()
+            if TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET:
+                self.twitch_live_checker = TwitchLiveChecker(TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET)
+            self.setup_platforms()
+            self.stream_manager = StreamManager(self.platform_manager)
+            logger.info("Kick tokens database not found. Starting initial setup...")
+            
+            # Blocking call - runs async code synchronously
+            self._run_async_init_blocking()
+            
+            logger.info("Kick tokens database initialized. Please restart the application to complete Kick setup.")
+            exit(0)
         self.config_manager = ConfigManager()
         
         # Thread-safe queue for video registration from background downloads
@@ -173,6 +188,12 @@ class AutomationController:
         self._title_refresh_needed = False  # Set by download callback to append preview names to title
         self._start_time = time.time()  # For uptime tracking
 
+        # Scene watchdog — detects the stream being stranded on the rotation
+        # screen (e.g. a content switch whose final scene-switch failed) and
+        # forces recovery back to the stream scene.
+        self._off_rotation_scene_since: Optional[float] = None
+        self._scene_watchdog_last_check: float = 0.0
+
         # Prepared rotation overlay state
         self._prepared_rotation_active = False  # True while a prepared rotation is playing
         self._saved_live_video: Optional[str] = None  # Original name of live video that was playing
@@ -232,6 +253,21 @@ class AutomationController:
 
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
+
+    def _run_async_init_blocking(self):
+        try:
+            asyncio.run(self.platform_manager.ensure_initialized())
+        except RuntimeError as e:
+            if "no running event loop" in str(e) or "There is no current event loop" in str(e):
+                # Fallback: create new loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(self.platform_manager.ensure_initialized())
+                finally:
+                    loop.close()
+            else:
+                raise
 
     def _set_next_prepared_playlists(self, playlists) -> None:
         """Callback for download manager to set prepared playlists."""
@@ -1278,6 +1314,95 @@ class AutomationController:
             self.download_manager.background_download_in_progress = False
             await self.rotation_manager.execute_content_switch()
 
+    # Scene watchdog interval + how long the stream may sit on the rotation
+    # screen before recovery is forced.
+    _SCENE_WATCHDOG_INTERVAL = 15.0    # seconds between scene polls
+    _SCENE_WATCHDOG_STUCK_SECS = 90.0  # max time allowed on the rotation screen
+
+    async def _scene_watchdog_check(self) -> None:
+        """Detect and recover a stream stranded on the rotation screen.
+
+        A failed content switch (or any other unhandled path) can leave OBS on
+        the rotation/transition screen with nothing to switch it back.  Because
+        the OBS freeze monitor only detects render stalls — not a wrong scene —
+        the stream would sit there permanently.  This watchdog forces recovery
+        back to the stream scene once the rotation screen has been shown for
+        longer than any legitimate transition could take.
+
+        Only the rotation screen is monitored — the pause scene is intentionally
+        left alone (it has legitimate long-lived uses: streamer live, manual
+        pause, fallback pause, awaiting playlists).
+        """
+        now = time.monotonic()
+        if now - self._scene_watchdog_last_check < self._SCENE_WATCHDOG_INTERVAL:
+            return
+        self._scene_watchdog_last_check = now
+
+        # Skip while OBS is unavailable — that's the freeze monitor's domain.
+        if not self.obs_controller or not self.obs_controller.is_connected:
+            self._off_rotation_scene_since = None
+            return
+
+        # Skip while a content switch is legitimately in progress or temp
+        # playback owns the scene (it manages the rotation screen itself while
+        # waiting for its first file).
+        if self.is_rotating or (
+            self.temp_playback_handler is not None and self.temp_playback_handler.is_active
+        ):
+            self._off_rotation_scene_since = None
+            return
+
+        current_scene = self.obs_controller.get_current_scene()
+        if current_scene != self._scene_rotation_screen:
+            self._off_rotation_scene_since = None
+            return
+
+        # We're on the rotation screen with no switch in progress — start or
+        # continue the stuck timer.
+        if self._off_rotation_scene_since is None:
+            self._off_rotation_scene_since = now
+            logger.warning(
+                "Scene watchdog: on rotation screen with no active switch — starting stuck timer"
+            )
+            return
+
+        if now - self._off_rotation_scene_since >= self._SCENE_WATCHDOG_STUCK_SECS:
+            await self._recover_stuck_scene()
+
+    async def _recover_stuck_scene(self) -> None:
+        """Force recovery from a stranded rotation screen back to stream playback."""
+        elapsed = time.monotonic() - (self._off_rotation_scene_since or time.monotonic())
+        logger.error(
+            f"Scene watchdog: stuck on rotation screen for {elapsed:.0f}s — forcing recovery"
+        )
+        self.notification_service.notify_automation_error(
+            "Watchdog: stream was stuck on the rotation screen — forcing recovery to live playback."
+        )
+        self._off_rotation_scene_since = None
+
+        if not self.obs_controller:
+            return
+
+        # Reload VLC with the folder the playback monitor believes is active
+        # (a failed content switch leaves VLC stopped with a stale playlist)
+        # then switch back to the stream scene.
+        folder = None
+        if self.playback_monitor and self.playback_monitor.video_folder:
+            folder = self.playback_monitor.video_folder
+        if not folder:
+            folder = self.config_manager.video_folder
+
+        try:
+            success, _ = self.obs_controller.update_vlc_source(VLC_SOURCE_NAME, folder)
+            if success:
+                self._initialize_playback_monitor(folder)
+            else:
+                logger.error("Scene watchdog: failed to refresh VLC during recovery")
+        except Exception as e:
+            logger.error(f"Scene watchdog: VLC refresh error during recovery: {e}")
+
+        self.obs_controller.switch_scene(SCENE_STREAM)
+
     async def check_for_rotation(self):
         """Check if rotation is needed and handle it."""
         if self.is_rotating:
@@ -1465,7 +1590,14 @@ class AutomationController:
                     logger.info("Content exhausted while downloads in progress — activating temp playback (will wait for first file)")
                 
                 activated = await self.temp_playback_handler.activate(session)
-                
+
+                # Temp playback intentionally shows the rotation screen while it
+                # waits (up to ~2 min) for downloads to produce a playable file,
+                # and re-runs every tick until it succeeds.  Reset the scene
+                # watchdog timer so this legitimate wait isn't mistaken for a
+                # stuck rotation screen and force-recovered to an empty stream.
+                self._off_rotation_scene_since = None
+
                 if activated:
                     # Re-initialize playback monitor to watch the pending folder
                     self._initialize_playback_monitor(pending_folder)
@@ -2045,6 +2177,11 @@ class AutomationController:
                         self.temp_playback_handler._last_folder_check = current_time
 
                 await self.check_for_rotation()
+
+                # Scene watchdog — recover if the stream is stranded on the
+                # rotation screen (e.g. a content switch whose final scene
+                # switch failed).
+                await self._scene_watchdog_check()
 
                 # Check for scheduled prepared rotations (every 30 seconds)
                 if loop_count % 30 == 0:

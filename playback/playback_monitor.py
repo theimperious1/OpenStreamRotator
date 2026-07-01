@@ -381,7 +381,13 @@ class PlaybackMonitor:
             # the automation controller owns the next scene switch in those
             # cases (rotation screen for content switch / temp playback reload).
             if _scene_masked and self.obs_controller and not self._all_content_consumed and not self._needs_vlc_refresh:
-                vlc_ready = self._wait_for_vlc_playing()
+                # Timing diagnostic: log before/after VLC wait to detect hangs
+                vlc_wait_start = time.monotonic()
+                logger.info(f"[TIMING] Starting VLC ready wait (timeout=6.0s)")
+                vlc_ready = self._wait_for_vlc_playing(timeout=6.0)
+                vlc_wait_duration = time.monotonic() - vlc_wait_start
+                logger.info(f"[TIMING] Completed VLC ready wait: ready={vlc_ready}, duration={vlc_wait_duration:.2f}s")
+                
                 if vlc_ready:
                     # Extra buffer — VLC reports PLAYING before its decode
                     # buffer has filled.  Give it a moment so the switch
@@ -574,7 +580,7 @@ class PlaybackMonitor:
         except Exception as e:
             logger.error(f"Failed to update VLC source after deletion: {e}")
 
-    def _wait_for_vlc_playing(self, timeout: float = 3.0) -> bool:
+    def _wait_for_vlc_playing(self, timeout: float = 6.0) -> bool:
         """Poll VLC source until it reports PLAYING, or timeout.
 
         Used after a VLC source reload while the rotation screen is
@@ -584,12 +590,18 @@ class PlaybackMonitor:
         if not self.obs_controller:
             return False
         deadline = time.monotonic() + timeout
+        poll_count = 0
         while time.monotonic() < deadline:
-            status = self.obs_controller.get_media_input_status(self.vlc_source_name)
-            if status and status.get('media_state') == 'OBS_MEDIA_STATE_PLAYING':
-                return True
+            poll_count += 1
+            try:
+                status = self.obs_controller.get_media_input_status(self.vlc_source_name)
+                if status and status.get('media_state') == 'OBS_MEDIA_STATE_PLAYING':
+                    logger.info(f"VLC ready after {poll_count} polls")
+                    return True
+            except Exception as e:
+                logger.info(f"[TIMING] get_media_input_status call raised exception: {type(e).__name__}: {e}")
             time.sleep(0.1)
-        logger.debug("Timed out waiting for VLC to start playing after reload")
+        logger.info(f"[TIMING] Timed out waiting for VLC after {poll_count} polls over {timeout:.1f}s")
         return False
 
     # ------------------------------------------------------------------
