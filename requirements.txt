@@ -1,7 +1,7 @@
 obsws-python>=1.8.0
 python-dotenv>=1.2.2
 requests>=2.34.2
-yt-dlp>=2026.6.9
+yt-dlp>=2026.7.4
 # kickpython>=0.1.0  # Optional: for Kick integration - not needed, we baked it into the codebase
 aiOhttp
 websockets
