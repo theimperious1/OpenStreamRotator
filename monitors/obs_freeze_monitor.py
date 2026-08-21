@@ -14,14 +14,9 @@ import os
 import subprocess
 import time
 from typing import Optional
+import shutil
 
 logger = logging.getLogger(__name__)
-
-# Default OBS install locations (Windows)
-_DEFAULT_OBS_PATHS = [
-    os.path.expandvars(r"%ProgramFiles%\obs-studio\bin\64bit\obs64.exe"),
-    os.path.expandvars(r"%ProgramFiles(x86)%\obs-studio\bin\64bit\obs64.exe"),
-]
 
 # How often we sample render frames (seconds)
 _POLL_INTERVAL = 20
@@ -201,6 +196,11 @@ class OBSFreezeMonitor:
         Returns:
             True if launch was initiated (does not guarantee OBS is ready).
         """
+        # Re-validate or re-discover the path
+        if not self._obs_exe or not os.path.isfile(self._obs_exe):
+            logger.warning("OBS freeze recovery: stored path invalid, re-detecting...")
+            self._obs_exe = self._find_obs_executable()
+
         if not self._obs_exe:
             logger.error(
                 "OBS freeze recovery: cannot launch OBS — executable path unknown. "
@@ -308,10 +308,21 @@ class OBSFreezeMonitor:
     @staticmethod
     def _find_obs_executable() -> Optional[str]:
         """Try to locate obs64.exe on the system."""
-        for path in _DEFAULT_OBS_PATHS:
-            if os.path.isfile(path):
+        candidates = [
+            os.path.expandvars(r"%ProgramFiles%\obs-studio\bin\64bit\obs64.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\obs-studio\bin\64bit\obs64.exe"),
+        ]
+
+        # Also check PATH
+        which = shutil.which("obs64.exe")
+        if which:
+            candidates.insert(0, which)
+
+        for path in candidates:
+            if path and os.path.isfile(path):
                 logger.info(f"OBS freeze monitor: found OBS at {path}")
                 return path
+
         logger.warning(
             "OBS freeze monitor: could not auto-detect OBS executable. "
             "Set OBS_PATH in .env for freeze recovery to work."
